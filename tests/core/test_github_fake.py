@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
-from forge.core.github import GitHubClient, GitHubError
+from forge.core.github import CiStatus, GitHubClient, GitHubError
 from forge.core.github_fake import FakeGitHub
 
 
@@ -409,3 +409,20 @@ def test_list_pulls_does_not_compute_mergeable(gh: FakeGitHub) -> None:
     pr = gh.create_pull("p", "", "task/1", "main")
     assert gh.get_pull(pr.number).mergeable is True
     assert [p.mergeable for p in gh.list_pulls()] == [None]
+
+
+# ---------------------------------------------------------------- CI
+
+
+def test_commit_ci_defaults_to_none(gh: FakeGitHub) -> None:
+    assert gh.commit_ci("a" * 40) == CiStatus("none", 0, (), ())
+
+
+def test_fake_set_ci(gh: FakeGitHub) -> None:
+    failing = CiStatus("failure", 3, ("build",), ("lint",))
+    gh.fake_set_ci("a" * 40, failing)
+    assert gh.commit_ci("a" * 40) == failing
+    assert gh.commit_ci("b" * 40) == CiStatus("none", 0, (), ())
+    passing = CiStatus("success", 1, (), ())
+    gh.fake_set_ci("a" * 40, passing)
+    assert gh.commit_ci("a" * 40) == passing

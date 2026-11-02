@@ -112,6 +112,18 @@ class CommitInfo:
     trailers: dict[str, str]
 
 
+@dataclass(frozen=True)
+class CommitFiles:
+    """A commit with the paths it changed, as returned by :meth:`Git.commits_with_files`.
+
+    ``files`` are repository-relative paths changed versus the first parent, in git's order.
+    Renames are not detected: a renamed file appears as its old and its new path.
+    """
+
+    commit: CommitInfo
+    files: tuple[str, ...]
+
+
 def parse_version(text: str) -> tuple[int, int, int]:
     """Parse ``git --version`` output such as ``git version 2.39.3 (Apple Git-146)``.
 
@@ -143,6 +155,25 @@ def _parse_trailers(text: str) -> dict[str, str]:
 
 def _split_z(output: str) -> list[str]:
     return [item for item in output.split("\x00") if item]
+
+
+_COMMIT_FORMAT = "%x00".join(["%H", "%an", "%ae", "%cI", "%s", "%(trailers:only,unfold)"])
+"""``git log`` format of one commit: the :class:`CommitInfo` fields separated by NUL."""
+
+_COMMIT_FIELDS = 6
+
+
+def _commit_from_fields(fields: Sequence[str]) -> CommitInfo:
+    """Build a :class:`CommitInfo` from the fields printed by :data:`_COMMIT_FORMAT`."""
+    sha, author, email, date, subject, trailers = fields
+    return CommitInfo(
+        sha=sha,
+        author=author,
+        author_email=email,
+        date=datetime.fromisoformat(date),
+        subject=subject,
+        trailers=_parse_trailers(trailers),
+    )
 
 
 class Git:
@@ -358,8 +389,7 @@ class Git:
         With ``first_parent`` only the first parent of each merge is followed
         (``--first-parent``), so commits brought in by merges are skipped.
         """
-        fmt = "%x00".join(["%H", "%an", "%ae", "%cI", "%s", "%(trailers:only,unfold)"])
-        args = ["log", f"--format={fmt}%x1e"]
+        args = ["log", f"--format={_COMMIT_FORMAT}%x1e"]
         if first_parent:
             args.append("--first-parent")
         out = self.run(*args, range_, "--").stdout
@@ -368,17 +398,62 @@ class Git:
             record = record.lstrip("\n")
             if not record:
                 continue
-            sha, author, email, date, subject, trailers = record.split(_FIELD_SEP, 5)
-            result.append(
-                CommitInfo(
-                    sha=sha,
-                    author=author,
-                    author_email=email,
-                    date=datetime.fromisoformat(date),
-                    subject=subject,
-                    trailers=_parse_trailers(trailers),
-                )
-            )
+            result.append(_commit_from_fields(record.split(_FIELD_SEP, _COMMIT_FIELDS - 1)))
+        return result
+
+    def commits_with_files(self, range_: str) -> list[CommitFiles]:
+        """Return non-merge commits in ``range_`` with the paths each one changed, newest first.
+
+        Paths are repository-relative and compared with the commit's first parent (a root
+        commit lists every file it adds). Merge commits are excluded (``--no-merges``); a
+        commit that changes nothing (e.g. an empty claim commit) has ``files == ()``. Renames
+        are not detected (``--no-renames``), so a rename lists both the old and the new path.
+        Any path name is supported (spaces, newlines, non-ASCII): the output is NUL-delimited.
+        """
+        # With -z git prints, per commit, the formatted header and a NUL; then, only if the
+        # commit changed files, "\n" followed by NUL-terminated paths. Nothing separates the
+        # last path from the next header, so the format starts with an empty field: split on
+        # NUL, every header is an empty token (never a valid path) plus _COMMIT_FIELDS tokens,
+        # and the paths are the tokens up to the next empty one.
+        out = self.run(
+            "-c",
+            "log.showRoot=true",
+            "-c",
+            "log.showSignature=false",
+            "-c",
+            "diff.relative=false",
+            "log",
+            "-z",
+            "--no-merges",
+            "--no-renames",
+            "--name-only",
+            f"--format=%x00{_COMMIT_FORMAT}",
+            range_,
+            "--",
+        ).stdout
+        tokens = out.split(_FIELD_SEP)
+        result: list[CommitFiles] = []
+        i = 0
+        while i < len(tokens) - 1:
+            header = tokens[i + 1 : i + 1 + _COMMIT_FIELDS]
+            if (
+                tokens[i] != ""
+                or len(header) != _COMMIT_FIELDS
+                or not _FULL_SHA.fullmatch(header[0])
+            ):
+                raise GitError(["log", range_], 0, f"unexpected git log output near {header!r}")
+            i += 1 + _COMMIT_FIELDS
+            files: list[str] = []
+            while i < len(tokens) and tokens[i] != "":
+                files.append(tokens[i])
+                i += 1
+            if files:
+                if not files[0].startswith("\n"):
+                    raise GitError(["log", range_], 0, f"unexpected git log output {files[0]!r}")
+                files[0] = files[0][1:]
+            result.append(CommitFiles(_commit_from_fields(header), tuple(files)))
+        if i < len(tokens) and tokens[i] != "":
+            raise GitError(["log", range_], 0, "unexpected trailing git log output")
         return result
 
     def commit_date(self, ref: str) -> datetime:

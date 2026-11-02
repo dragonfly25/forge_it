@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -25,6 +25,7 @@ from forge.core.errors import ForgeError, PreconditionError
 IssueState = Literal["open", "closed"]
 StateFilter = Literal["open", "closed", "all"]
 ReviewEvent = Literal["APPROVE", "REQUEST_CHANGES", "COMMENT"]
+CiState = Literal["success", "failure", "pending", "none"]
 
 STATE_REASONS: tuple[str, ...] = ("completed", "not_planned", "reopened")
 """Values GitHub accepts for an issue's ``state_reason``."""
@@ -145,6 +146,67 @@ class Review:
     author: str
     state: str
     body: str
+
+
+@dataclass(frozen=True)
+class CiStatus:
+    """Combined CI state of a commit: its check runs plus its commit statuses.
+
+    ``state`` is ``failure`` if anything failed, else ``pending`` if anything is still running,
+    else ``none`` when there is nothing at all (``total == 0``), else ``success``. ``total``
+    counts the check runs (latest per app, check suite and name) and statuses (latest per
+    context) considered; ``failing`` and ``pending`` hold their names (check run name or
+    status context), sorted and without duplicates.
+    """
+
+    state: CiState
+    total: int
+    failing: tuple[str, ...]
+    pending: tuple[str, ...]
+
+
+CI_FAILING_CONCLUSIONS: frozenset[str] = frozenset(
+    {"failure", "timed_out", "cancelled", "action_required", "startup_failure"}
+)
+"""Conclusions of a completed check run that make the commit's CI fail. Every other
+conclusion (``success``, ``neutral``, ``skipped``, ``stale``…) counts as passing."""
+
+CI_FAILING_STATUSES: frozenset[str] = frozenset({"failure", "error"})
+"""Commit status states that make the commit's CI fail."""
+
+
+def combine_ci(
+    check_runs: Sequence[tuple[str, str, str | None]],
+    statuses: Sequence[tuple[str, str]],
+) -> CiStatus:
+    """Combine check runs ``(name, status, conclusion)`` and statuses ``(context, state)``.
+
+    Inputs must already be reduced to the latest check run per app, check suite and name, and
+    the latest status per context; two runs may share a name. See :class:`CiStatus` for the rules.
+    """
+    failing: set[str] = set()
+    pending: set[str] = set()
+    for name, status, conclusion in check_runs:
+        if status != "completed":
+            pending.add(name)
+        elif conclusion in CI_FAILING_CONCLUSIONS:
+            failing.add(name)
+    for context, status_state in statuses:
+        if status_state in CI_FAILING_STATUSES:
+            failing.add(context)
+        elif status_state == "pending":
+            pending.add(context)
+    total = len(check_runs) + len(statuses)
+    state: CiState
+    if failing:
+        state = "failure"
+    elif pending:
+        state = "pending"
+    elif total == 0:
+        state = "none"
+    else:
+        state = "success"
+    return CiStatus(state, total, tuple(sorted(failing)), tuple(sorted(pending)))
 
 
 class GitHubError(ForgeError):
@@ -346,6 +408,11 @@ class GitHubClient(Protocol):
         """Paths changed by a pull request."""
         ...
 
+    # CI
+    def commit_ci(self, sha: str) -> CiStatus:
+        """Combined CI state of a commit (check runs and commit statuses)."""
+        ...
+
 
 # --------------------------------------------------------------------------- gh CLI client
 
@@ -463,6 +530,50 @@ def _pull_from_json(data: dict[str, Any]) -> PullRequest:
         requested_reviewers=tuple(_login(u) for u in data.get("requested_reviewers") or ()),
         url=str(data.get("html_url") or ""),
     )
+
+
+def _latest_by_key(
+    rows: Sequence[dict[str, Any]], key: Callable[[dict[str, Any]], Hashable]
+) -> list[dict[str, Any]]:
+    """Keep, for each value of ``key(row)``, the row with the highest ``id`` (newest)."""
+    latest: dict[Hashable, dict[str, Any]] = {}
+    for row in rows:
+        group = key(row)
+        current = latest.get(group)
+        if current is None or int(row.get("id") or 0) > int(current.get("id") or 0):
+            latest[group] = row
+    return list(latest.values())
+
+
+def _nested_id(row: dict[str, Any], field: str) -> str | None:
+    """``row[field]["id"]`` as text, or ``None`` when the field or its id is missing."""
+    value = row.get(field)
+    if isinstance(value, dict) and value.get("id") is not None:
+        return str(value["id"])
+    return None
+
+
+def _check_run_key(row: dict[str, Any]) -> tuple[str | None, str | None, str]:
+    """Identity of a check run across re-runs: ``(app id, check suite id, name)``.
+
+    Runs with the same name from different apps or suites are distinct checks (one may fail
+    while the other passes); a missing app or suite collapses to ``None``.
+    """
+    return (_nested_id(row, "app"), _nested_id(row, "check_suite"), str(row.get("name") or ""))
+
+
+def _status_key(row: dict[str, Any]) -> str:
+    """Identity of a commit status: its ``context``."""
+    return str(row.get("context") or "")
+
+
+def _page_items(pages: Sequence[Any], field: str) -> list[dict[str, Any]]:
+    """Collect ``page[field]`` from paginated object responses (e.g. ``check_runs``)."""
+    items: list[dict[str, Any]] = []
+    for page in pages:
+        if isinstance(page, dict):
+            items.extend(r for r in page.get(field) or () if isinstance(r, dict))
+    return items
 
 
 def _review_from_json(data: dict[str, Any], pr_number: int) -> Review:
@@ -835,6 +946,36 @@ class GhCliClient:
         """Paths changed by a pull request."""
         path = self._path(f"pulls/{number}/files", {"per_page": "100"})
         return [str(r["filename"]) for r in self._call("GET", path, paginate=True) or []]
+
+    # ------------------------------------------------------------------ CI
+
+    def commit_ci(self, sha: str) -> CiStatus:
+        """Combined CI state of a commit (check runs and commit statuses).
+
+        Check runs come from ``commits/{sha}/check-runs`` (``filter=latest``, then reduced to
+        the newest run per app, check suite and name); statuses from the combined
+        ``commits/{sha}/status`` endpoint, whose ``statuses`` list holds the latest status per
+        context. Its top-level ``state`` is ignored because GitHub reports ``pending`` when
+        there are no statuses.
+        """
+        ref = quote(sha, safe="")
+        runs_path = self._path(f"commits/{ref}/check-runs", {"filter": "latest", "per_page": "100"})
+        runs = _latest_by_key(
+            _page_items(self._call("GET", runs_path, paginate=True) or [], "check_runs"),
+            _check_run_key,
+        )
+        status_path = self._path(f"commits/{ref}/status", {"per_page": "100"})
+        statuses = _latest_by_key(
+            _page_items(self._call("GET", status_path, paginate=True) or [], "statuses"),
+            _status_key,
+        )
+        return combine_ci(
+            [
+                (str(r.get("name") or ""), str(r.get("status") or ""), r.get("conclusion"))
+                for r in runs
+            ],
+            [(str(s.get("context") or ""), str(s.get("state") or "")) for s in statuses],
+        )
 
 
 if TYPE_CHECKING:

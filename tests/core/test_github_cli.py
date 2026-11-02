@@ -12,6 +12,7 @@ import pytest
 from forge.core.errors import ExitCode, PreconditionError
 from forge.core.github import (
     MIN_GH_VERSION,
+    CiStatus,
     GhCliClient,
     GitHubClient,
     GitHubError,
@@ -466,3 +467,173 @@ def test_min_gh_version_supports_slurp() -> None:
 def test_parse_gh_version_rejects_garbage() -> None:
     with pytest.raises(ValueError, match="gh version"):
         parse_gh_version("command not found: gh")
+
+
+# --------------------------------------------------------------------------- commit_ci
+
+SHA = "a" * 40
+
+
+def run_json(
+    name: str, status: str = "completed", conclusion: str | None = "success", *, id: int = 1
+) -> dict[str, Any]:
+    return {"id": id, "name": name, "status": status, "conclusion": conclusion}
+
+
+def status_json(context: str, state: str, *, id: int = 1) -> dict[str, Any]:
+    return {"id": id, "context": context, "state": state}
+
+
+def ci(
+    runs: list[dict[str, Any]] | list[list[dict[str, Any]]],
+    statuses: list[dict[str, Any]],
+    *,
+    combined_state: str = "pending",
+) -> tuple[CiStatus, FakeRunner]:
+    """Run commit_ci against canned pages. ``runs`` is one page, or a list of pages."""
+    run_pages = runs if runs and isinstance(runs[0], list) else [runs]
+    runner = FakeRunner()
+    runner.add(
+        [{"total_count": sum(len(p) for p in run_pages), "check_runs": p} for p in run_pages]
+    )
+    runner.add([{"state": combined_state, "total_count": len(statuses), "statuses": statuses}])
+    return client(runner).commit_ci(SHA), runner
+
+
+def test_commit_ci_calls_both_endpoints_paginated() -> None:
+    _, runner = ci([], [])
+    assert runner.calls[0].argv == [
+        "gh",
+        "api",
+        "--paginate",
+        "--slurp",
+        f"repos/acme/shop/commits/{SHA}/check-runs?filter=latest&per_page=100",
+    ]
+    assert runner.calls[1].argv == [
+        "gh",
+        "api",
+        "--paginate",
+        "--slurp",
+        f"repos/acme/shop/commits/{SHA}/status?per_page=100",
+    ]
+
+
+def test_commit_ci_nothing_is_none_despite_combined_pending() -> None:
+    status, _ = ci([], [], combined_state="pending")
+    assert status == CiStatus("none", 0, (), ())
+
+
+def test_commit_ci_all_passing_is_success() -> None:
+    runs = [
+        run_json("build", id=1),
+        run_json("lint", conclusion="neutral", id=2),
+        run_json("deploy", conclusion="skipped", id=3),
+        run_json("old", conclusion="stale", id=4),
+    ]
+    status, _ = ci(runs, [status_json("ci/legacy", "success")], combined_state="success")
+    assert status == CiStatus("success", 5, (), ())
+
+
+@pytest.mark.parametrize(
+    "conclusion", ["failure", "timed_out", "cancelled", "action_required", "startup_failure"]
+)
+def test_commit_ci_failing_conclusions(conclusion: str) -> None:
+    runs = [run_json("build", conclusion=conclusion, id=1), run_json("lint", id=2)]
+    status, _ = ci(runs, [])
+    assert status == CiStatus("failure", 2, ("build",), ())
+
+
+@pytest.mark.parametrize("state", ["failure", "error"])
+def test_commit_ci_failing_status(state: str) -> None:
+    status, _ = ci([run_json("build")], [status_json("ci/jenkins", state)])
+    assert status == CiStatus("failure", 2, ("ci/jenkins",), ())
+
+
+@pytest.mark.parametrize("run_status", ["queued", "in_progress", "waiting", "requested", "pending"])
+def test_commit_ci_unfinished_check_run_is_pending(run_status: str) -> None:
+    status, _ = ci([run_json("build", run_status, None), run_json("lint")], [])
+    assert status == CiStatus("pending", 2, (), ("build",))
+
+
+def test_commit_ci_pending_status() -> None:
+    status, _ = ci([run_json("build")], [status_json("ci/jenkins", "pending")])
+    assert status == CiStatus("pending", 2, (), ("ci/jenkins",))
+
+
+def test_commit_ci_failure_wins_over_pending_and_names_are_sorted() -> None:
+    runs = [
+        run_json("zeta", conclusion="failure", id=1),
+        run_json("alpha", "in_progress", None, id=2),
+        run_json("beta", conclusion="timed_out", id=3),
+    ]
+    status, _ = ci(runs, [status_json("ci/a", "error"), status_json("ci/b", "pending")])
+    assert status == CiStatus("failure", 5, ("beta", "ci/a", "zeta"), ("alpha", "ci/b"))
+
+
+def test_commit_ci_latest_check_run_per_name_wins() -> None:
+    runs = [
+        run_json("build", conclusion="failure", id=10),
+        run_json("build", conclusion="success", id=12),  # re-run, newest
+        run_json("lint", "in_progress", None, id=30),  # newest lint, still running
+        run_json("lint", conclusion="success", id=20),
+    ]
+    status, _ = ci(runs, [])
+    assert status == CiStatus("pending", 2, (), ("lint",))
+
+
+def test_commit_ci_same_name_in_two_suites_are_distinct_checks() -> None:
+    def suite_run(suite: int, app: int, conclusion: str, id: int) -> dict[str, Any]:
+        return {
+            **run_json("test", conclusion=conclusion, id=id),
+            "app": {"id": app},
+            "check_suite": {"id": suite},
+        }
+
+    runs = [
+        suite_run(100, 1, "failure", 5),  # suite 100 (e.g. one workflow) fails
+        suite_run(200, 1, "success", 9),  # suite 200 (another workflow), newer id, passes
+        suite_run(300, 2, "success", 7),  # another app's "test"
+    ]
+    status, _ = ci(runs, [])
+    assert status == CiStatus("failure", 3, ("test",), ())
+
+
+def test_commit_ci_rerun_in_the_same_suite_still_replaces_the_old_run() -> None:
+    runs = [
+        {
+            **run_json("test", conclusion="failure", id=5),
+            "app": {"id": 1},
+            "check_suite": {"id": 9},
+        },
+        {**run_json("test", id=6), "app": {"id": 1}, "check_suite": {"id": 9}},
+    ]
+    status, _ = ci(runs, [])
+    assert status == CiStatus("success", 1, (), ())
+
+
+def test_commit_ci_merges_check_run_pages() -> None:
+    pages = [
+        [run_json("a", id=1), run_json("b", id=2)],
+        [run_json("c", conclusion="failure", id=3), run_json("a", "queued", None, id=4)],
+    ]
+    status, _ = ci(pages, [])
+    assert status == CiStatus("failure", 3, ("c",), ("a",))
+
+
+def test_commit_ci_merges_status_pages() -> None:
+    runner = FakeRunner()
+    runner.add([{"total_count": 0, "check_runs": []}])
+    runner.add(
+        [
+            {"state": "failure", "statuses": [status_json("s1", "success", id=1)]},
+            {"state": "failure", "statuses": [status_json("s2", "failure", id=2)]},
+        ]
+    )
+    assert client(runner).commit_ci(SHA) == CiStatus("failure", 2, ("s2",), ())
+
+
+def test_commit_ci_error_propagates() -> None:
+    runner = FakeRunner().add(None, code=1, err="gh: Not Found (HTTP 404)")
+    with pytest.raises(GitHubError) as info:
+        client(runner).commit_ci(SHA)
+    assert info.value.status == 404

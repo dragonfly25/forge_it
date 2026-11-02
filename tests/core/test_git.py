@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from forge.core.errors import ForgeError
-from forge.core.git import Git, GitError, Lease, parse_version
+from forge.core.git import CommitFiles, Git, GitError, Lease, parse_version
 
 if TYPE_CHECKING:
     from conftest import GitWorld
@@ -741,3 +741,91 @@ def test_commit_tree_with_date(git_world: GitWorld) -> None:
     assert alice.commits(sha)[0].date == when
     with pytest.raises(ValueError, match="timezone-aware"):
         alice.commit_tree(alice.tree_of(base), [base], "x", date=datetime(2026, 1, 1))
+
+
+# --------------------------------------------------------------------------- commits_with_files
+
+
+def test_commits_with_files(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    first = git_world.commit_file(alice, "src/a.py", "a\n", "feat: a")
+    claim = alice.commit("forge: claim T1", allow_empty=True, trailers={"Forge-Claim": "alice"})
+    (alice.cwd / "src" / "b.py").write_text("b\n")
+    (alice.cwd / "docs").mkdir()
+    (alice.cwd / "docs" / "x.md").write_text("x\n")
+    alice.add()
+    second = alice.commit("feat: b and docs")
+
+    result = alice.commits_with_files("origin/main..HEAD")
+    assert [c.commit.sha for c in result] == [second, claim, first]
+    assert all(isinstance(c, CommitFiles) for c in result)
+    assert sorted(result[0].files) == ["docs/x.md", "src/b.py"]
+    assert result[1].files == ()
+    assert result[1].commit.trailers == {"Forge-Claim": "alice"}
+    assert result[1].commit.subject == "forge: claim T1"
+    assert result[2].files == ("src/a.py",)
+    # Same CommitInfo as Git.commits.
+    assert [c.commit for c in result] == alice.commits("origin/main..HEAD")
+
+
+def test_commits_with_files_empty_range_and_root(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    assert alice.commits_with_files("origin/main..HEAD") == []
+    root = alice.commits_with_files("HEAD")
+    assert [(c.commit.sha, c.files) for c in root] == [(git_world.initial_sha, ("README.md",))]
+
+
+def test_commits_with_files_empty_commits_only(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    one = alice.commit("forge: claim A", allow_empty=True)
+    two = alice.commit("forge: claim B", allow_empty=True, trailers={"Forge-Task": "B"})
+    result = alice.commits_with_files("origin/main..HEAD")
+    assert [(c.commit.sha, c.files) for c in result] == [(two, ()), (one, ())]
+
+
+def test_commits_with_files_excludes_merges(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    base = git_world.initial_sha
+    left = git_world.commit_file(alice, "left.txt", "l\n", "feat: left")
+    alice.checkout("side", create_from=base)
+    right = git_world.commit_file(alice, "right.txt", "r\n", "feat: right")
+    alice.checkout("main")
+    alice.run("merge", "--no-ff", "--no-edit", "side")
+    merge = alice.rev_parse("HEAD")
+    assert merge not in (left, right)
+
+    result = alice.commits_with_files(f"{base}..HEAD")
+    assert {c.commit.sha for c in result} == {left, right}
+    by_sha = {c.commit.sha: c.files for c in result}
+    assert by_sha == {left: ("left.txt",), right: ("right.txt",)}
+
+
+def test_commits_with_files_odd_paths(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    names = ["with space.txt", "new\nline.txt", "caffè/naïve ✓.md", "tab\there", '"quoted"']
+    for name in names:
+        target = alice.cwd / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x\n")
+    alice.add()
+    odd = alice.commit("feat: odd names")
+    empty = alice.commit("forge: claim", allow_empty=True)
+    (alice.cwd / "\nleading-newline").write_text("y\n")
+    alice.add()
+    lead = alice.commit("feat: leading newline")
+
+    result = alice.commits_with_files("origin/main..HEAD")
+    assert [c.commit.sha for c in result] == [lead, empty, odd]
+    assert result[0].files == ("\nleading-newline",)
+    assert result[1].files == ()
+    assert sorted(result[2].files) == sorted(names)
+
+
+def test_commits_with_files_rename_lists_both_paths(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    alice.config_set("diff.renames", "true")
+    alice.run("mv", "README.md", "README.txt")
+    renamed = alice.commit("chore: rename")
+    result = alice.commits_with_files("origin/main..HEAD")
+    assert result[0].commit.sha == renamed
+    assert sorted(result[0].files) == ["README.md", "README.txt"]
