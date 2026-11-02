@@ -25,7 +25,7 @@ from typing import Any, Protocol
 
 from forge.core.config import ForgeConfig
 from forge.core.errors import ExitCode, ForgeError, PreconditionError
-from forge.core.git import Git, GitError
+from forge.core.git import CommitInfo, Git, GitError
 from forge.core.github import GitHubClient, GitHubError, Issue
 from forge.core.output import Result
 from forge.core.tasks import (
@@ -115,11 +115,14 @@ class TaskBranch:
 
     ``trailers`` holds one mapping per commit between the merge-base with the default branch
     and the tip, following first parents only, newest first. Which event counts depends on
-    the task id, known only once the issue is parsed (see :meth:`state`).
+    the task id, known only once the issue is parsed (see :meth:`state`). ``commits`` holds
+    the same commits with their sha and committer date, when gathered from git (claim and
+    lease logic needs them; the pure refresh plan does not).
     """
 
     tip: str
     trailers: tuple[Mapping[str, str], ...] = ()
+    commits: tuple[CommitInfo, ...] = ()
 
     def state(self, task_id: str) -> BranchState:
         """Return the branch state, counting only events whose ``Forge-Task`` is ``task_id``."""
@@ -143,14 +146,15 @@ def _config_hint(default_branch: str, remote: str) -> str:
     )
 
 
-def check_full_history(git: Git) -> None:
+def check_full_history(git: Git, command: str = "refresh") -> None:
     """Raise :class:`PreconditionError` (exit 5) when ``git`` is a shallow clone.
 
     Merge-bases between task branches and the default branch need the full history.
+    ``command`` names what needs it in the message (``refresh``, ``claims``...).
     """
     if git.is_shallow():
         raise PreconditionError(
-            "the repository is a shallow clone; refresh needs full history to find merge-bases",
+            f"the repository is a shallow clone; {command} needs full history to find merge-bases",
             hint="run `git fetch --unshallow`; in GitHub Actions use actions/checkout with "
             "`fetch-depth: 0`",
         )
@@ -223,14 +227,19 @@ def gather_task_branches(git: Git, default_branch: str, remote: str = "origin") 
             )
             continue
         commits = git.commits(f"{merge_base}..{tip}", first_parent=True)
-        branches[int(name)] = TaskBranch(tip, tuple(c.trailers for c in commits))
+        branches[int(name)] = TaskBranch(tip, tuple(c.trailers for c in commits), tuple(commits))
     return BranchScan(branches, tuple(warnings))
 
 
 # --------------------------------------------------------------------------- plan
 
 
-def _parse_records(issues: Sequence[Issue], warnings: list[str]) -> list[TaskRecord]:
+def parse_records(issues: Sequence[Issue], warnings: list[str]) -> list[TaskRecord]:
+    """Parse the Forge block of each issue (sorted by number) into :class:`TaskRecord`.
+
+    Issues whose block is invalid or missing are skipped, with a warning appended to
+    ``warnings``.
+    """
     records: list[TaskRecord] = []
     for issue in sorted(issues, key=lambda i: i.number):
         try:
@@ -281,7 +290,7 @@ def plan_refresh(
     Only issues whose labels actually change appear in ``changes``.
     """
     warnings = list(warnings)
-    records = _parse_records(issues, warnings)
+    records = parse_records(issues, warnings)
 
     owner: dict[str, int] = {}
     deps_closed: dict[str, bool] = {}

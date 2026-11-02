@@ -6,7 +6,7 @@ import stat
 import subprocess
 import threading
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -701,3 +701,43 @@ def test_fetch_explicit_refspecs_on_single_branch_clone(git_world: GitWorld) -> 
     single.fetch(refspecs=["+refs/heads/task/*:refs/remotes/origin/task/*"])  # prunes
     assert single.rev_parse("origin/task/3") is None
     assert single.rev_parse("origin/main") == git_world.initial_sha
+
+
+# ---------------------------------------------------------------- hooks and dates (Phase 3)
+
+
+def _install_pre_push(git: Git, body: str) -> None:
+    hook = git.cwd / ".git" / "hooks" / "pre-push"
+    hook.write_text("#!/bin/sh\n" + body)
+    hook.chmod(hook.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def test_push_no_verify_skips_the_pre_push_hook(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    _install_pre_push(alice, "echo 'hook says no' >&2\nexit 1\n")
+    ref = "refs/heads/task/60"
+    sha = _claim_commit(alice, "alice")
+
+    with pytest.raises(GitError) as excinfo:
+        alice.push(sha, ref, lease=Lease(ref, None))
+    assert "hook says no" in excinfo.value.stderr
+    assert git_world.remote_git.rev_parse(ref) is None
+
+    assert alice.push(sha, ref, lease=Lease(ref, None), no_verify=True).ok
+    assert git_world.remote_git.rev_parse(ref) == sha
+
+    with pytest.raises(GitError):
+        alice.delete_remote_branch("task/60", sha)
+    assert alice.delete_remote_branch("task/60", sha, no_verify=True).ok
+    assert git_world.remote_git.rev_parse(ref) is None
+
+
+def test_commit_tree_with_date(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    base = git_world.initial_sha
+    when = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+    sha = alice.commit_tree(alice.tree_of(base), [base], "forge: claim", date=when)
+    assert alice.commit_date(sha) == when
+    assert alice.commits(sha)[0].date == when
+    with pytest.raises(ValueError, match="timezone-aware"):
+        alice.commit_tree(alice.tree_of(base), [base], "x", date=datetime(2026, 1, 1))

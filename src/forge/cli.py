@@ -8,8 +8,13 @@ from typing import Annotated
 import typer
 
 from forge import __version__
+from forge.commands import heartbeat as heartbeat_cmd
+from forge.commands import next as next_cmd
+from forge.commands import reclaim as reclaim_cmd
 from forge.commands import refresh as refresh_cmd
+from forge.commands import release_claim as release_cmd
 from forge.commands._output import GlobalOptions, run_command
+from forge.commands.task import task_app
 from forge.core.output import Result
 
 app = typer.Typer(
@@ -65,3 +70,8 @@ def main(
 app.command("refresh", help="Recompute task status labels and unblock dependents.")(
     refresh_cmd.refresh
 )
+app.command("next", help="Select and claim a task (spec §8.1).")(next_cmd.next_task)
+app.add_typer(task_app, name="task")
+app.command("heartbeat", help="Refresh the lease of the current task.")(heartbeat_cmd.heartbeat)
+app.command("release-claim", help="Release the current task's claim.")(release_cmd.release_claim)
+app.command("reclaim", help="Take over a task whose claim went stale.")(reclaim_cmd.reclaim)

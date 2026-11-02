@@ -418,13 +418,26 @@ class Git:
         parents: Sequence[str],
         message: str,
         trailers: Mapping[str, str] | None = None,
+        *,
+        date: datetime | None = None,
     ) -> str:
-        """Create a commit object without touching HEAD, the index or the working tree."""
+        """Create a commit object without touching HEAD, the index or the working tree.
+
+        ``date`` (timezone-aware) sets both the author and the committer date; by default git
+        uses the current time. Forge passes its injectable clock here, so that claim order and
+        staleness follow the same clock in production and in tests.
+        """
         args = ["commit-tree", tree]
         for parent in parents:
             args += ["-p", parent]
         args += ["-F", "-"]
-        return self._out(*args, input=format_message(message, trailers))
+        env: dict[str, str] | None = None
+        if date is not None:
+            if date.tzinfo is None:
+                raise ValueError("commit_tree date must be timezone-aware")
+            stamp = f"{int(date.timestamp())} +0000"
+            env = {"GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
+        return self.run(*args, input=format_message(message, trailers), env=env).stdout.strip()
 
     # ------------------------------------------------------------------ push
 
@@ -435,11 +448,14 @@ class Git:
         *,
         lease: Lease | None = None,
         remote: str = "origin",
+        no_verify: bool = False,
     ) -> PushResult:
         """Push ``src`` (a sha or ref, empty to delete) to ``dst_ref`` on ``remote``.
 
         With a ``lease`` the push is a compare-and-swap (``--force-with-lease``); without one
         it is a plain push. ``lease.ref`` must equal ``dst_ref`` (``ValueError`` otherwise).
+        ``no_verify`` skips the user's ``pre-push`` hook (``--no-verify``); Forge uses it for
+        its own event pushes, which carry no user code (ADR 0009).
 
         Outcomes:
 
@@ -457,6 +473,8 @@ class Git:
         if lease is not None and lease.ref != dst_ref:
             raise ValueError(f"lease ref {lease.ref!r} does not match push destination {dst_ref!r}")
         args = ["push", "--porcelain"]
+        if no_verify:
+            args.append("--no-verify")
         if lease is not None:
             args.append(lease.option())
         args += [remote, f"{src}:{dst_ref}"]
@@ -530,16 +548,24 @@ class Git:
         return self._out("rev-parse", "--verify", "--end-of-options", rev)
 
     def delete_remote_branch(
-        self, branch: str, expected_sha: str, remote: str = "origin"
+        self,
+        branch: str,
+        expected_sha: str,
+        remote: str = "origin",
+        *,
+        no_verify: bool = False,
     ) -> PushResult:
         """Delete ``branch`` on ``remote`` only if it still points at ``expected_sha``.
 
         ``ok`` means the ref is absent afterwards (deleted by us or, concurrently, by someone
         else). On a re-run the ref may already be gone and the stale lease yields
         ``rejected``: callers must treat ``rejected`` with an absent remote ref as done.
+        ``no_verify`` skips the user's ``pre-push`` hook, as in :meth:`push`.
         """
         ref = f"refs/heads/{branch}"
-        return self.push("", ref, lease=Lease(ref, expected_sha), remote=remote)
+        return self.push(
+            "", ref, lease=Lease(ref, expected_sha), remote=remote, no_verify=no_verify
+        )
 
     # ------------------------------------------------------------------ rebase
 
