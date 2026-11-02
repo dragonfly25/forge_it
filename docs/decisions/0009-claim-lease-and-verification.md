@@ -201,6 +201,35 @@ The worktree path is `<profile.worktrees_dir or <parent-of-repo>/<repo>-worktree
 - Claims left on closed issues do not hold zones.
 - Claim and release commits take their committer date from the injected clock
   (`Git.commit_tree(date=...)`).
-- `heartbeat` and `release-claim` also accept **my own stale claim**, when the branch's last event
-  is still my claim and nobody has reclaimed it. Each reports a warning. A heartbeat renews the
-  claim.
+- `release-claim` also accepts **my own stale claim** when the branch's last event is still my
+  claim, and warns. Releasing never adds a zone holder, so this is safe.
+- `heartbeat` **refuses** in two cases, both with exit 5:
+  - my own stale claim. While it was stale it held no zones, so someone may since have claimed an
+    overlapping task. The hint is `forge reclaim <n>`, which renews the claim through the CAS push
+    and verification.
+  - a claim whose post-claim steps are not complete (the lease comment does not name its sha). A
+    heartbeat would mark it complete without verification. The hint is `forge next --task <n>`.
+
+### Amendment: two runs under the same identity (review of Phase 3)
+Login and agent id alone cannot tell an interrupted run from **another run that is still alive**
+under the same identity. Two sessions of the same tool with the same account can run at once.
+- Before pushing a claim, `next` writes a **pending-claim record** under the git common dir:
+  `<git-common-dir>/forge/pending/task-<n>.json` with `{claim, pid, host, started_at}`. It removes
+  the record once the post-claim steps are done, or after yielding.
+- `forge next` without `--task` takes over my incomplete claim **only** when such a record exists on
+  this host, names that claim sha, and its pid is no longer running. Otherwise the task is excluded,
+  with the message "an incomplete claim of yours on #n may still be in progress; run
+  `forge next --task <n>` to complete it".
+- `forge next --task <n>` (an explicit request) always completes my incomplete claim.
+- Completing an incomplete claim **always** runs the post-claim verification. If the claim conflicts
+  and the branch carries commits after the claim commit, Forge does not roll back, because that work
+  must not be lost. It stops with exit 5, names the conflicting task, and leaves the claim
+  incomplete. Without such commits it yields as usual.
+
+### Known limits
+- Staleness relies on client clocks: committer dates and lease timestamps. A machine whose clock
+  runs ahead by more than `lease_hours` makes its claims look fresh to everyone until that time
+  passes. `forge setup --check` (Phase 8) should warn when the local clock is more than a few
+  minutes off the `Date` header of a GitHub API response.
+- A claim pushed but never verified, whose run crashed and was never re-run, holds its task and
+  zones until it goes stale.

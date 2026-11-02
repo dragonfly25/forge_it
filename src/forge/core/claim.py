@@ -15,16 +15,20 @@ Implements spec §8.1, §8.2 and §8.4 as decided in ADR 0009:
 The worktree and ``.forge/local/current.json`` are created by the caller from
 :class:`Claimed`. Every operation is safe to re-run: a claim whose push landed before an
 interruption is found again (it names my login and agent, and the lease comment does not
-reference it yet) and completed without a second push.
+reference it yet) and completed without a second push. To tell such a claim from one that
+another live run under the same identity is still completing, every claim push is preceded
+by a pending-claim record (:mod:`forge.core.pending`, ADR 0009 amendment).
 """
 
 from __future__ import annotations
 
+import os
 import re
+import socket
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
@@ -51,6 +55,14 @@ from forge.core.lease import (
     upsert_lease,
 )
 from forge.core.models import can_serve
+from forge.core.pending import (
+    PendingClaim,
+    may_take_over,
+    read_pending,
+    remove_pending,
+    write_pending,
+)
+from forge.core.pending import pid_running as _pid_running
 from forge.core.profile import AgentProfile
 from forge.core.refresh import (
     TaskBranch,
@@ -99,6 +111,8 @@ class ClaimContext:
     ``profile_login`` is the profile's ``github`` field; ``agent`` the active agent.
     ``clock`` and ``sleep`` are injected so tests are deterministic; ``poll_interval`` and
     ``max_polls`` bound the wait of the post-claim verification (2 s x 5 by default).
+    ``pid``, ``host`` and ``pid_running`` identify this run in pending-claim records and tell
+    whether the run that wrote one is still alive (injected by tests).
     """
 
     config: ForgeConfig
@@ -113,6 +127,9 @@ class ClaimContext:
     max_polls: int = 5
     remote: str = "origin"
     cli_version: str = __version__
+    pid: int = field(default_factory=os.getpid)
+    host: str = field(default_factory=socket.gethostname)
+    pid_running: Callable[[int], bool] = _pid_running
 
     def now(self) -> datetime:
         """Current time from :attr:`clock`, as an aware UTC datetime."""
@@ -148,6 +165,7 @@ class Reason(StrEnum):
     IN_REVIEW = "in_review"
     CONFLICT = "conflict"
     MINE = "mine"
+    INCOMPLETE_OWN = "incomplete_own"
     CLAIMED = "claimed"
     STALE_CLAIM = "stale_claim"
     BLOCKED = "blocked"
@@ -306,6 +324,7 @@ def _exclusion(
     reclaim: bool,
     tried: Mapping[int, Reason],
     lease_hours: int,
+    in_flight: Collection[int] = (),
 ) -> tuple[Reason, str] | None:
     meta = view.record.meta
     if view.issue in tried:
@@ -325,6 +344,11 @@ def _exclusion(
     if claim is not None and view.status is Status.IN_PROGRESS:
         if view.live:
             if claim.is_mine(login, agent.id):
+                if view.issue in in_flight:
+                    return Reason.INCOMPLETE_OWN, (
+                        f"an incomplete claim of yours on #{view.issue} may still be in "
+                        f"progress; run `forge next --task {view.issue}` to complete it"
+                    )
                 return Reason.MINE, f"you already hold #{view.issue}"
             return Reason.CLAIMED, _claim_detail(view, lease_hours)
         if not reclaim:
@@ -363,12 +387,14 @@ def select_candidates(
     reclaim: bool = False,
     tried: Mapping[int, Reason] | None = None,
     lease_hours: int = 24,
+    in_flight: Collection[int] = (),
 ) -> Selection:
     """Return the ordered candidates and the exclusions among ``views`` (pure).
 
     Zone holders are the tasks with a live claim or an open pull request (an open PR keeps
     its zones even after the lease goes stale). ``tried`` maps issues already lost or
-    yielded in this run to their reason; they are never retried.
+    yielded in this run to their reason; they are never retried. ``in_flight`` lists my
+    incomplete claims that another run may still be completing (``incomplete_own``).
     """
     all_views = sorted(views, key=lambda v: v.issue)
     holders = [v for v in all_views if v.live or v.has_open_pr]
@@ -385,6 +411,7 @@ def select_candidates(
             reclaim=reclaim,
             tried=tried or {},
             lease_hours=lease_hours,
+            in_flight=in_flight,
         )
         if excluded is not None:
             exclusions.append(Exclusion(view.issue, view.task_id, *excluded))
@@ -654,10 +681,19 @@ def _claim_trailers(login: str, agent: str, task_id: str) -> dict[str, str]:
     return {TRAILER_CLAIM: login, TRAILER_AGENT: agent, TRAILER_TASK: task_id}
 
 
+def _mark_pending(ctx: ClaimContext, issue_number: int, claim_sha: str) -> None:
+    """Write this run's pending-claim record for ``claim_sha`` (ADR 0009 amendment)."""
+    write_pending(ctx.git, PendingClaim(issue_number, claim_sha, ctx.pid, ctx.host, ctx.now()))
+
+
 def _push_claim(
     ctx: ClaimContext, login: str, candidate: Candidate, default_sha: str
 ) -> _Pushed | None:
-    """Create and push the claim commit. ``None`` when the push lost the race."""
+    """Create and push the claim commit. ``None`` when the push lost the race.
+
+    The pending-claim record is written between creating the commit and pushing it, and
+    removed again when the push loses.
+    """
     view = candidate.view
     ref = f"refs/heads/{TaskMetadata.branch_name(view.issue)}"
     tip = None if view.branch is None else view.branch.tip
@@ -669,8 +705,10 @@ def _push_claim(
         _claim_trailers(login, ctx.agent.id, view.task_id),
         date=ctx.now(),
     )
+    _mark_pending(ctx, view.issue, sha)
     result = ctx.git.push(sha, ref, lease=Lease(ref, tip), remote=ctx.remote, no_verify=True)
     if not result.ok:
+        remove_pending(ctx.git, view.issue, sha)
         return None
     return _Pushed(sha, tip)
 
@@ -904,10 +942,17 @@ def _own_rollback(view: TaskView) -> str | None:
 def claim_next(ctx: ClaimContext, options: NextOptions | None = None) -> NextOutcome:
     """Select and claim a task (``forge next``; ``forge reclaim`` with ``task`` + ``reclaim``).
 
+    My incomplete claims (pushed, lease comment not written yet) are completed first, but
+    without ``task`` only when this host's pending-claim record names the claim and its run
+    is gone; otherwise they are excluded as ``incomplete_own`` (ADR 0009 amendment).
+    Completing a claim always runs the post-claim verification.
+
     Raises :class:`PreconditionError` (exit 5) on a version mismatch, a login that differs
-    from the profile, or a shallow clone. Returns code 3 when nothing is claimable, when
-    ``claim.max_attempts`` races were lost, or when the requested task is not claimable (the
-    reason is in :attr:`NextOutcome.reason`). GitHub and git failures raise.
+    from the profile, a shallow clone, or an incomplete claim of mine that conflicts with
+    another live claim while commits follow it (it is left incomplete, never rolled back).
+    Returns code 3 when nothing is claimable, when ``claim.max_attempts`` races were lost,
+    or when the requested task is not claimable (the reason is in
+    :attr:`NextOutcome.reason`). GitHub and git failures raise.
     """
     opts = options or NextOptions()
     check_version(ctx)
@@ -928,7 +973,8 @@ def claim_next(ctx: ClaimContext, options: NextOptions | None = None) -> NextOut
                 warnings=_dedupe(warnings),
             )
     # For a targeted task the exact lease matters (the message says when a claim goes stale).
-    snap = _snapshot(ctx, gh, leases, warnings, exact=[] if target is None else [target])
+    exact = [] if target is None else [target]
+    snap = _snapshot(ctx, gh, leases, warnings, exact=exact)
 
     def _mine(view: TaskView) -> bool:
         return view.live and view.claim is not None and view.claim.is_mine(login, ctx.agent.id)
@@ -939,12 +985,16 @@ def claim_next(ctx: ClaimContext, options: NextOptions | None = None) -> NextOut
         assert claim is not None
         return lease is not None and lease.claim == claim.sha and lease.released_at is None
 
+    def _incomplete(current: _Snapshot) -> set[int]:
+        return {v.issue for v in current.views.values() if _mine(v) and not _complete(v)}
+
     own = sorted((v for v in snap.views.values() if _mine(v)), key=lambda v: v.issue)
-    incomplete = [v.issue for v in own if not _complete(v)]
+    incomplete = _incomplete(snap)
     outcome = NextOutcome(ExitCode.OK, dry_run=opts.dry_run)
     outcome.info = [f"you already hold #{v.issue} ({v.task_id})" for v in own if _complete(v)]
     index = _Index(ctx.github, gh.records)
 
+    queue: list[int]
     if target is not None and any(v.issue == target for v in own):
         view = snap.views[target]
         if target not in incomplete:
@@ -953,15 +1003,23 @@ def claim_next(ctx: ClaimContext, options: NextOptions | None = None) -> NextOut
                 return _finish(outcome, warnings)
             assert view.claim is not None
             outcome.claimed = _post_claim(
-                ctx, login, view.record, view.claim.sha, resumed=False, own=True
+                ctx,
+                login,
+                view.record,
+                view.claim.sha,
+                resumed=_own_rollback(view) is not None,
+                own=True,
             )
+            remove_pending(ctx.git, target, view.claim.sha)
             return _finish(outcome, warnings)
-        queue = [target]
+        queue = [target]  # an explicit request always completes my incomplete claim
+    elif target is not None:
+        queue = []
     else:
-        queue = [] if target is not None else list(incomplete)
+        queue = [n for n in sorted(incomplete) if _abandoned(ctx, snap.views[n])]
 
     if opts.dry_run:
-        selection = _select(ctx, snap, login, opts, {})
+        selection = _select(ctx, snap, leases, login, opts, {}, incomplete - set(queue))
         outcome.resume_own = queue
         outcome.candidates = _targeted(selection.candidates, target)
         outcome.exclusions = list(selection.exclusions)
@@ -975,29 +1033,17 @@ def claim_next(ctx: ClaimContext, options: NextOptions | None = None) -> NextOut
     while True:
         record: TaskRecord
         pushed: _Pushed
+        work_follows = False
         if queue:
             view = snap.views[queue.pop(0)]
             assert view.claim is not None
             record = view.record
             pushed = _Pushed(view.claim.sha, _own_rollback(view))
             own_claim = True
-            if view.claim.tip != view.claim.sha:
-                # Work was pushed on top of the claim: it was clearly kept; do not roll back.
-                warnings.append(
-                    f"#{view.issue}: commits follow your interrupted claim; post-claim "
-                    "verification skipped"
-                )
-                outcome.claimed = _post_claim(
-                    ctx,
-                    login,
-                    record,
-                    view.claim.sha,
-                    resumed=pushed.rollback is not None,
-                    own=True,
-                )
-                return _finish(outcome, warnings)
+            work_follows = view.claim.tip != view.claim.sha
+            _mark_pending(ctx, view.issue, pushed.sha)  # this run now completes it
         else:
-            selection = _select(ctx, snap, login, opts, tried)
+            selection = _select(ctx, snap, leases, login, opts, tried, _incomplete(snap))
             outcome.exclusions = list(selection.exclusions)
             candidates = _targeted(selection.candidates, target)
             if not candidates:
@@ -1019,10 +1065,11 @@ def claim_next(ctx: ClaimContext, options: NextOptions | None = None) -> NextOut
                 outcome.attempts += 1
                 tried[record.issue.number] = Reason.LOST_RACE
                 warnings.append(f"#{record.issue.number}: lost the race; trying the next task")
-                snap = _snapshot(ctx, gh, leases, warnings)
+                snap = _snapshot(ctx, gh, leases, warnings, exact=exact)
                 continue
             pushed = maybe
 
+        number = record.issue.number
         winner = _verify(ctx, record, pushed.sha, index, leases)
         if winner is None:
             outcome.claimed = _post_claim(
@@ -1033,27 +1080,59 @@ def claim_next(ctx: ClaimContext, options: NextOptions | None = None) -> NextOut
                 resumed=pushed.rollback is not None,
                 own=own_claim,
             )
+            remove_pending(ctx.git, number, pushed.sha)
             return _finish(outcome, warnings)
-        problem = _yield(ctx, record.issue.number, pushed)
+        if work_follows:
+            # Rolling back would drop the work pushed on top of the claim: stop instead. The
+            # pending record goes, so a plain `forge next` excludes the task (incomplete_own)
+            # and moves on instead of hitting this conflict on every run (ADR 0009).
+            remove_pending(ctx.git, number, pushed.sha)
+            raise PreconditionError(
+                f"your incomplete claim on #{number} ({record.meta.id}) overlaps the live "
+                f"claim on #{winner.issue} ({winner.task_id}, claimed by {winner.owner}) and "
+                f"commits follow it on {TaskMetadata.branch_name(number)}; it was not rolled "
+                "back and stays incomplete",
+                hint=f"agree with {winner.owner} on who keeps the zones (one of you can run "
+                f"`forge release-claim`), then re-run `forge next --task {number}`",
+            )
+        problem = _yield(ctx, number, pushed)
+        remove_pending(ctx.git, number, pushed.sha)
         if problem is not None:
             warnings.append(problem)
         outcome.attempts += 1
-        tried[record.issue.number] = Reason.YIELDED
+        tried[number] = Reason.YIELDED
         warnings.append(
-            f"#{record.issue.number}: yielded to #{winner.issue} ({winner.task_id}, claimed by "
+            f"#{number}: yielded to #{winner.issue} ({winner.task_id}, claimed by "
             f"{winner.owner}), whose zones overlap; trying the next task"
         )
-        snap = _snapshot(ctx, gh, leases, warnings)
+        snap = _snapshot(ctx, gh, leases, warnings, exact=exact)
+
+
+def _abandoned(ctx: ClaimContext, view: TaskView) -> bool:
+    """True when my incomplete claim on ``view`` may be taken over without ``--task``.
+
+    This host's pending-claim record must name the claim commit, and the run that wrote it
+    must be gone (ADR 0009 amendment).
+    """
+    assert view.claim is not None
+    return may_take_over(
+        read_pending(ctx.git, view.issue),
+        view.claim.sha,
+        host=ctx.host,
+        running=ctx.pid_running,
+    )
 
 
 def _select(
     ctx: ClaimContext,
     snap: _Snapshot,
+    leases: _Leases,
     login: str,
     opts: NextOptions,
     tried: Mapping[int, Reason],
+    in_flight: Collection[int],
 ) -> Selection:
-    return select_candidates(
+    selection = select_candidates(
         snap.views.values(),
         zones=ctx.zones,
         agent=ctx.agent,
@@ -1062,7 +1141,29 @@ def _select(
         reclaim=opts.reclaim,
         tried=tried,
         lease_hours=ctx.config.lease_hours,
+        in_flight=in_flight,
     )
+    return replace(selection, exclusions=_exact_details(ctx, snap, leases, selection.exclusions))
+
+
+def _exact_details(
+    ctx: ClaimContext, snap: _Snapshot, leases: _Leases, exclusions: Iterable[Exclusion]
+) -> tuple[Exclusion, ...]:
+    """Recompute "becomes stale at" of live claims of others from their lease heartbeat.
+
+    The snapshot reads a lease only when the tip alone would make the claim stale; a
+    reported claim must name the real time, which a later heartbeat pushes back.
+    """
+    now = ctx.now()
+    hours = ctx.config.lease_hours
+    result: list[Exclusion] = []
+    for excl in exclusions:
+        view = snap.views.get(excl.issue)
+        if excl.reason is Reason.CLAIMED and view is not None and view.claim is not None:
+            activity, _ = _assess(ctx, view.claim, leases, now, exact=True)
+            excl = replace(excl, detail=_claim_detail(replace(view, activity=activity), hours))
+        result.append(excl)
+    return tuple(result)
 
 
 def _targeted(candidates: Sequence[Candidate], target: int | None) -> list[Candidate]:
@@ -1327,6 +1428,7 @@ def release_claim(
         claimed_at = claim.date if claim is not None else now
         released = LeaseData(task_id, login, ctx.agent.id, claim_sha, claimed_at, now, now)
     upsert_lease(github, issue_number, released, comments=github.list_comments(issue_number))
+    remove_pending(ctx.git, issue_number, claim_sha)  # a leftover of an incomplete claim
     return ReleaseOutcome(
         issue=issue_number,
         task_id=task_id,

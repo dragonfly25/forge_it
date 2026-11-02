@@ -391,9 +391,8 @@ class OwnClaim:
 def require_own_claim(ctx: LeaseContext, issue_number: int) -> OwnClaim:
     """Check that the last Forge event of ``task/<issue_number>`` is a claim of mine; return it.
 
-    My own **stale** claim is accepted (ADR 0009, implementation notes): nobody reclaimed it,
-    since a reclaim would make another claim the branch's last event. The caller reports
-    :attr:`OwnClaim.stale_since` as a warning.
+    My own **stale** claim is returned too, with :attr:`OwnClaim.stale_since` set; the
+    caller decides (``heartbeat`` refuses it, ADR 0009 implementation notes).
 
     Raises :class:`PreconditionError` (exit 5) when the login differs from the profile, the
     clone is shallow, or the branch's last event is not a claim made by my login and agent
@@ -451,40 +450,60 @@ class HeartbeatOutcome:
 
 
 def heartbeat(ctx: LeaseContext, issue_number: int) -> HeartbeatOutcome:
-    """Refresh the lease of my claim on ``issue_number`` (sets ``heartbeat_at``).
+    """Refresh the lease of my live, complete claim on ``issue_number`` (sets ``heartbeat_at``).
 
-    Requires that the branch's last event is a claim of mine (exit 5 otherwise). A stale
-    claim of mine is renewed, with a warning. ``claimed_at`` is kept when the lease comment
-    already names this claim, else it is the claim commit's date.
+    Raises :class:`PreconditionError` (exit 5), changing nothing, when (ADR 0009):
+
+    - the branch's last event is not a claim of mine;
+    - my claim is **stale**: while stale it held no zones, so it is renewed only through the
+      CAS push and verification of ``forge reclaim <n>``;
+    - the claim is **incomplete** (the lease comment does not name its sha): a heartbeat
+      would mark it complete without verification; ``forge next --task <n>`` completes it;
+    - the remote branch moved since it was read (re-run to retry).
     """
     own = require_own_claim(ctx, issue_number)
-    now = ctx.now()
     claim = own.claim
     lease = own.lease
-    claimed_at = lease.claimed_at if lease is not None and lease.claim == claim.sha else claim.date
+    task_id = own.record.meta.id
+    if own.stale_since is not None:
+        raise PreconditionError(
+            f"your claim on #{issue_number} ({task_id}) went stale at "
+            f"{format_time(own.stale_since)}; a stale claim holds no zones, so a heartbeat "
+            "cannot renew it",
+            hint=f"renew it through a verified claim: `forge reclaim {issue_number}`",
+        )
+    if lease is None or lease.claim != claim.sha:
+        raise PreconditionError(
+            f"your claim on #{issue_number} ({task_id}) is incomplete: the lease comment "
+            f"does not name its claim commit {claim.sha[:12]}",
+            hint=f"complete it with `forge next --task {issue_number}`",
+        )
+    name = TaskMetadata.branch_name(issue_number)
+    current = ctx.git.remote_branch_sha(name, ctx.remote)
+    if current != claim.tip:
+        raise PreconditionError(
+            f"{name} moved on {ctx.remote} while renewing the lease "
+            f"({claim.tip[:12]} -> {current[:12] if current else 'deleted'}); nothing was "
+            "changed",
+            hint="re-run `forge heartbeat`",
+        )
+    now = ctx.now()
     data = LeaseData(
-        task=own.record.meta.id,
+        task=task_id,
         owner=own.login,
         agent=ctx.agent.id,
         claim=claim.sha,
-        claimed_at=claimed_at,
+        claimed_at=lease.claimed_at,
         heartbeat_at=now,
     )
     upsert_lease(ctx.github, issue_number, data, comments=own.comments)
     activity = last_activity(claim.tip_date, data, claim.sha)
-    warnings: tuple[str, ...] = ()
-    if own.stale_since is not None:
-        warnings = (
-            f"your claim on #{issue_number} ({own.record.meta.id}) had gone stale at "
-            f"{format_time(own.stale_since)}; renewed",
-        )
     return HeartbeatOutcome(
         issue=issue_number,
-        task_id=own.record.meta.id,
+        task_id=task_id,
         claim=claim.sha,
         heartbeat_at=now,
         stale_at=stale_at(activity, ctx.config.lease_hours),
-        warnings=warnings,
     )
 
 

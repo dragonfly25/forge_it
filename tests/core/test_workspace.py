@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -151,6 +152,31 @@ def test_branch_checked_out_elsewhere_exits_5(git_world: GitWorld) -> None:
     alice.checkout(BRANCH, create_from=tip)
     with pytest.raises(PreconditionError, match="already checked out"):
         prepare_workspace(alice, repo_root=alice.cwd, issue_number=N, claim_tip=tip)
+
+
+@pytest.mark.parametrize("same_branch", [True, False])
+def test_deleted_worktree_at_the_path_is_replaced_other_stale_entries_kept(
+    git_world: GitWorld, same_branch: bool
+) -> None:
+    """Only the target path's stale registration is dropped; ``git worktree prune`` never runs."""
+    alice = git_world.clone("alice")
+    tip = claim(alice)
+    path = worktree_path(alice.cwd, N)
+    if same_branch:  # the task worktree itself was deleted by hand
+        prepare_workspace(alice, repo_root=alice.cwd, issue_number=N, claim_tip=tip)
+    else:  # another branch was once checked out at that path
+        alice.worktree_add(path, "scratch", start_point="origin/main")
+    shutil.rmtree(path)
+    unrelated = alice.cwd.parent / "unrelated-wt"
+    alice.worktree_add(unrelated, "other", start_point="origin/main")
+    shutil.rmtree(unrelated)
+
+    ws = prepare_workspace(alice, repo_root=alice.cwd, issue_number=N, claim_tip=tip)
+
+    assert ws.worktree_created and not ws.worktree_reused
+    assert Git(path).current_branch() == BRANCH and Git(path).rev_parse("HEAD") == tip
+    listed = alice.run("worktree", "list", "--porcelain").stdout
+    assert f"worktree {unrelated}" in listed  # an unrelated stale entry is left alone
 
 
 def test_custom_worktrees_dir(git_world: GitWorld, tmp_path: Path) -> None:

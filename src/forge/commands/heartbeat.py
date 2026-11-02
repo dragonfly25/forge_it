@@ -26,7 +26,7 @@ def heartbeat(ctx: typer.Context) -> None:
     def run() -> Result:
         app = load_context(opts)
         location = _claims.require_current_task(app)
-        profile, agent = _claims.load_profile_and_agent(opts)
+        profile, agent = _claims.load_profile_and_agent(opts, _claims.recorded_agent(location))
         outcome = run_heartbeat(_claims.claim_context(app, profile, agent), location.issue)
         result = Result(data=outcome.to_data())
         for note in location.notes:

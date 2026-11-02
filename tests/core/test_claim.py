@@ -38,6 +38,7 @@ from forge.core.git import Git, Lease, PushResult
 from forge.core.github import GitHubError, Issue
 from forge.core.github_fake import FakeGitHub
 from forge.core.lease import LEASE_MARKER, find_claim, find_lease, format_time, heartbeat
+from forge.core.pending import PendingClaim, pending_path, read_pending, write_pending
 from forge.core.profile import AgentProfile
 from forge.core.refresh import TaskRecord, ensure_labels, gather_task_branches
 from forge.core.tasks import (
@@ -60,6 +61,8 @@ if TYPE_CHECKING:
     from conftest import GitWorld
 
 T0 = datetime(2026, 11, 2, 9, 0, tzinfo=UTC)
+HOST = "test-host"
+PID = 4242  # default pid of a simulated run; runs are dead once they return (World.alive)
 WAIT = 20.0  # seconds a test thread waits for its peer before failing (never reached when green)
 
 ZONES = ZonesConfig(
@@ -178,6 +181,7 @@ class World:
     fake: FakeGitHub = field(default_factory=FakeGitHub)
     lock: threading.RLock = field(default_factory=threading.RLock)
     clones: dict[str, HookedGit] = field(default_factory=dict)
+    alive: set[int] = field(default_factory=set)  # pids of simulated runs still running
 
     def __post_init__(self) -> None:
         ensure_labels(self.fake)
@@ -198,6 +202,8 @@ class World:
         config: ForgeConfig | None = None,
         max_polls: int = 5,
         profile_login: str | None = None,
+        pid: int = PID,
+        host: str = HOST,
     ) -> ClaimContext:
         return ClaimContext(
             config=config or make_config(),
@@ -209,6 +215,9 @@ class World:
             clock=clock or Clock(),
             sleep=sleep or Sleeper(),
             max_polls=max_polls,
+            pid=pid,
+            host=host,
+            pid_running=lambda p: p in self.alive,
         )
 
     def task(
@@ -988,16 +997,20 @@ def test_released_branch_is_claimable_again(world: World) -> None:
 def test_interrupted_claim_is_completed_without_a_second_push(world: World) -> None:
     n = world.task("M1-T01", ["api"])
     other = world.task("M1-T02", ["web"], size=Size.M)
-    ctx = world.ctx("alice")
+    ctx = world.ctx("alice", pid=101)
     ctx.github.fail["add_assignees"] = 1  # type: ignore[attr-defined]
     with pytest.raises(GitHubError):
         run(ctx)
     tip = world.remote_tip(n)
     assert tip is not None
     assert find_lease(world.fake.list_comments(n)) is None
+    # the crashed run left its pending-claim record; pid 101 is no longer running
+    left = read_pending(world.git("alice"), n)
+    assert left is not None and (left.claim, left.pid, left.host) == (tip, 101, HOST)
 
-    again = run(world.ctx("alice"))
+    again = run(world.ctx("alice", pid=102))
     assert again.code == ExitCode.OK
+    assert not pending_path(world.git("alice"), n).exists()  # removed once complete
     assert again.claimed is not None
     assert again.claimed.issue == n and again.claimed.own and again.claimed.claim == tip
     assert world.remote_tip(n) == tip  # no second push
@@ -1029,7 +1042,9 @@ def test_interrupted_claim_is_verified_again_and_yields(world: World) -> None:
     held = world.task("M1-T01", ["api"])
     mine = world.task("M1-T02", ["api"])
     run(world.ctx("carol", clock=Clock(T0)), task="M1-T01")
-    world.push_event("alice", mine, claim_of("M1-T02", "alice"), T0 + timedelta(minutes=1))
+    sha = world.push_event("alice", mine, claim_of("M1-T02", "alice"), T0 + timedelta(minutes=1))
+    # ADR 0009 amendment: the crashed run's record (dead pid) allows the automatic takeover
+    write_pending(world.git("alice"), PendingClaim(mine, sha, 101, HOST, T0))
     sleeper = Sleeper()
     out = run(world.ctx("alice", clock=Clock(T0 + timedelta(minutes=2)), sleep=sleeper))
     assert out.code == ExitCode.NOTHING_AVAILABLE
@@ -1037,6 +1052,245 @@ def test_interrupted_claim_is_verified_again_and_yields(world: World) -> None:
     assert world.remote_tip(mine) is None
     assert world.claimed_issues() == {held}
     assert out.attempts == 1
+    assert not pending_path(world.git("alice"), mine).exists()  # removed after yielding
+
+
+# --------------------------------------------------------------- same identity (ADR 0009 amendment)
+
+
+def _lease_comments(world: World, n: int) -> list[str]:
+    return [c.body for c in world.fake.list_comments(n) if c.body.startswith(LEASE_MARKER)]
+
+
+@pytest.mark.parametrize("fallback", [True, False])
+def test_same_identity_run_does_not_take_over_a_claim_in_flight(
+    world: World, fallback: bool
+) -> None:
+    """Run 2 (same login, agent and clone) snapshots while run 1 is between push and lease.
+
+    Run 2 must leave run 1's claim alone: it claims another task, or exits 3.
+    """
+    t1 = world.task("M1-T01", ["api"])
+    t2 = world.task("M1-T02", ["web"], size=Size.M) if fallback else None
+    git = world.git("alice")
+    results: dict[str, NextOutcome] = {}
+
+    def run2_between_push_and_lease(src: str, dst: str, result: PushResult) -> None:
+        git.after_push = None
+        assert result.ok and dst == f"refs/heads/task/{t1}"
+        record = read_pending(git, t1)
+        assert record is not None and (record.claim, record.pid) == (src, 101)
+        assert find_lease(world.fake.list_comments(t1)) is None  # not complete yet
+        world.alive.add(101)  # run 1 is still running
+        results["second"] = run(world.ctx("alice", pid=102))
+
+    git.after_push = run2_between_push_and_lease
+    results["first"] = run(world.ctx("alice", pid=101))
+    world.alive.discard(101)
+
+    first = results["first"]
+    assert first.code == ExitCode.OK and first.claimed is not None
+    assert first.claimed.issue == t1 and not first.claimed.own
+    second = results["second"]
+    excluded = {e.issue: e for e in second.exclusions}
+    assert excluded[t1].reason is Reason.INCOMPLETE_OWN
+    assert excluded[t1].detail == (
+        f"an incomplete claim of yours on #{t1} may still be in progress; run "
+        f"`forge next --task {t1}` to complete it"
+    )
+    if fallback:
+        assert second.code == ExitCode.OK and second.claimed is not None
+        assert second.claimed.issue == t2 and not second.claimed.own
+    else:
+        assert second.code == ExitCode.NOTHING_AVAILABLE and second.claimed is None
+        assert second.to_data()["excluded"] == {"incomplete_own": 1}
+    # exactly one claim commit on task/t1, completed once, by run 1
+    assert world.remote_tip(t1) == first.claimed.claim
+    remote = world.git_world.remote_git
+    assert len(remote.commits(f"main..refs/heads/task/{t1}")) == 1
+    leases = _lease_comments(world, t1)
+    assert len(leases) == 1
+    found = find_lease(world.fake.list_comments(t1))
+    assert found is not None and found.data is not None
+    assert found.data.claim == first.claimed.claim
+    assert not pending_path(git, t1).exists()
+    if t2 is not None:
+        assert not pending_path(git, t2).exists()
+
+
+def test_incomplete_claim_is_taken_over_only_with_a_dead_record_of_this_host(
+    world: World,
+) -> None:
+    n = world.task("M1-T01", ["api"])
+    sha = world.push_event("alice", n, claim_of("M1-T01", "alice"), T0)
+    git = world.git("alice")
+    path = pending_path(git, n)
+    cases: list[tuple[str, PendingClaim | None, set[int]]] = [
+        ("no record", None, set()),
+        ("other host", PendingClaim(n, sha, 101, "elsewhere", T0), set()),
+        ("other claim", PendingClaim(n, "f" * 40, 101, HOST, T0), set()),
+        ("run alive", PendingClaim(n, sha, 101, HOST, T0), {101}),
+    ]
+    for label, record, alive in cases:
+        path.unlink(missing_ok=True)
+        if record is not None:
+            write_pending(git, record)
+        world.alive = alive
+        out = run(world.ctx("alice"))
+        assert out.code == ExitCode.NOTHING_AVAILABLE, label
+        assert {e.issue: e.reason for e in out.exclusions} == {n: Reason.INCOMPLETE_OWN}, label
+        dry = run(world.ctx("alice"), dry_run=True)
+        assert dry.resume_own == [], label
+        assert find_lease(world.fake.list_comments(n)) is None, label
+        assert world.remote_tip(n) == sha, label
+
+    # An explicit request always completes it (here while the recorded run is "alive").
+    out = run(world.ctx("alice"), task=str(n))
+    assert out.code == ExitCode.OK and out.claimed is not None
+    assert out.claimed.own and out.claimed.claim == sha
+    assert world.remote_tip(n) == sha
+    found = find_lease(world.fake.list_comments(n))
+    assert found is not None and found.data is not None and found.data.claim == sha
+    assert not path.exists()
+
+    # A dead run's record on this host: plain `next` completes it.
+    m = world.task("M1-T02", ["web"])
+    sha2 = world.push_event("alice", m, claim_of("M1-T02", "alice"), T0)
+    write_pending(git, PendingClaim(m, sha2, 103, HOST, T0))
+    assert run(world.ctx("alice"), dry_run=True).resume_own == [m]
+    done = run(world.ctx("alice"))
+    assert done.claimed is not None and done.claimed.issue == m and done.claimed.own
+    assert not pending_path(git, m).exists()
+
+
+@pytest.mark.parametrize("explicit", [True, False])
+def test_incomplete_claim_with_later_commits_that_conflicts_exits_5(
+    world: World, explicit: bool
+) -> None:
+    """Completing always verifies; with work on top of the claim Forge stops, never rolls back."""
+    held = world.task("M1-T01", ["api"])
+    mine = world.task("M1-T02", ["api"])
+    run(world.ctx("carol", clock=Clock(T0)), task="M1-T01")
+    sha = world.push_event("alice", mine, claim_of("M1-T02", "alice"), T0 + timedelta(minutes=1))
+    work = world.push_work("alice", mine, "src/api/x.py", T0 + timedelta(minutes=2))
+    if not explicit:
+        write_pending(world.git("alice"), PendingClaim(mine, sha, 101, HOST, T0))
+    options = {"task": "M1-T02"} if explicit else {}
+    with pytest.raises(PreconditionError) as info:
+        run(world.ctx("alice", clock=Clock(T0 + timedelta(minutes=3))), **options)
+    assert info.value.code == ExitCode.PRECONDITION
+    assert f"#{held} (M1-T01, claimed by carol)" in info.value.message
+    assert f"forge next --task {mine}" in (info.value.hint or "")
+    assert world.remote_tip(mine) == work  # nothing rolled back
+    assert find_lease(world.fake.list_comments(mine)) is None  # still incomplete
+    assert world.fake.get_issue(mine).assignees == ()
+    # The record is dropped, so a plain `next` excludes the task and does not stop again.
+    assert read_pending(world.git("alice"), mine) is None
+    later = run(world.ctx("alice", clock=Clock(T0 + timedelta(minutes=4))), dry_run=True)
+    assert {e.issue: e.reason for e in later.exclusions}[mine] == Reason.INCOMPLETE_OWN
+
+
+def test_incomplete_claim_with_later_commits_and_no_conflict_completes(world: World) -> None:
+    n = world.task("M1-T01", ["api"])
+    sha = world.push_event("alice", n, claim_of("M1-T01", "alice"), T0)
+    work = world.push_work("alice", n, "src/api/x.py", T0 + timedelta(minutes=1))
+    out = run(world.ctx("alice"), task=str(n))
+    assert out.claimed is not None and out.claimed.claim == sha and out.claimed.own
+    assert not any("verification skipped" in w for w in out.warnings)
+    assert world.remote_tip(n) == work
+
+
+def test_rerun_task_on_my_complete_claim_reports_resumed(world: World) -> None:
+    fresh = world.task("M1-T01", ["api"])
+    handed = world.task("M1-T02", ["web"])
+    world.push_event("carol", handed, claim_of("M1-T02", "carol"), T0 - timedelta(hours=2))
+    world.push_event(
+        "carol", handed, {TRAILER_HANDOFF: "carol", TRAILER_TASK: "M1-T02"}, T0 - timedelta(hours=1)
+    )
+    first = run(world.ctx("alice"), task="M1-T02")
+    assert first.claimed is not None and first.claimed.resumed and not first.claimed.own
+    again = run(world.ctx("alice"), task="M1-T02")
+    assert again.claimed is not None and again.claimed.own
+    assert again.claimed.resumed and again.claimed.claim == first.claimed.claim
+
+    new = run(world.ctx("alice"), task="M1-T01")
+    assert new.claimed is not None and not new.claimed.resumed
+    repeat = run(world.ctx("alice"), task="M1-T01")
+    assert repeat.claimed is not None and repeat.claimed.own and not repeat.claimed.resumed
+    assert repeat.claimed.issue == fresh
+
+
+def test_reported_claim_stale_time_counts_the_heartbeat(world: World) -> None:
+    n = world.task("M1-T01", ["api"])
+    t2 = world.task("M1-T02", ["web"])
+    run(world.ctx("carol", clock=Clock(T0)), task="M1-T01")
+    heartbeat(world.ctx("carol", clock=Clock(T0 + timedelta(hours=5))), n)
+    expected = format_time(T0 + timedelta(hours=29))
+    at_6h = Clock(T0 + timedelta(hours=6))
+
+    dry = run(world.ctx("alice", clock=at_6h), dry_run=True)
+    detail = {e.issue: e for e in dry.exclusions}[n]
+    assert detail.reason is Reason.CLAIMED and expected in detail.detail
+
+    # After a lost race the re-snapshot reports the same exact time.
+    def bob_takes_t2(src: str, dst: str) -> None:
+        world.git("alice").before_push = None
+        assert run(world.ctx("bob", clock=at_6h), task="M1-T02").claimed is not None
+
+    world.git("alice").before_push = bob_takes_t2
+    out = run(world.ctx("alice", clock=at_6h))
+    assert out.code == ExitCode.NOTHING_AVAILABLE
+    reported = {e.issue: e for e in out.exclusions}
+    assert reported[t2].reason is Reason.LOST_RACE
+    assert reported[n].reason is Reason.CLAIMED and expected in reported[n].detail
+
+
+def test_reclaim_my_own_stale_claim_renews_it_through_a_claim(world: World) -> None:
+    n = world.task("M1-T01", ["api"])
+    first = run(world.ctx("alice", clock=Clock(T0)))
+    assert first.claimed is not None
+    late = Clock(T0 + timedelta(hours=30))
+    with pytest.raises(PreconditionError, match="stale"):
+        heartbeat(world.ctx("alice", clock=late), n)
+
+    out = reclaim_task(world.ctx("alice", clock=late), str(n))
+    assert out.code == ExitCode.OK and out.claimed is not None
+    claimed = out.claimed
+    assert claimed.reclaimed and claimed.resumed and not claimed.own
+    assert claimed.previous_claimant == "alice"
+    remote = world.git_world.remote_git
+    assert remote.run("rev-parse", f"{claimed.claim}^").stdout.strip() == first.claimed.claim
+    found = find_lease(world.fake.list_comments(n))
+    assert found is not None and found.data is not None
+    assert found.data.claim == claimed.claim and found.data.heartbeat_at == late.now
+    assert world.fake.get_issue(n).assignees == ("alice",)
+    assert len(_lease_comments(world, n)) == 1
+    # the renewed claim accepts heartbeats again
+    beat = heartbeat(world.ctx("alice", clock=Clock(T0 + timedelta(hours=31))), n)
+    assert beat.claim == claimed.claim
+
+
+def test_reclaim_my_own_stale_claim_is_verified_and_yields(world: World) -> None:
+    """While my claim was stale someone claimed an overlapping task: my reclaim yields."""
+    n = world.task("M1-T01", ["api"])
+    other = world.task("M1-T02", ["api"])
+    first = run(world.ctx("alice", clock=Clock(T0)), task="M1-T01")
+    assert first.claimed is not None
+    late = Clock(T0 + timedelta(hours=30))
+
+    def carol_claims_overlap(src: str, dst: str) -> None:
+        world.git("alice").before_push = None
+        assert run(world.ctx("carol", clock=late), task="M1-T02").claimed is not None
+
+    world.git("alice").before_push = carol_claims_overlap
+    sleeper = Sleeper()
+    out = reclaim_task(world.ctx("alice", clock=late, sleep=sleeper, max_polls=1), str(n))
+    assert out.code == ExitCode.NOTHING_AVAILABLE and out.claimed is None
+    assert "yielded" in (out.reason or "")
+    assert sleeper.calls == [2.0]  # first in order (same date, lower issue): waited, then yielded
+    assert world.remote_tip(n) == first.claimed.claim  # previous tip pushed back
+    assert world.claimed_issues() == {n, other}
+    assert not pending_path(world.git("alice"), n).exists()
 
 
 def test_max_attempts_exhausted(world: World) -> None:

@@ -61,7 +61,15 @@ SPEC = """\
 """
 
 
-def profile_yaml(login: str, worktrees: Path) -> str:
+CODEX_AGENT = (
+    "  - id: codex\n"
+    "    tool: codex\n"
+    "    providers: [openai]\n"
+    "    tiers: {strong: gpt-strong, standard: gpt-standard, light: gpt-light}\n"
+)
+
+
+def profile_yaml(login: str, worktrees: Path, extra_agents: str = "") -> str:
     return (
         f"github: {login}\n"
         "agents:\n"
@@ -69,6 +77,7 @@ def profile_yaml(login: str, worktrees: Path) -> str:
         "    tool: claude-code\n"
         "    providers: [anthropic]\n"
         "    tiers: {strong: opus, standard: sonnet, light: haiku}\n"
+        f"{extra_agents}"
         "default_agent: claude\n"
         f"worktrees_dir: {worktrees}\n"
     )
@@ -110,6 +119,7 @@ class Env:
     clock: Clock
     sleeps: list[float] = field(default_factory=list)
     clones: dict[str, Git] = field(default_factory=dict)
+    extra_agents: str = ""
 
     def clone(self, user: str) -> Path:
         if user not in self.clones:
@@ -130,7 +140,7 @@ class Env:
     def profile(self, login: str) -> Path:
         path = self.xdg / "forge" / "profile.yml"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(profile_yaml(login, self.worktrees / login))
+        path.write_text(profile_yaml(login, self.worktrees / login, self.extra_agents))
         return path
 
     def invoke(
@@ -286,6 +296,31 @@ def test_next_nothing_available_is_code_3(env: Env) -> None:
     assert "info" in levels  # "you already hold #1"
 
 
+def test_next_local_step_failure_keeps_the_claim_in_data(env: Env) -> None:
+    """The claim is held even when the worktree cannot be prepared: --json must say so."""
+    n = env.task("M1-T01")
+    repo = env.clone("alice")
+    git = Git(repo)
+    git.run("branch", f"task/{n}", "main")
+    git.run("switch", "--quiet", f"task/{n}")
+    (repo / "local.txt").write_text("local\n")
+    git.add(["local.txt"])
+    git.commit("chore: local work")  # task/<n> now diverges from the claimed tip
+    git.run("switch", "--quiet", "main")
+
+    code, out = env.invoke(repo, "next")
+
+    assert code == 5
+    assert out["ok"] is False
+    claimed = out["data"]["claimed"]
+    assert claimed is not None and claimed["issue"] == n
+    assert env.remote_refs()[f"refs/heads/task/{n}"] == claimed["claim"]
+    texts = [m["text"] for m in out["messages"]]
+    assert any("has diverged" in t for t in texts)
+    assert any(f"forge next --task {n}" in t for t in texts)
+    assert lease_of(env.fake, n).claim == claimed["claim"]
+
+
 def test_next_with_unknown_task_is_code_3(env: Env) -> None:
     env.task("M1-T01")
     code, out = env.invoke(env.clone("alice"), "next", "--task", "M1-T09")
@@ -434,13 +469,36 @@ def test_heartbeat_updates_the_lease(env: Env) -> None:
     assert human.exit_code == 0 and "renewed at" in human.stdout
 
 
-def test_heartbeat_renews_my_stale_claim_with_a_warning(env: Env) -> None:
+def test_heartbeat_on_my_stale_claim_is_code_5_with_a_reclaim_hint(env: Env) -> None:
     n = env.task("M1-T01")
     assert env.invoke(env.clone("alice"), "next")[0] == 0
     env.clock.now = T0 + timedelta(hours=30)
     code, out = env.invoke(env.worktree(n), "heartbeat")
-    assert code == 0
-    assert any(m["level"] == "warning" and "had gone stale" in m["text"] for m in out["messages"])
+    assert code == 5
+    error = out["messages"][-1]
+    assert error["level"] == "error" and "went stale" in error["text"]
+    assert f"forge reclaim {n}" in error["hint"]
+    assert lease_of(env.fake, n).heartbeat_at == T0  # untouched
+
+
+def test_heartbeat_and_release_use_the_agent_recorded_in_current_json(env: Env) -> None:
+    env.extra_agents = CODEX_AGENT
+    n = env.task("M1-T01")
+    code, out = env.invoke(env.clone("alice"), "--agent", "codex", "next")
+    assert code == 0 and out["data"]["claimed"]["agent"] == "codex"
+    worktree = env.worktree(n)
+    env.clock.now = T0 + timedelta(hours=1)
+
+    code, out = env.invoke(worktree, "heartbeat")  # no --agent: codex from current.json
+    assert code == 0, out
+    assert lease_of(env.fake, n).agent == "codex"
+    # an explicit --agent still wins
+    code, out = env.invoke(worktree, "--agent", "claude", "heartbeat")
+    assert code == 5 and "belongs to alice with agent codex" in out["messages"][-1]["text"]
+
+    code, out = env.invoke(worktree, "release-claim")
+    assert code == 0, out
+    assert lease_of(env.fake, n).released_at is not None
 
 
 def test_heartbeat_outside_a_task_is_code_5(env: Env) -> None:

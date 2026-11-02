@@ -110,6 +110,17 @@ def _worktree_branches(git: Git) -> list[tuple[Path, str | None]]:
     return entries
 
 
+def _registered_missing(git: Git, path: Path) -> bool:
+    """True when a worktree is registered at ``path`` but its directory is gone.
+
+    Such a stale registration makes ``git worktree add`` refuse the path (and may still
+    claim the branch). Only this exact path is considered; other stale entries stay.
+    """
+    return any(
+        _same_path(entry, path) and not entry.exists() for entry, _ in _worktree_branches(git)
+    )
+
+
 def _checked_out_at(git: Git, branch: str) -> Path | None:
     """Return the worktree where ``branch`` is checked out, or None."""
     for path, name in _worktree_branches(git):
@@ -232,8 +243,12 @@ def prepare_workspace(
     checked_out = _checked_out_at(git, branch) if local_sha is not None else None
 
     # ---- check the target before changing anything
+    stale_registration = False
     if use_worktree:
         path = worktree_path(main_worktree_root(git, repo_root), issue_number, worktrees_dir)
+        stale_registration = _registered_missing(git, path)
+        if stale_registration and checked_out is not None and _same_path(checked_out, path):
+            checked_out = None  # registered there, but the directory was deleted
         reuse = checked_out is not None and _same_path(checked_out, path)
         if checked_out is not None and not reuse:
             raise PreconditionError(
@@ -284,7 +299,8 @@ def prepare_workspace(
     if use_worktree:
         if not reuse:
             path.parent.mkdir(parents=True, exist_ok=True)
-            git.run("worktree", "prune")
+            if stale_registration:
+                git.worktree_remove(path)  # drops only this path's registration
             git.worktree_add(path, branch)
             worktree_created = True
     elif not reuse:

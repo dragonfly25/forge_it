@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import pytest
-from test_claim import Clock, World, run  # shared git/GitHub world helpers
+from test_claim import Clock, World, claim_of, run  # shared git/GitHub world helpers
 
 from forge.core.errors import PreconditionError
 from forge.core.github import Comment, GitHubError
@@ -216,14 +216,14 @@ def test_heartbeat_on_git_world(git_world: GitWorld) -> None:
         run_heartbeat(world.ctx("bob"), n)
     with pytest.raises(PreconditionError, match="login"):
         run_heartbeat(world.ctx("alice", profile_login="bob"), n)
-    # my own stale claim (nobody reclaimed it) is renewed, with a warning
+    # my own stale claim is refused (ADR 0009, revised): it is renewed only by `forge reclaim`
     late = T0 + timedelta(hours=30)
-    renewed = run_heartbeat(world.ctx("alice", clock=Clock(late)), n)
-    assert renewed.heartbeat_at == late
-    assert renewed.stale_at == late + timedelta(hours=24)
-    assert len(renewed.warnings) == 1
-    assert "had gone stale at 2026-11-03T14:00:00Z; renewed" in renewed.warnings[0]
-    assert renewed.to_data()["warnings"] == list(renewed.warnings)
+    with pytest.raises(PreconditionError, match="went stale at 2026-11-03T14:00:00Z") as info:
+        run_heartbeat(world.ctx("alice", clock=Clock(late)), n)
+    assert info.value.hint is not None and f"forge reclaim {n}" in info.value.hint
+    after = find_lease(world.fake.list_comments(n))
+    assert after is not None and after.data is not None
+    assert after.data.heartbeat_at == T0 + timedelta(hours=5)  # untouched
     assert beat.warnings == ()
     other = world.task("M1-T02", ["web"])
     with pytest.raises(PreconditionError, match="does not exist"):
@@ -276,3 +276,42 @@ def test_lease_summary_states(git_world: GitWorld) -> None:
     later = T0 + timedelta(hours=25)
     stale = describe_lease(git, world.ctx("alice").config, n, "M1-T01", comments, now=later)
     assert stale is not None and stale["state"] == "stale"
+
+
+def test_heartbeat_refuses_an_incomplete_claim(git_world: GitWorld) -> None:
+    """The lease comment does not name the claim: a heartbeat must not complete it."""
+    world = World(git_world)
+    n = world.task("M1-T01", ["api"])
+    world.push_event("alice", n, claim_of("M1-T01", "alice"), T0)
+    with pytest.raises(PreconditionError, match="incomplete") as info:
+        run_heartbeat(world.ctx("alice"), n)
+    assert info.value.hint is not None and f"forge next --task {n}" in info.value.hint
+    assert find_lease(world.fake.list_comments(n)) is None
+
+    # a lease left over from an earlier claim does not count either
+    first = run(world.ctx("bob", clock=Clock(T0 + timedelta(hours=30))), task=str(n), reclaim=True)
+    assert first.claimed is not None
+    world.push_event("alice", n, claim_of("M1-T01", "alice"), T0 + timedelta(hours=31))
+    with pytest.raises(PreconditionError, match="incomplete"):
+        run_heartbeat(world.ctx("alice", clock=Clock(T0 + timedelta(hours=32))), n)
+
+
+def test_heartbeat_refuses_when_the_branch_moves_meanwhile(git_world: GitWorld) -> None:
+    world = World(git_world)
+    n = world.task("M1-T01", ["api"])
+    assert run(world.ctx("alice")).claimed is not None
+    git = world.git("alice")
+
+    def push_on_top() -> None:
+        git.after_fetch = None
+        world.push_work("bob", n, "src/api/x.py", T0 + timedelta(minutes=5))
+
+    git.after_fetch = push_on_top
+    with pytest.raises(PreconditionError, match="moved") as info:
+        run_heartbeat(world.ctx("alice", clock=Clock(T0 + timedelta(hours=1))), n)
+    assert info.value.hint == "re-run `forge heartbeat`"
+    found = find_lease(world.fake.list_comments(n))
+    assert found is not None and found.data is not None and found.data.heartbeat_at == T0
+    # re-running succeeds once the read is current
+    beat = run_heartbeat(world.ctx("alice", clock=Clock(T0 + timedelta(hours=1))), n)
+    assert beat.heartbeat_at == T0 + timedelta(hours=1)

@@ -36,7 +36,7 @@ def release_claim(
     def run() -> Result:
         app = load_context(opts)
         location = _claims.require_current_task(app)
-        profile, agent = _claims.load_profile_and_agent(opts)
+        profile, agent = _claims.load_profile_and_agent(opts, _claims.recorded_agent(location))
         claim_ctx = _claims.claim_context(app, profile, agent)
         outcome = run_release(claim_ctx, location.issue, delete_branch=delete_branch)
         cleared = clear_current(location.workspace)

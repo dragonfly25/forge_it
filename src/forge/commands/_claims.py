@@ -54,14 +54,20 @@ NO_CURRENT_HINT = (
 # --------------------------------------------------------------------------- profile
 
 
-def load_profile_and_agent(opts: GlobalOptions) -> tuple[Profile, AgentProfile]:
-    """Load the machine profile and the active agent; exit 5 when either is missing/invalid."""
+def load_profile_and_agent(
+    opts: GlobalOptions, recorded_agent: str | None = None
+) -> tuple[Profile, AgentProfile]:
+    """Load the machine profile and the active agent; exit 5 when either is missing/invalid.
+
+    The agent is ``--agent`` when given, else ``recorded_agent`` (the agent that made the
+    current task's claim, from ``current.json``), else the profile's ``default_agent``.
+    """
     path = profile_path()
     if not path.is_file():
         raise PreconditionError(f"no Forge profile at {path}", hint=PROFILE_HINT)
     try:
         profile = load_profile(path)
-        agent = select_agent(profile, opts.agent)
+        agent = select_agent(profile, opts.agent or recorded_agent)
     except ForgeError as exc:
         raise PreconditionError(exc.message, hint=exc.hint or PROFILE_HINT) from exc
     return profile, agent
@@ -106,6 +112,11 @@ def require_current_task(app: AppContext) -> TaskLocation:
     if location is None:
         raise PreconditionError(f"no current task in {app.root}", hint=NO_CURRENT_HINT)
     return location
+
+
+def recorded_agent(location: TaskLocation) -> str | None:
+    """The agent recorded in ``current.json`` for the current task (``None`` if unknown)."""
+    return None if location.current is None else location.current.agent
 
 
 # --------------------------------------------------------------------------- task context
@@ -230,8 +241,19 @@ def claim_command(
     outcome = run(ctx)
     result = outcome_result(outcome)
     profile_messages(result, profile, agent, app)
-    if outcome.claimed is not None and not outcome.dry_run:
-        finish_claim(app, ctx, profile, outcome, result, rendered, use_worktree=use_worktree)
+    claimed = outcome.claimed
+    if claimed is not None and not outcome.dry_run:
+        try:
+            finish_claim(app, ctx, profile, outcome, result, rendered, use_worktree=use_worktree)
+        except ForgeError as exc:
+            # The claim is held on GitHub: keep its summary in ``data`` so --json callers
+            # know which task they hold, and say how to finish the local steps.
+            result.code = exc.code
+            result.error(exc.message, exc.hint)
+            result.warn(
+                f"you hold the claim on #{claimed.issue} ({claimed.task_id}); re-run "
+                f"`forge next --task {claimed.issue}` to complete the local steps"
+            )
     return result
 
 
