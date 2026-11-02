@@ -22,3 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - The JSON output envelope and the exit codes.
 - Global CLI options `--json`, `--agent` (or `FORGE_AGENT`), `--repo`, `--verbose` and `--yes`. `forge --json --version` prints the JSON envelope.
 - ADRs 0003–0007.
+- Task model (Phase 2):
+  - Parsing and rendering of the issue metadata block. Human text outside the markers is preserved byte for byte, and the parser is aware of code fences.
+  - A label catalogue and derived task status (ADR 0008).
+  - A dependency graph with cycle detection and waves.
+- `forge refresh`: recomputes status and mirror labels from issues, task branches (Forge trailers) and open PRs, and unblocks dependents when their dependencies close.

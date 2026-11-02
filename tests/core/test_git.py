@@ -634,3 +634,70 @@ def test_output_is_english_under_italian_locale(
 def test_lease_requires_full_sha(expected: str) -> None:
     with pytest.raises(ValueError):
         Lease("refs/heads/task/1", expected)
+
+
+# --------------------------------------------------------------------------- refresh support
+
+
+def _commit_at(git: Git, parents: list[str], message: str, when: str, **trailers: str) -> str:
+    """Create a commit (via commit-tree) with a fixed author and committer date."""
+    tree = git.tree_of(parents[0])
+    args = ["commit-tree", tree]
+    for parent in parents:
+        args += ["-p", parent]
+    body = message + (
+        "\n\n" + "\n".join(f"{k}: {v}" for k, v in trailers.items()) if trailers else ""
+    )
+    dates = {"GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
+    return git.run(*args, input=body + "\n", env=dates).stdout.strip()
+
+
+def test_commits_first_parent(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    base = git_world.initial_sha
+    main_side = _commit_at(alice, [base], "feat: first", "2026-01-01T00:00:00Z")
+    side = _commit_at(alice, [base], "feat: side", "2026-01-02T00:00:00Z", **{"Forge-X": "1"})
+    merge = _commit_at(alice, [main_side, side], "merge side", "2026-01-03T00:00:00Z")
+
+    every = [c.sha for c in alice.commits(f"{base}..{merge}")]
+    assert every == [merge, side, main_side]
+    first = alice.commits(f"{base}..{merge}", first_parent=True)
+    assert [c.sha for c in first] == [merge, main_side]
+
+
+def test_is_shallow(git_world: GitWorld) -> None:
+    seed = Git(git_world.base / "seed")
+    git_world.commit_file(seed, "b.txt", "b\n", "feat: b")
+    git_world.push(seed, "main")
+    full = git_world.clone("alice")
+    assert full.is_shallow() is False
+
+    shallow_path = git_world.base / "shallow"
+    url = git_world.remote.as_uri()
+    Git(git_world.base).run("clone", "--quiet", "--depth", "1", url, str(shallow_path))
+    assert Git(shallow_path).is_shallow() is True
+
+
+def test_fetch_explicit_refspecs_on_single_branch_clone(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    ref = "refs/heads/task/3"
+    sha = _claim_commit(alice, "alice")
+    assert alice.push(sha, ref, lease=Lease(ref, None)).ok
+    assert alice.push(sha, "refs/heads/feature/x").ok
+
+    path = git_world.base / "single"
+    Git(git_world.base).run(
+        "clone", "--quiet", "--single-branch", "--branch", "main", str(git_world.remote), str(path)
+    )
+    single = Git(path)
+    single.fetch()  # the configured refspec only covers main
+    assert single.rev_parse("origin/task/3") is None
+
+    single.fetch(refspecs=["+refs/heads/task/*:refs/remotes/origin/task/*"])
+    assert single.rev_parse("origin/task/3") == sha
+    assert single.rev_parse("origin/feature/x") is None
+
+    assert alice.delete_remote_branch("task/3", sha).ok
+    single.fetch(refspecs=["+refs/heads/task/*:refs/remotes/origin/task/*"])  # prunes
+    assert single.rev_parse("origin/task/3") is None
+    assert single.rev_parse("origin/main") == git_world.initial_sha
