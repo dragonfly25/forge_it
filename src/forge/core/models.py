@@ -6,11 +6,12 @@ abstract ``tier``/``effort`` of a task or subagent to the concrete model of the 
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
 from forge.core.config import ModelsConfig
+from forge.core.output import Level
 from forge.core.presets import Preset
 from forge.core.profile import AgentProfile, Profile
 from forge.core.tiers import TASK_TIER, TIERS, Effort, Tier
@@ -35,6 +36,18 @@ def model_map(agent: AgentProfile) -> dict[str, str]:
 
 
 @dataclass(frozen=True)
+class Note:
+    """One explanation of a resolution step.
+
+    ``info`` marks normal adjustments; ``warning`` marks a request that was ignored or could
+    not be honoured as asked.
+    """
+
+    level: Level
+    text: str
+
+
+@dataclass(frozen=True)
 class Resolution:
     """Result of resolving a tier/effort for one agent.
 
@@ -49,7 +62,7 @@ class Resolution:
     effort: Effort
     effort_value: str | None
     served: bool
-    notes: tuple[str, ...] = ()
+    notes: tuple[Note, ...] = ()
 
 
 def resolve(
@@ -58,7 +71,7 @@ def resolve(
     declared_tier: Tier | Literal["task"],
     declared_effort: Effort = Effort.MEDIUM,
     task_tier: Tier | None = None,
-    role: str | None = None,
+    roles: Sequence[str] = (),
     constraints: ModelsConfig | None = None,
     override_tier: Tier | None = None,
     override_effort: Effort | None = None,
@@ -69,57 +82,67 @@ def resolve(
 
     ``presets`` is used only to know whether the tool supports effort; when ``None`` or the
     tool has no preset, effort support is assumed and only the agent's mapping is consulted.
+    ``roles`` are the role and/or command names looked up in ``models.min_tier_for`` (e.g.
+    ``("reviewer", "plan")``); the highest matching minimum applies.
     """
-    notes: list[str] = []
+    notes: list[Note] = []
+
+    def info(text: str) -> None:
+        notes.append(Note(Level.INFO, text))
+
+    def warn(text: str) -> None:
+        notes.append(Note(Level.WARNING, text))
 
     # 1. Base tier.
     if declared_tier == TASK_TIER:
         if task_tier is None:
             tier = Tier.STANDARD
-            notes.append("tier `task` without a task: using standard")
+            info("tier `task` without a task: using standard")
         else:
             tier = task_tier
     else:
         tier = Tier(declared_tier)
 
-    # 2. Project minimum for the role or command.
-    if role is not None and constraints is not None:
-        minimum = constraints.min_tier_for.get(role)
-        if minimum is not None and minimum.rank > tier.rank:
-            notes.append(f"tier raised from {tier} to {minimum} by models.min_tier_for.{role}")
-            tier = minimum
+    # 2. Project minimum for the roles or command: the highest matching minimum wins.
+    if constraints is not None:
+        base = tier
+        raised_by: str | None = None
+        for key in roles:
+            minimum = constraints.min_tier_for.get(key)
+            if minimum is not None and minimum.rank > tier.rank:
+                tier, raised_by = minimum, key
+        if raised_by is not None:
+            info(f"tier raised from {base} to {tier} by models.min_tier_for.{raised_by}")
 
     # 3. Manual overrides may only raise.
     if override_tier is not None:
         if override_tier.rank > tier.rank:
-            notes.append(f"tier raised from {tier} to {override_tier} by --tier")
+            info(f"tier raised from {tier} to {override_tier} by --tier")
             tier = override_tier
         elif override_tier.rank < tier.rank:
-            notes.append(f"--tier {override_tier} ignored: overrides may only raise (tier {tier})")
+            warn(f"--tier {override_tier} ignored: overrides may only raise (tier {tier})")
     effort = declared_effort
     if override_effort is not None:
         if override_effort.rank > effort.rank:
-            notes.append(f"effort raised from {effort} to {override_effort} by --effort")
+            info(f"effort raised from {effort} to {override_effort} by --effort")
             effort = override_effort
         elif override_effort.rank < effort.rank:
-            notes.append(
-                f"--effort {override_effort} ignored: overrides may only raise (effort {effort})"
-            )
+            warn(f"--effort {override_effort} ignored: overrides may only raise (effort {effort})")
 
     # 4. Serving.
     effective = serving_tier(agent, tier)
     served = effective is not None
     if effective is not None and effective != tier:
-        notes.append(f"agent {agent.id} has no {tier} model: using its {effective} model")
+        info(f"agent {agent.id} has no {tier} model: using its {effective} model")
     if effective is None:
         if any_tier and agent.tiers:
             effective = max(agent.tiers, key=lambda t: t.rank)
-            notes.append(
-                f"warning: agent {agent.id} cannot serve tier {tier}; "
+            warn(
+                f"agent {agent.id} cannot serve tier {tier}; "
                 f"--any-tier uses its highest tier ({effective})"
             )
         else:
-            notes.append(f"agent {agent.id} cannot serve tier {tier}")
+            warn(f"agent {agent.id} cannot serve tier {tier}")
     model = agent.tiers[effective] if effective is not None else None
 
     # 5. Effort.
@@ -127,10 +150,10 @@ def resolve(
     effort_value: str | None
     if preset is not None and not preset.supports_effort:
         effort_value = None
-        notes.append(f"effort ignored: tool {agent.tool} does not support it")
+        warn(f"effort ignored: tool {agent.tool} does not support it")
     elif effort not in agent.effort:
         effort_value = None
-        notes.append(f"effort ignored: agent {agent.id} has no mapping for {effort}")
+        warn(f"effort ignored: agent {agent.id} has no mapping for {effort}")
     else:
         effort_value = agent.effort[effort]
 
@@ -153,7 +176,7 @@ def resolve(
 class Violation:
     """A profile problem relative to project constraints. Never changes anything."""
 
-    level: Literal["warning", "info"]
+    level: Level
     agent_id: str
     message: str
     fix: str
@@ -198,7 +221,7 @@ def check_profile(
                 if provider not in constraints.allowed_providers:
                     violations.append(
                         Violation(
-                            "warning",
+                            Level.WARNING,
                             agent.id,
                             f"provider {provider!r} is not in models.allowed_providers "
                             f"({', '.join(constraints.allowed_providers)})",
@@ -206,13 +229,15 @@ def check_profile(
                             "to allow it in .forge/config.yml",
                         )
                     )
-        for role, minimum in constraints.min_tier_for.items():
+        # One check per role or command key; resolve() applies the highest matching minimum.
+        for key, minimum in constraints.min_tier_for.items():
             if not can_serve(agent, minimum):
                 violations.append(
                     Violation(
-                        "warning",
+                        Level.WARNING,
                         agent.id,
-                        f"cannot serve {role!r}, which requires tier {minimum} or higher",
+                        f"cannot serve {key!r} (models.min_tier_for), which requires tier "
+                        f"{minimum} or higher",
                         f"map a model for tier {minimum}: "
                         f"`forge profile set {agent.id}.{minimum}=<model>`",
                     )
@@ -221,7 +246,7 @@ def check_profile(
         if strong is not None and strong not in verified:
             violations.append(
                 Violation(
-                    "warning",
+                    Level.WARNING,
                     agent.id,
                     f"strong model {strong!r} is not a known strong model of any hosted preset",
                     "map `strong` to a hosted strong model (e.g. "
@@ -235,7 +260,7 @@ def check_profile(
             if not same_alias(current, recommended):
                 violations.append(
                     Violation(
-                        "info",
+                        Level.INFO,
                         agent.id,
                         f"{tier} uses {current!r}; the project recommends {recommended!r}",
                         f"`forge profile set {agent.id}.{tier}={recommended}` to follow it",
@@ -274,6 +299,7 @@ def preset_drift(profile: Profile, presets: Mapping[str, Preset]) -> list[Drift]
 
 __all__ = [
     "Drift",
+    "Note",
     "Resolution",
     "Violation",
     "can_serve",

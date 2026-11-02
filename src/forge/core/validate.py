@@ -99,10 +99,13 @@ class Fields:
         return self.fail(
             key,
             f"expected {expected}, got {type_name(value)}",
-            f"write it as `{key}: {example}`",
+            f"write it as {_yaml_example(key, example)}",
         )
 
     def _missing(self, key: str, example: str) -> ConfigError:
+        """Error for a required key that is absent, or present with a null value."""
+        if key in self.data:
+            return self.fail(key, "is empty (null)", f"give it a value: `{key}: {example}`")
         return self.fail(key, "required key is missing", f"add `{key}: {example}`")
 
     def has(self, key: str) -> bool:
@@ -300,6 +303,17 @@ class Fields:
                     else f"remove it; allowed keys: {', '.join(known) or '(none)'}"
                 )
                 raise self.fail(str(k), "unknown key", fix)
+
+
+def _yaml_example(key: str, example: str) -> str:
+    """Render ``key: example`` as pasteable YAML; a dotted key nests under its parent.
+
+    For example ``tiers.strong`` with ``"x"`` renders as: `strong: "x"` under `tiers:`.
+    """
+    parent, sep, leaf = key.rpartition(".")
+    if not sep:
+        return f"`{key}: {example}`"
+    return f"`{leaf}: {example}` under `{parent}:`"
 
 
 def _suggest(word: str, options: list[str]) -> str | None:

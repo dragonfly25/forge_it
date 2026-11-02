@@ -90,6 +90,24 @@ def test_str_missing_required() -> None:
     assert err.hint is not None and "name:" in err.hint
 
 
+def test_str_null_is_reported_as_empty() -> None:
+    err = error_of(fields({"name": None}).str_, "name")
+    assert err.key == "name" and err.problem == "is empty (null)"
+    assert err.hint is not None and "`name:" in err.hint
+
+
+def test_mapping_null_is_reported_as_empty() -> None:
+    err = error_of(fields({"m": None}).mapping, "m", required=True)
+    assert err.key == "m" and err.problem == "is empty (null)"
+
+
+def test_nested_wrong_type_fix_is_pasteable_yaml() -> None:
+    err = error_of(fields({"tiers": {"strong": 3}}, "models").str_map, "tiers")
+    assert err.key == "models.tiers.strong"
+    assert err.hint == 'write it as `strong: "3"` under `tiers:`'
+    assert "tiers.strong:" not in err.hint
+
+
 def test_str_wrong_type() -> None:
     err = error_of(fields({"name": 3}).str_, "name")
     assert "expected a string, got integer" in err.problem

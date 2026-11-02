@@ -219,7 +219,7 @@ def test_defaults_and_normalization() -> None:
         ({"zones": {"a//b": {"paths": ["a"]}}}, "zones.a//b", "invalid zone name"),
         ({"zones": {"-a": {"paths": ["a"]}}}, "zones.-a", "invalid zone name"),
         ({"zones": {"a/": {"paths": ["a"]}}}, "zones.a/", "invalid zone name"),
-        ({"zones": {"a": None}}, "zones.a", "required key is missing"),
+        ({"zones": {"a": None}}, "zones.a", "is empty (null)"),
         ({"zones": {"a": "x/**"}}, "zones.a", "expected a mapping"),
         (
             {"zones": {"editor/canvas": {"paths": ["a"], "path": 1}}},

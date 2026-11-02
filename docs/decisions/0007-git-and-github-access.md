@@ -28,5 +28,14 @@ All git access goes through `core/git.py`, and all GitHub access goes through th
 
 - `gh api` flags were checked against `gh api --help` (gh 2.92). Lists use `--paginate --slurp`. Writes use `-X METHOD` with a JSON body via `--input -`. GET query parameters go in the endpoint URL, because `-f` would switch the request to POST.
 - `remove_label` treats a 404 as "already absent".
-- `Git.push` uses `--porcelain`. Lease rejections and remote rejections caused by a lost race (`cannot lock ref`, `reference already exists`, `but expected`) return `rejected=True`. Other remote rejections, such as hooks or protected branches, raise `GitError`.
+- `Git.push` uses `--porcelain` and requires `lease.ref == dst_ref`. A local `[rejected]` means a lost race (`rejected=True`). A `[remote rejected]` is classified by **asking the remote for the ref's current value** (`ls-remote`), never by matching error wording:
+  - If the ref equals what we pushed (or is absent, for a delete), the push landed: `ok=True`.
+  - If it no longer equals the lease's expected value, we lost the race: `rejected=True`.
+  - Anything else raises `GitError` with the full output. That covers hook or policy refusals, directory/file ref clashes such as `refs/heads/task` vs `refs/heads/task/42`, and a failed `ls-remote`.
+  A false win is impossible, because it would need our unique sha on the remote. The tests reproduce server-side races deterministically with `pre-receive` hooks.
+- `rev_parse` returns `None` only when the ref is missing. Other failures raise.
+- Open for Phase 3: if a claim push landed before an interruption, a re-run sees a stale lease and reports `rejected`. `forge next` must treat "the branch tip carries my own `Forge-Claim`/`Forge-Agent` trailers" as already claimed. If `ls-remote` reads a lagging replica, the CLI raises an error instead of reporting a false loss; the live smoke test should cover this.
 - Open, to decide in Phase 3/5: whether Forge's own wip and claim commits and pushes should bypass the user's git hooks (`--no-verify`). Claim commits made with `commit-tree` never run commit hooks.
+- **List ordering contract**: issues, PRs, comments and reviews come back oldest first. `GhCliClient` sends `sort=created&direction=asc`. Labels are sorted by name, case-insensitively, and milestones by number. `FakeGitHub` enforces the same order, so tests cannot depend on an order production doesn't give.
+- **Minimum gh version**: `MIN_GH_VERSION = 2.48.0`, the first release with `gh api --slurp` (cli/cli PR #8620). `forge setup --check` (Phase 8) verifies it with `parse_gh_version`.
+- `PullRequest.mergeable` is only populated by `get_pull`. List endpoints return `None`.

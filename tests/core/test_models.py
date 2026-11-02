@@ -7,6 +7,7 @@ import pytest
 from forge.core.config import ModelsConfig
 from forge.core.models import (
     Drift,
+    Note,
     can_serve,
     check_profile,
     model_map,
@@ -15,6 +16,7 @@ from forge.core.models import (
     same_alias,
     serving_tier,
 )
+from forge.core.output import Level
 from forge.core.presets import Preset, load_presets
 from forge.core.profile import AgentProfile, Profile
 from forge.core.tiers import Effort, Tier
@@ -84,9 +86,9 @@ def test_model_map_strongest_first() -> None:
         ({"declared_tier": "task", "task_tier": S}, S, "opus"),
         ({"declared_tier": "task"}, M, "sonnet"),
         ({"declared_tier": L}, L, "haiku"),
-        ({"declared_tier": L, "role": "reviewer", "constraints": CONSTRAINTS}, S, "opus"),
-        ({"declared_tier": L, "role": "explorer", "constraints": CONSTRAINTS}, L, "haiku"),
-        ({"declared_tier": L, "role": "reviewer"}, L, "haiku"),  # no constraints given
+        ({"declared_tier": L, "roles": ("reviewer",), "constraints": CONSTRAINTS}, S, "opus"),
+        ({"declared_tier": L, "roles": ("explorer",), "constraints": CONSTRAINTS}, L, "haiku"),
+        ({"declared_tier": L, "roles": ("reviewer",)}, L, "haiku"),  # no constraints given
         ({"declared_tier": L, "override_tier": M}, M, "sonnet"),
         ({"declared_tier": S, "override_tier": L}, S, "opus"),
         ({"declared_tier": "task", "task_tier": L, "override_tier": S}, S, "opus"),
@@ -102,17 +104,47 @@ def test_resolve_tier_precedence(kwargs: dict[str, object], tier: Tier, model: s
 
 def test_task_without_task_notes_standard() -> None:
     res = resolve(FULL, declared_tier="task")
-    assert any("standard" in n for n in res.notes)
+    assert res.notes == (Note(Level.INFO, "tier `task` without a task: using standard"),)
 
 
 def test_min_tier_for_note() -> None:
-    res = resolve(FULL, declared_tier=L, role="plan", constraints=CONSTRAINTS)
-    assert any("min_tier_for.plan" in n for n in res.notes)
+    res = resolve(FULL, declared_tier=L, roles=("plan",), constraints=CONSTRAINTS)
+    assert res.tier == S
+    assert res.notes == (
+        Note(Level.INFO, "tier raised from light to strong by models.min_tier_for.plan"),
+    )
+
+
+@pytest.mark.parametrize("roles", [("explorer", "reviewer"), ("reviewer", "explorer")])
+def test_min_tier_for_highest_of_several_roles(roles: tuple[str, str]) -> None:
+    constraints = ModelsConfig(min_tier_for={"explorer": M, "reviewer": S})
+    res = resolve(FULL, declared_tier=L, roles=roles, constraints=constraints)
+    assert res.tier == S
+    assert [n.text for n in res.notes] == [
+        "tier raised from light to strong by models.min_tier_for.reviewer"
+    ]
+
+
+def test_min_tier_for_role_and_command() -> None:
+    constraints = ModelsConfig(min_tier_for={"implementer": M, "plan": S})
+    res = resolve(FULL, declared_tier=L, roles=("implementer", "plan"), constraints=constraints)
+    assert res.tier == S
+    assert "min_tier_for.plan" in res.notes[0].text
+    res = resolve(FULL, declared_tier=L, roles=("implementer", "next"), constraints=constraints)
+    assert res.tier == M
+    assert "min_tier_for.implementer" in res.notes[0].text
+
+
+def test_min_tier_for_unknown_roles_and_no_constraints() -> None:
+    res = resolve(FULL, declared_tier=L, roles=("other",), constraints=CONSTRAINTS)
+    assert res.tier == L and res.notes == ()
+    res = resolve(FULL, declared_tier=L, roles=("plan",))
+    assert res.tier == L and res.notes == ()
 
 
 def test_min_tier_for_never_lowers() -> None:
     constraints = ModelsConfig(min_tier_for={"explorer": L})
-    res = resolve(FULL, declared_tier=S, role="explorer", constraints=constraints)
+    res = resolve(FULL, declared_tier=S, roles=("explorer",), constraints=constraints)
     assert res.tier == S
     assert res.notes == ()
 
@@ -127,14 +159,17 @@ def test_lower_override_is_ignored_with_note() -> None:
     )
     assert res.tier == S
     assert res.effort == Effort.HIGH
-    assert any("--tier light ignored" in n for n in res.notes)
-    assert any("--effort low ignored" in n for n in res.notes)
+    assert all(n.level == Level.WARNING for n in res.notes)
+    assert any("--tier light ignored" in n.text for n in res.notes)
+    assert any("--effort low ignored" in n.text for n in res.notes)
 
 
 def test_override_after_min_tier_for_only_raises() -> None:
-    res = resolve(FULL, declared_tier=L, role="reviewer", constraints=CONSTRAINTS, override_tier=M)
+    res = resolve(
+        FULL, declared_tier=L, roles=("reviewer",), constraints=CONSTRAINTS, override_tier=M
+    )
     assert res.tier == S
-    assert any("--tier standard ignored" in n for n in res.notes)
+    assert any(n.level == Level.WARNING and "--tier standard ignored" in n.text for n in res.notes)
 
 
 def test_equal_override_is_silent() -> None:
@@ -146,7 +181,7 @@ def test_effort_raised_by_override() -> None:
     res = resolve(FULL, declared_tier=M, declared_effort=Effort.LOW, override_effort=Effort.HIGH)
     assert res.effort == Effort.HIGH
     assert res.effort_value == "high"
-    assert any("raised" in n for n in res.notes)
+    assert any(n.level == Level.INFO and "raised" in n.text for n in res.notes)
 
 
 def test_only_strong_serves_standard() -> None:
@@ -155,6 +190,9 @@ def test_only_strong_serves_standard() -> None:
     assert res.tier == M
     assert res.effective_tier == S
     assert res.model == "opus"
+    assert res.notes == (
+        Note(Level.INFO, "agent only-strong has no standard model: using its strong model"),
+    )
 
 
 def test_only_light_cannot_serve_strong() -> None:
@@ -162,7 +200,7 @@ def test_only_light_cannot_serve_strong() -> None:
     assert not res.served
     assert res.effective_tier is None
     assert res.model is None
-    assert any("cannot serve" in n for n in res.notes)
+    assert any(n.level == Level.WARNING and "cannot serve" in n.text for n in res.notes)
 
 
 def test_any_tier_uses_highest_mapped_with_warning() -> None:
@@ -171,7 +209,8 @@ def test_any_tier_uses_highest_mapped_with_warning() -> None:
     assert not res.served
     assert res.effective_tier == M
     assert res.model == "sonnet"
-    assert any(n.startswith("warning:") and "--any-tier" in n for n in res.notes)
+    assert any(n.level == Level.WARNING and "--any-tier" in n.text for n in res.notes)
+    assert not any(n.text.startswith("warning:") for n in res.notes)
 
 
 def test_any_tier_without_tiers() -> None:
@@ -194,14 +233,14 @@ def test_effort_ignored_when_tool_does_not_support_it(presets: dict[str, Preset]
     assert res.model == "llama3"
     assert res.effort == Effort.HIGH
     assert res.effort_value is None
-    assert any("does not support" in n for n in res.notes)
+    assert any(n.level == Level.WARNING and "does not support" in n.text for n in res.notes)
 
 
 def test_effort_ignored_when_mapping_missing(presets: dict[str, Preset]) -> None:
     res = resolve(OPENAI_TEAM, declared_tier=M, presets=presets)
     assert res.model == "gpt-5"
     assert res.effort_value is None
-    assert any("no mapping for medium" in n for n in res.notes)
+    assert any(n.level == Level.WARNING and "no mapping for medium" in n.text for n in res.notes)
 
 
 # -- check_profile ----------------------------------------------------------------------------
@@ -237,8 +276,8 @@ def test_unservable_min_tier_for_role(presets: dict[str, Preset]) -> None:
         profile_of(OPENAI_TEAM), ModelsConfig(min_tier_for={"reviewer": S}), presets
     )
     assert len(violations) == 1
-    assert violations[0].level == "warning"
-    assert "reviewer" in violations[0].message
+    assert violations[0].level is Level.WARNING
+    assert "'reviewer' (models.min_tier_for)" in violations[0].message
     assert "openai-team.strong" in violations[0].fix
 
 
