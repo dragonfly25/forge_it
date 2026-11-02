@@ -23,3 +23,10 @@ All git access goes through `core/git.py`, and all GitHub access goes through th
 
 - Tests use real temporary git repositories (a bare remote plus clones) through the `git_world` fixture in `tests/conftest.py`, and `FakeGitHub` for GitHub.
 - GraphQL (Projects v2, §15) is added to the protocol only when Phase 9 needs it.
+
+## Implementation notes (Phase 1)
+
+- `gh api` flags were checked against `gh api --help` (gh 2.92). Lists use `--paginate --slurp`. Writes use `-X METHOD` with a JSON body via `--input -`. GET query parameters go in the endpoint URL, because `-f` would switch the request to POST.
+- `remove_label` treats a 404 as "already absent".
+- `Git.push` uses `--porcelain`. Lease rejections and remote rejections caused by a lost race (`cannot lock ref`, `reference already exists`, `but expected`) return `rejected=True`. Other remote rejections, such as hooks or protected branches, raise `GitError`.
+- Open, to decide in Phase 3/5: whether Forge's own wip and claim commits and pushes should bypass the user's git hooks (`--no-verify`). Claim commits made with `commit-tree` never run commit hooks.
