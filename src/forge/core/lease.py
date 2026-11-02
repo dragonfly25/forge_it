@@ -32,7 +32,13 @@ from forge.core.errors import ForgeError, PreconditionError
 from forge.core.git import CommitInfo, Git
 from forge.core.github import Comment, GitHubClient, GitHubError
 from forge.core.profile import AgentProfile
-from forge.core.refresh import TaskBranch, TaskRecord, fetch_task_refs, gather_task_branches
+from forge.core.refresh import (
+    TaskBranch,
+    TaskRecord,
+    check_full_history,
+    fetch_task_refs,
+    gather_task_branches,
+)
 from forge.core.tasks import (
     BranchEvent,
     TaskBodyError,
@@ -342,16 +348,6 @@ def check_identity(github: GitHubClient, profile_login: str) -> str:
     return login
 
 
-def check_full_history(git: Git) -> None:
-    """Raise :class:`PreconditionError` (exit 5) on a shallow clone."""
-    if git.is_shallow():
-        raise PreconditionError(
-            "the repository is a shallow clone; claims need full history to find merge-bases",
-            hint="run `git fetch --unshallow`; in GitHub Actions use actions/checkout with "
-            "`fetch-depth: 0`",
-        )
-
-
 def load_task(github: GitHubClient, issue_number: int) -> TaskRecord:
     """Return the issue and its parsed metadata; :class:`ForgeError` if it is not a task."""
     issue = github.get_issue(issue_number)
@@ -379,23 +375,32 @@ def read_branch(ctx: LeaseContext, issue_number: int) -> TaskBranch | None:
 
 @dataclass(frozen=True)
 class OwnClaim:
-    """A live claim of the current user on one task, with its lease comment."""
+    """A claim of the current user on one task, with its lease comment.
+
+    ``stale_since`` is when the claim went stale, or ``None`` while it is live.
+    """
 
     record: TaskRecord
     claim: ClaimInfo
     lease: LeaseData | None
     comments: tuple[Comment, ...]
     login: str
+    stale_since: datetime | None = None
 
 
-def require_own_live_claim(ctx: LeaseContext, issue_number: int) -> OwnClaim:
-    """Check that ``task/<issue_number>`` holds a live claim of mine; return it.
+def require_own_claim(ctx: LeaseContext, issue_number: int) -> OwnClaim:
+    """Check that the last Forge event of ``task/<issue_number>`` is a claim of mine; return it.
+
+    My own **stale** claim is accepted (ADR 0009, implementation notes): nobody reclaimed it,
+    since a reclaim would make another claim the branch's last event. The caller reports
+    :attr:`OwnClaim.stale_since` as a warning.
 
     Raises :class:`PreconditionError` (exit 5) when the login differs from the profile, the
-    clone is shallow, or the task has no live claim made by my login and my agent.
+    clone is shallow, or the branch's last event is not a claim made by my login and agent
+    (someone else's claim is refused whether it is fresh or stale).
     """
     login = check_identity(ctx.github, ctx.profile_login)
-    check_full_history(ctx.git)
+    check_full_history(ctx.git, "claims")
     record = load_task(ctx.github, issue_number)
     branch = read_branch(ctx, issue_number)
     name = TaskMetadata.branch_name(issue_number)
@@ -416,13 +421,10 @@ def require_own_live_claim(ctx: LeaseContext, issue_number: int) -> OwnClaim:
     found = find_lease(comments)
     lease = None if found is None else found.data
     activity = last_activity(claim.tip_date, lease, claim.sha)
+    stale_since = None
     if is_stale(activity, ctx.config.lease_hours, ctx.now()):
-        raise PreconditionError(
-            f"your claim on #{issue_number} ({record.meta.id}) went stale at "
-            f"{format_time(stale_at(activity, ctx.config.lease_hours))}",
-            hint=f"take it over again with `forge reclaim {issue_number}`",
-        )
-    return OwnClaim(record, claim, lease, comments, login)
+        stale_since = stale_at(activity, ctx.config.lease_hours)
+    return OwnClaim(record, claim, lease, comments, login, stale_since)
 
 
 @dataclass(frozen=True)
@@ -434,6 +436,7 @@ class HeartbeatOutcome:
     claim: str
     heartbeat_at: datetime
     stale_at: datetime
+    warnings: tuple[str, ...] = ()
 
     def to_data(self) -> dict[str, Any]:
         """JSON ``data`` for ``forge heartbeat``."""
@@ -443,16 +446,18 @@ class HeartbeatOutcome:
             "claim": self.claim,
             "heartbeat_at": format_time(self.heartbeat_at),
             "stale_at": format_time(self.stale_at),
+            "warnings": list(self.warnings),
         }
 
 
 def heartbeat(ctx: LeaseContext, issue_number: int) -> HeartbeatOutcome:
-    """Refresh the lease of my live claim on ``issue_number`` (sets ``heartbeat_at``).
+    """Refresh the lease of my claim on ``issue_number`` (sets ``heartbeat_at``).
 
-    Requires a live claim that is mine (exit 5 otherwise). ``claimed_at`` is kept when the
-    lease comment already names this claim, else it is the claim commit's date.
+    Requires that the branch's last event is a claim of mine (exit 5 otherwise). A stale
+    claim of mine is renewed, with a warning. ``claimed_at`` is kept when the lease comment
+    already names this claim, else it is the claim commit's date.
     """
-    own = require_own_live_claim(ctx, issue_number)
+    own = require_own_claim(ctx, issue_number)
     now = ctx.now()
     claim = own.claim
     lease = own.lease
@@ -467,10 +472,87 @@ def heartbeat(ctx: LeaseContext, issue_number: int) -> HeartbeatOutcome:
     )
     upsert_lease(ctx.github, issue_number, data, comments=own.comments)
     activity = last_activity(claim.tip_date, data, claim.sha)
+    warnings: tuple[str, ...] = ()
+    if own.stale_since is not None:
+        warnings = (
+            f"your claim on #{issue_number} ({own.record.meta.id}) had gone stale at "
+            f"{format_time(own.stale_since)}; renewed",
+        )
     return HeartbeatOutcome(
         issue=issue_number,
         task_id=own.record.meta.id,
         claim=claim.sha,
         heartbeat_at=now,
         stale_at=stale_at(activity, ctx.config.lease_hours),
+        warnings=warnings,
+    )
+
+
+# --------------------------------------------------------------------------- summary
+
+
+def lease_summary(
+    lease: LeaseData | None,
+    claim: ClaimInfo | None,
+    *,
+    lease_hours: int,
+    now: datetime,
+) -> dict[str, Any] | None:
+    """Summarize the lease of one task for the task context (``None``: never claimed).
+
+    ``claim`` is the branch's claim when its last Forge event is a claim, else ``None``.
+    ``state`` is ``live`` or ``stale`` for a claim, otherwise ``released`` (the lease comment
+    says so) or ``ended`` (the branch moved on, e.g. a handoff, or is gone). The lease
+    comment's timestamps count only when it names the branch's claim commit.
+    """
+    if claim is None:
+        if lease is None:
+            return None
+        return {
+            "state": "released" if lease.released_at is not None else "ended",
+            "owner": lease.owner,
+            "agent": lease.agent,
+            "claim": lease.claim,
+            "claimed_at": format_time(lease.claimed_at),
+            "heartbeat_at": format_time(lease.heartbeat_at),
+            "released_at": None if lease.released_at is None else format_time(lease.released_at),
+            "last_activity": None,
+            "stale_at": None,
+        }
+    same = lease is not None and lease.claim == claim.sha
+    activity = last_activity(claim.tip_date, lease, claim.sha)
+    return {
+        "state": "stale" if is_stale(activity, lease_hours, now) else "live",
+        "owner": claim.owner,
+        "agent": claim.agent,
+        "claim": claim.sha,
+        "claimed_at": format_time(lease.claimed_at if same and lease else claim.date),
+        "heartbeat_at": format_time(lease.heartbeat_at) if same and lease else None,
+        "released_at": None,
+        "last_activity": format_time(activity),
+        "stale_at": format_time(stale_at(activity, lease_hours)),
+    }
+
+
+def describe_lease(
+    git: Git,
+    config: ForgeConfig,
+    issue_number: int,
+    task_id: str,
+    comments: Sequence[Comment],
+    *,
+    now: datetime,
+    remote: str = "origin",
+) -> dict[str, Any] | None:
+    """Fetch the task branches and return :func:`lease_summary` for ``issue_number``.
+
+    Read-only on the remote: it fetches, never pushes.
+    """
+    default = config.project.default_branch
+    fetch_task_refs(git, default, remote)
+    branch = gather_task_branches(git, default, remote).branches.get(issue_number)
+    claim = None if branch is None else find_claim(issue_number, branch, task_id)
+    found = find_lease(comments)
+    return lease_summary(
+        None if found is None else found.data, claim, lease_hours=config.lease_hours, now=now
     )

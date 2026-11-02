@@ -1156,9 +1156,30 @@ def test_release_requires_my_live_claim(world: World) -> None:
     run(world.ctx("carol"))
     with pytest.raises(PreconditionError):
         release_claim(world.ctx("alice"), n)
+    # someone else's claim is refused, fresh or stale
     stale = Clock(T0 + timedelta(hours=25))
-    with pytest.raises(PreconditionError, match="stale"):
-        release_claim(world.ctx("carol", clock=stale), n)
+    with pytest.raises(PreconditionError, match="no live claim"):
+        release_claim(world.ctx("alice", clock=stale), n)
+
+
+def test_release_accepts_my_own_stale_claim(world: World) -> None:
+    n = world.task("M1-T01", ["api"])
+    run(world.ctx("carol"))
+    stale = Clock(T0 + timedelta(hours=25))
+    released = release_claim(world.ctx("carol", clock=stale), n)
+    assert released.release_commit is not None
+    assert any("had gone stale at" in w and w.endswith("; released") for w in released.warnings)
+    assert world.fake.get_issue(n).assignees == ()
+
+
+def test_release_refused_after_someone_reclaimed(world: World) -> None:
+    n = world.task("M1-T01", ["api"])
+    run(world.ctx("carol"))
+    late = Clock(T0 + timedelta(hours=25))
+    taken = run(world.ctx("dave", clock=late), task=str(n), reclaim=True)
+    assert taken.claimed is not None and taken.claimed.reclaimed
+    with pytest.raises(PreconditionError, match="no live claim"):
+        release_claim(world.ctx("carol", clock=late), n)
 
 
 def test_interrupted_release_is_completed(world: World) -> None:

@@ -47,6 +47,20 @@ _CURRENT_KEYS = ("task", "issue", "branch", "base", "claim", "agent", "claimed_a
 # -- paths -----------------------------------------------------------------------------------
 
 
+def main_worktree_root(git: Git, fallback: Path) -> Path:
+    """Return the root of the main working tree, even when ``git`` runs inside a linked worktree.
+
+    Task worktrees are siblings of the main clone, so a command run from inside a task
+    worktree must not nest the next worktree under it. Bare repositories (no main working
+    tree) return ``fallback``.
+    """
+    common = git.run("rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+    common_dir = Path(common)
+    if common_dir.name == ".git":
+        return common_dir.parent
+    return fallback
+
+
 def worktree_path(repo_root: Path, issue_number: int, worktrees_dir: Path | None = None) -> Path:
     """Return the worktree path for ``issue_number`` (spec §5.3, ADR 0009).
 
@@ -219,7 +233,7 @@ def prepare_workspace(
 
     # ---- check the target before changing anything
     if use_worktree:
-        path = worktree_path(repo_root, issue_number, worktrees_dir)
+        path = worktree_path(main_worktree_root(git, repo_root), issue_number, worktrees_dir)
         reuse = checked_out is not None and _same_path(checked_out, path)
         if checked_out is not None and not reuse:
             raise PreconditionError(

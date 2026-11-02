@@ -216,8 +216,63 @@ def test_heartbeat_on_git_world(git_world: GitWorld) -> None:
         run_heartbeat(world.ctx("bob"), n)
     with pytest.raises(PreconditionError, match="login"):
         run_heartbeat(world.ctx("alice", profile_login="bob"), n)
-    with pytest.raises(PreconditionError, match="stale"):
-        run_heartbeat(world.ctx("alice", clock=Clock(T0 + timedelta(hours=30))), n)
+    # my own stale claim (nobody reclaimed it) is renewed, with a warning
+    late = T0 + timedelta(hours=30)
+    renewed = run_heartbeat(world.ctx("alice", clock=Clock(late)), n)
+    assert renewed.heartbeat_at == late
+    assert renewed.stale_at == late + timedelta(hours=24)
+    assert len(renewed.warnings) == 1
+    assert "had gone stale at 2026-11-03T14:00:00Z; renewed" in renewed.warnings[0]
+    assert renewed.to_data()["warnings"] == list(renewed.warnings)
+    assert beat.warnings == ()
     other = world.task("M1-T02", ["web"])
     with pytest.raises(PreconditionError, match="does not exist"):
         run_heartbeat(world.ctx("alice"), other)
+
+
+def test_heartbeat_refuses_someone_elses_claim_fresh_or_stale(git_world: GitWorld) -> None:
+    world = World(git_world)
+    n = world.task("M1-T01", ["api"])
+    assert run(world.ctx("alice")).claimed is not None
+    with pytest.raises(PreconditionError, match="belongs to alice"):
+        run_heartbeat(world.ctx("bob"), n)
+    with pytest.raises(PreconditionError, match="belongs to alice"):
+        run_heartbeat(world.ctx("bob", clock=Clock(T0 + timedelta(hours=30))), n)
+    before = find_lease(world.fake.list_comments(n))
+    assert before is not None and before.data is not None
+    assert before.data.heartbeat_at == T0  # untouched
+
+
+def test_heartbeat_after_reclaim_is_refused_to_the_previous_owner(git_world: GitWorld) -> None:
+    world = World(git_world)
+    n = world.task("M1-T01", ["api"])
+    assert run(world.ctx("alice")).claimed is not None
+    late = Clock(T0 + timedelta(hours=30))
+    taken = run(world.ctx("bob", clock=late), task=str(n), reclaim=True)
+    assert taken.claimed is not None and taken.claimed.reclaimed
+    with pytest.raises(PreconditionError, match="belongs to bob"):
+        run_heartbeat(world.ctx("alice", clock=late), n)
+
+
+def test_lease_summary_states(git_world: GitWorld) -> None:
+    from forge.core.lease import describe_lease, lease_summary
+
+    assert lease_summary(None, None, lease_hours=24, now=T0) is None
+    ended = lease_summary(DATA, None, lease_hours=24, now=T0)
+    assert ended is not None and ended["state"] == "ended" and ended["stale_at"] is None
+    released = lease_summary(replace(DATA, released_at=T0), None, lease_hours=24, now=T0)
+    assert released is not None and released["state"] == "released"
+
+    world = World(git_world)
+    n = world.task("M1-T01", ["api"])
+    assert run(world.ctx("alice")).claimed is not None
+    git = world.git("alice")
+    comments = world.fake.list_comments(n)
+    live = describe_lease(git, world.ctx("alice").config, n, "M1-T01", comments, now=T0)
+    assert live is not None
+    assert live["state"] == "live" and live["owner"] == "alice"
+    assert live["heartbeat_at"] == "2026-11-02T09:00:00Z"
+    assert live["stale_at"] == "2026-11-03T09:00:00Z"
+    later = T0 + timedelta(hours=25)
+    stale = describe_lease(git, world.ctx("alice").config, n, "M1-T01", comments, now=later)
+    assert stale is not None and stale["state"] == "stale"

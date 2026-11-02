@@ -38,7 +38,6 @@ from forge.core.graph import GraphCycleError, TaskGraph, natural_key
 from forge.core.lease import (
     ClaimInfo,
     LeaseData,
-    check_full_history,
     check_identity,
     event_commit_index,
     find_claim,
@@ -56,10 +55,11 @@ from forge.core.profile import AgentProfile
 from forge.core.refresh import (
     TaskBranch,
     TaskRecord,
-    _parse_records,
+    check_full_history,
     ensure_labels,
     fetch_task_refs,
     gather_task_branches,
+    parse_records,
 )
 from forge.core.tasks import (
     BLOCKED_CONFLICT,
@@ -445,7 +445,7 @@ def _read_github(github: GitHubClient, warnings: list[str]) -> _GitHubState:
     milestones = frozenset(m.title for m in github.list_milestones(state="open"))
     issues = github.list_issues(state="all", labels=[FORGE_TASK_LABEL])
     heads = frozenset(pr.head for pr in github.list_pulls(state="open"))
-    records = tuple(_parse_records(issues, warnings))
+    records = tuple(parse_records(issues, warnings))
     first: dict[str, TaskRecord] = {}
     for rec in records:
         if rec.meta.id in first:
@@ -912,7 +912,7 @@ def claim_next(ctx: ClaimContext, options: NextOptions | None = None) -> NextOut
     opts = options or NextOptions()
     check_version(ctx)
     login = check_identity(ctx.github, ctx.profile_login)
-    check_full_history(ctx.git)
+    check_full_history(ctx.git, "claims")
 
     warnings: list[str] = []
     leases = _Leases(ctx.github)
@@ -1182,7 +1182,10 @@ def release_claim(
     delete_branch: bool = False,
     local_ref: str | None = None,
 ) -> ReleaseOutcome:
-    """Release my live claim on ``issue_number`` (``forge release-claim``, ADR 0009).
+    """Release my claim on ``issue_number`` (``forge release-claim``, ADR 0009).
+
+    My own stale claim is released too (with a warning) while the branch's last event is
+    still my claim; a claim of someone else, fresh or stale, is refused (exit 5).
 
     Pushes an empty ``Forge-Release`` commit on top of the **remote** tip with a lease
     (local commits never pushed are not published; their count is a warning). With
@@ -1192,11 +1195,11 @@ def release_claim(
     comment and set ``released_at`` in the lease comment (last, as the completion marker).
 
     A re-run after an interruption that followed the git step completes the GitHub steps.
-    Raises :class:`PreconditionError` (exit 5) when there is no live claim of mine.
+    Raises :class:`PreconditionError` (exit 5) when the branch does not end with my claim.
     ``local_ref`` is the local branch to compare with (default ``refs/heads/task/<n>``).
     """
     login = check_identity(ctx.github, ctx.profile_login)
-    check_full_history(ctx.git)
+    check_full_history(ctx.git, "claims")
     github = ctx.github
     record = load_task(github, issue_number)
     task_id = record.meta.id
@@ -1219,10 +1222,10 @@ def release_claim(
         assert branch is not None
         activity = last_activity(claim.tip_date, lease, claim.sha)
         if is_stale(activity, ctx.config.lease_hours, now):
-            raise PreconditionError(
-                f"your claim on #{issue_number} ({task_id}) went stale at "
-                f"{format_time(stale_at(activity, ctx.config.lease_hours))}",
-                hint=f"take it over again with `forge reclaim {issue_number}` first",
+            # Nobody reclaimed it (their claim would be the last event): release it anyway.
+            warnings.append(
+                f"your claim on #{issue_number} ({task_id}) had gone stale at "
+                f"{format_time(stale_at(activity, ctx.config.lease_hours))}; released"
             )
         claim_sha = claim.sha
         tip = branch.tip
@@ -1279,7 +1282,7 @@ def release_claim(
     github.remove_assignees(issue_number, [login])
     issues = github.list_issues(state="all", labels=[FORGE_TASK_LABEL])
     first: dict[str, bool] = {}
-    for rec in _parse_records(issues, []):
+    for rec in parse_records(issues, []):
         first.setdefault(rec.meta.id, rec.issue.state == "closed")
     if deleted:
         state = BranchState.absent()

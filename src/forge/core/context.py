@@ -20,8 +20,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from forge.core.github import Comment, Issue
-from forge.core.tasks import Status, TaskMetadata, split_body
+from forge.core.claim import resolve_task_ref
+from forge.core.config import ForgeConfig
+from forge.core.errors import ForgeError
+from forge.core.git import Git
+from forge.core.github import Comment, GitHubClient, Issue
+from forge.core.lease import describe_lease, load_task
+from forge.core.refresh import TaskRecord, parse_records
+from forge.core.tasks import FORGE_TASK_LABEL, TASK_ID_RE, Status, TaskMetadata, split_body
 from forge.core.zones import ZonesConfig
 
 HANDOFF_MARKER = "<!-- forge:handoff -->"
@@ -504,3 +510,63 @@ def render_context(ctx: TaskContext) -> str:
     if ctx.warnings:
         out += ["", "## Warnings", *(f"- {w}" for w in ctx.warnings)]
     return "\n".join(out) + "\n"
+
+
+# --------------------------------------------------------------------------- gathering
+
+
+def _resolve_any(ref: str, records: Sequence[TaskRecord]) -> int | None:
+    """Like ``resolve_task_ref`` (open tasks first), but also finds closed tasks."""
+    number = resolve_task_ref(ref, records)  # raises on a malformed reference
+    if number is not None:
+        return number
+    text = ref.strip()
+    if TASK_ID_RE.fullmatch(text):
+        closed = sorted(r.issue.number for r in records if r.meta.id == text)
+        return closed[0] if closed else None
+    return int(text.lstrip("#"))
+
+
+def gather_task_context(
+    github: GitHubClient,
+    git: Git,
+    config: ForgeConfig,
+    ref: str | int,
+    *,
+    repo_root: Path,
+    zones: ZonesConfig | None,
+    now: datetime,
+    remote: str = "origin",
+) -> TaskContext:
+    """Fetch an issue (``M1-T07``, ``#42``, ``42`` or a number) and build its task context.
+
+    Read-only: it lists GitHub data and fetches the task branches, never pushes or edits.
+    """
+    warnings: list[str] = []
+    issues = github.list_issues(state="all", labels=[FORGE_TASK_LABEL])
+    records = parse_records(issues, warnings)
+    if isinstance(ref, int):
+        number: int | None = ref
+    else:
+        number = _resolve_any(ref, records)
+    if number is None:
+        raise ForgeError(
+            f"{ref}: no Forge task matches",
+            hint="use a task id (M1-T07) or an issue number (#42 or 42)",
+        )
+    record = load_task(github, number)
+    tasks: dict[str, Issue] = {}
+    for rec in records:
+        tasks.setdefault(rec.meta.id, rec.issue)
+    comments = github.list_comments(number)
+    lease = describe_lease(git, config, number, record.meta.id, comments, now=now, remote=remote)
+    context = build_context(
+        record.issue,
+        record.meta,
+        comments=comments,
+        tasks=tasks,
+        repo_root=repo_root,
+        zones=zones,
+        lease=lease,
+    )
+    return context

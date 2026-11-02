@@ -361,3 +361,14 @@ def test_find_corrupt_current_raises(git_world: GitWorld) -> None:
     (alice.cwd / CURRENT_FILE).write_text("oops")
     with pytest.raises(ConfigError):
         find_current_task(alice)
+
+
+def test_worktree_from_inside_a_task_worktree_is_a_sibling(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    first = prepare_workspace(alice, repo_root=alice.cwd, issue_number=N, claim_tip=claim(alice))
+    inner = Git(first.path)
+    other = 8
+    tip = inner.commit_tree(inner.tree_of("origin/main"), parents=["origin/main"], message="c8")
+    ws = prepare_workspace(inner, repo_root=first.path, issue_number=other, claim_tip=tip)
+    assert ws.path == worktree_path(alice.cwd, other)
+    assert ws.path.parent == first.path.parent

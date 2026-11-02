@@ -146,14 +146,15 @@ def _config_hint(default_branch: str, remote: str) -> str:
     )
 
 
-def check_full_history(git: Git) -> None:
+def check_full_history(git: Git, command: str = "refresh") -> None:
     """Raise :class:`PreconditionError` (exit 5) when ``git`` is a shallow clone.
 
     Merge-bases between task branches and the default branch need the full history.
+    ``command`` names what needs it in the message (``refresh``, ``claims``...).
     """
     if git.is_shallow():
         raise PreconditionError(
-            "the repository is a shallow clone; refresh needs full history to find merge-bases",
+            f"the repository is a shallow clone; {command} needs full history to find merge-bases",
             hint="run `git fetch --unshallow`; in GitHub Actions use actions/checkout with "
             "`fetch-depth: 0`",
         )
@@ -233,7 +234,12 @@ def gather_task_branches(git: Git, default_branch: str, remote: str = "origin") 
 # --------------------------------------------------------------------------- plan
 
 
-def _parse_records(issues: Sequence[Issue], warnings: list[str]) -> list[TaskRecord]:
+def parse_records(issues: Sequence[Issue], warnings: list[str]) -> list[TaskRecord]:
+    """Parse the Forge block of each issue (sorted by number) into :class:`TaskRecord`.
+
+    Issues whose block is invalid or missing are skipped, with a warning appended to
+    ``warnings``.
+    """
     records: list[TaskRecord] = []
     for issue in sorted(issues, key=lambda i: i.number):
         try:
@@ -284,7 +290,7 @@ def plan_refresh(
     Only issues whose labels actually change appear in ``changes``.
     """
     warnings = list(warnings)
-    records = _parse_records(issues, warnings)
+    records = parse_records(issues, warnings)
 
     owner: dict[str, int] = {}
     deps_closed: dict[str, bool] = {}
