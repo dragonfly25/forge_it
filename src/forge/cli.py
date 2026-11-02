@@ -8,6 +8,7 @@ from typing import Annotated
 import typer
 
 from forge import __version__
+from forge.commands import refresh as refresh_cmd
 from forge.commands._output import GlobalOptions, run_command
 from forge.core.output import Result
 
@@ -59,3 +60,8 @@ def main(
         if help_text:
             typer.echo(help_text)
         raise typer.Exit(code=0)
+
+
+app.command("refresh", help="Recompute task status labels and unblock dependents.")(
+    refresh_cmd.refresh
+)

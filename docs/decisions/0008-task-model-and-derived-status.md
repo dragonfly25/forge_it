@@ -70,3 +70,11 @@ The inputs are the issue (state, state_reason, labels), its metadata, the closed
 - Handoff and release are visible to anyone who can fetch, without reading comments, so claim logic (Phase 3) and refresh agree.
 - Phase 3 must write these trailers. Phase 6's handoff writes `Forge-Handoff`.
 - Projects v2 mirroring (§15) will hook into the same desired-status result.
+
+## Implementation notes (Phase 2)
+
+- `refresh` data: `counts = {issues, tasks, skipped, changed, warnings, statuses}`, where `statuses` maps each status to the number of tasks in it. When two issues share a task id, the lowest issue number is used for dependency resolution, and both are still relabelled. A warning is emitted.
+- Task branches must be named exactly `task/<n>` with no leading zeros. Other branches under `task/` are ignored. If `origin/<default>` is missing, the whole branch history is scanned for events.
+- `refresh` does not check the CLI version against `forge_version`. It is a safe, idempotent relabel that also runs in CI. The check is added to `next` and `ship`, which refuse with exit 5, and to `setup` and `status`, which warn (Phase 3, 4, 6 and 8).
+- The radar workflow template (Phase 8) must check out with `fetch-depth: 0`, so that merge-bases exist.
+- `core/refresh.run_refresh` takes a `RefreshContext` protocol (`config`, `git`, `github`), because core cannot import `commands/`. `commands/_context.AppContext` satisfies it and is the shared context for every command. Tests swap the GitHub client with `monkeypatch.setattr(_context, "github_factory", ...)`.
