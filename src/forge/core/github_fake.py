@@ -10,14 +10,19 @@ It mirrors the GitHub rules Forge relies on:
 - closing sets ``closed_at`` and ``state_reason`` (``completed`` by default), reopening clears
   ``closed_at`` and sets ``state_reason`` to ``reopened``;
 - an author cannot approve or request changes on their own pull request;
-- only one open pull request may exist for a given head/base pair.
+- only one open pull request may exist for a given head/base pair;
+- labels, assignees and comments work on pull request numbers too;
+- merging refuses drafts and unmergeable pull requests (405), and closes the issues named by
+  closing keywords only when the base is the repository's default branch.
 
-List results are returned in ascending number (or id) order. Methods prefixed ``fake_`` are
-test helpers that drive state GitHub would change on its own (merges, the acting user).
+Ordering matches ``GitHubClient``: issues, pull requests, comments and reviews oldest first,
+labels by name (case-insensitive), milestones by number. Methods prefixed ``fake_`` are test
+helpers that drive state GitHub would change on its own (merges, pushes, the acting user).
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import replace
@@ -74,15 +79,16 @@ class FakeGitHub:
         repo: str = "acme/shop",
         user: str = "alice",
         clock: Callable[[], datetime] | None = None,
+        default_branch: str = "main",
     ):
         self.repo = repo
+        self.default_branch = default_branch
         self._user = user
         self._clock: Callable[[], datetime] = clock or _TickingClock()
         self._labels: dict[str, Label] = {}  # key: lower-cased name
         self._milestones: dict[int, Milestone] = {}
         self._issues: dict[int, Issue] = {}
         self._pulls: dict[int, PullRequest] = {}
-        self._pull_labels: dict[int, tuple[str, ...]] = {}
         self._pull_files: dict[int, list[str]] = {}
         self._comments: dict[int, Comment] = {}
         self._reviews: dict[int, Review] = {}
@@ -137,15 +143,27 @@ class FakeGitHub:
 
     def _labels_of(self, number: int) -> tuple[str, ...]:
         if number in self._pulls:
-            return self._pull_labels.get(number, ())
+            return self._pulls[number].labels
         return self._issue(number).labels
 
     def _store_labels(self, number: int, labels: tuple[str, ...]) -> None:
         if number in self._pulls:
-            self._pull_labels[number] = labels
+            self._pulls[number] = replace(self._pulls[number], labels=labels)
         else:
             issue = self._issue(number)
             self._issues[number] = replace(issue, labels=labels, updated_at=self._clock())
+
+    def _assignees_of(self, number: int) -> tuple[str, ...]:
+        if number in self._pulls:
+            return self._pulls[number].assignees
+        return self._issue(number).assignees
+
+    def _store_assignees(self, number: int, assignees: tuple[str, ...]) -> None:
+        if number in self._pulls:
+            self._pulls[number] = replace(self._pulls[number], assignees=assignees)
+        else:
+            issue = self._issue(number)
+            self._issues[number] = replace(issue, assignees=assignees, updated_at=self._clock())
 
     def _require_target(self, number: int) -> None:
         if number not in self._issues and number not in self._pulls:
@@ -160,8 +178,8 @@ class FakeGitHub:
     # ------------------------------------------------------------------ labels
 
     def list_labels(self) -> list[Label]:
-        """All labels, in creation order."""
-        return list(self._labels.values())
+        """All labels, by name (case-insensitive)."""
+        return sorted(self._labels.values(), key=lambda lb: (lb.name.lower(), lb.name))
 
     def create_label(self, name: str, color: str, description: str = "") -> Label:
         """Create a label. Names are unique case-insensitively."""
@@ -197,22 +215,27 @@ class FakeGitHub:
             for n, issue in self._issues.items():
                 renamed = tuple(label.name if x == old.name else x for x in issue.labels)
                 self._issues[n] = replace(issue, labels=renamed)
-            for n, pl in self._pull_labels.items():
-                self._pull_labels[n] = tuple(label.name if x == old.name else x for x in pl)
+            for n, pr in self._pulls.items():
+                renamed = tuple(label.name if x == old.name else x for x in pr.labels)
+                self._pulls[n] = replace(pr, labels=renamed)
         return label
 
     # ------------------------------------------------------------------ milestones
 
     def list_milestones(self, state: StateFilter = "all") -> list[Milestone]:
         """Milestones in the given state, by number."""
-        return [m for m in self._milestones.values() if _matches(state, m.state)]
+        return [m for _, m in sorted(self._milestones.items()) if _matches(state, m.state)]
 
     def create_milestone(self, title: str, description: str = "") -> Milestone:
         """Create an open milestone. Titles are unique."""
         if any(m.title == title for m in self._milestones.values()):
             raise GitHubError(f"milestone {title!r} already exists", status=422)
         milestone = Milestone(
-            number=self._next_milestone, title=title, state="open", description=description
+            number=self._next_milestone,
+            title=title,
+            state="open",
+            description=description,
+            due_on=None,
         )
         self._next_milestone += 1
         self._milestones[milestone.number] = milestone
@@ -220,10 +243,40 @@ class FakeGitHub:
 
     def close_milestone(self, number: int) -> Milestone:
         """Close a milestone."""
-        if number not in self._milestones:
+        return self.update_milestone(number, state="closed")
+
+    def update_milestone(
+        self,
+        number: int,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        state: IssueState | None = None,
+        due_on: datetime | None = None,
+    ) -> Milestone:
+        """Change a milestone; renaming keeps titles unique and renames it on issues."""
+        old = self._milestones.get(number)
+        if old is None:
             raise GitHubError(f"milestone {number} not found", status=404)
-        milestone = replace(self._milestones[number], state="closed")
+        if state is not None and state not in ("open", "closed"):
+            raise GitHubError(f"invalid state {state!r}", status=422)
+        if due_on is not None and due_on.tzinfo is None:
+            raise GitHubError("due_on must be timezone-aware", status=422)
+        taken = {m.title for m in self._milestones.values() if m.number != number}
+        if title is not None and title in taken:
+            raise GitHubError(f"milestone {title!r} already exists", status=422)
+        milestone = replace(
+            old,
+            title=title if title is not None else old.title,
+            description=description if description is not None else old.description,
+            state=state if state is not None else old.state,
+            due_on=due_on.astimezone(UTC) if due_on is not None else old.due_on,
+        )
         self._milestones[number] = milestone
+        if milestone.title != old.title:
+            for n, issue in self._issues.items():
+                if issue.milestone == old.title:
+                    self._issues[n] = replace(issue, milestone=milestone.title)
         return milestone
 
     # ------------------------------------------------------------------ issues
@@ -343,16 +396,16 @@ class FakeGitHub:
         self._store_labels(number, self._canonical_labels(labels))
 
     def add_assignees(self, number: int, logins: Sequence[str]) -> None:
-        """Assign users (stored as given, duplicates ignored)."""
-        issue = self._issue(number)
-        merged = tuple(dict.fromkeys((*issue.assignees, *logins)))
-        self._issues[number] = replace(issue, assignees=merged, updated_at=self._clock())
+        """Assign users to an issue or pull request (duplicates ignored)."""
+        self._require_target(number)
+        merged = tuple(dict.fromkeys((*self._assignees_of(number), *logins)))
+        self._store_assignees(number, merged)
 
     def remove_assignees(self, number: int, logins: Sequence[str]) -> None:
         """Unassign users; logins not assigned are ignored."""
-        issue = self._issue(number)
-        kept = tuple(x for x in issue.assignees if x not in set(logins))
-        self._issues[number] = replace(issue, assignees=kept, updated_at=self._clock())
+        self._require_target(number)
+        gone = set(logins)
+        self._store_assignees(number, tuple(x for x in self._assignees_of(number) if x not in gone))
 
     # ------------------------------------------------------------------ comments
 
@@ -384,6 +437,11 @@ class FakeGitHub:
         comment = replace(self._comments[comment_id], body=body, updated_at=self._clock())
         self._comments[comment_id] = comment
         return comment
+
+    def delete_comment(self, comment_id: int) -> None:
+        """Delete a comment."""
+        if self._comments.pop(comment_id, None) is None:
+            raise GitHubError(f"comment {comment_id} not found", status=404)
 
     # ------------------------------------------------------------------ pull requests
 
@@ -421,11 +479,18 @@ class FakeGitHub:
             title=title,
             body=body,
             head=head,
+            head_sha=hashlib.sha1(
+                f"{self.repo}#{number}:{head}".encode(), usedforsecurity=False
+            ).hexdigest(),
             base=base,
             state="open",
             merged=False,
+            merged_at=None,
+            mergeable=True,
             draft=draft,
             author=self._user,
+            labels=(),
+            assignees=(),
             requested_reviewers=(),
             url=self._url("pull", number),
         )
@@ -492,17 +557,45 @@ class FakeGitHub:
         self._user = login
 
     def fake_merge_pull(self, number: int) -> PullRequest:
-        """Merge an open pull request and close the issues its body says it closes."""
+        """Merge an open pull request, as GitHub's merge endpoint would.
+
+        Drafts and unmergeable pull requests are refused (405). Issues named by closing
+        keywords in the body are closed only when the base is ``default_branch``.
+        """
         pr = self._pull(number)
         if pr.state != "open":
             raise GitHubError(f"pull request #{number} is not open", status=405)
-        pr = replace(pr, state="closed", merged=True)
+        if pr.draft:
+            raise GitHubError(f"pull request #{number} is a draft", status=405)
+        if pr.mergeable is False:
+            raise GitHubError(f"pull request #{number} is not mergeable", status=405)
+        pr = replace(pr, state="closed", merged=True, merged_at=self._clock())
         self._pulls[number] = pr
+        if pr.base != self.default_branch:
+            return pr
         for match in _CLOSING_RE.finditer(pr.body):
             target = int(match.group(1))
             issue = self._issues.get(target)
             if issue is not None and issue.state == "open":
                 self.update_issue(target, state="closed", state_reason="completed")
+        return pr
+
+    def fake_set_head_sha(self, number: int, sha: str) -> PullRequest:
+        """Simulate a push to the pull request's head branch."""
+        pr = replace(self._pull(number), head_sha=sha)
+        self._pulls[number] = pr
+        return pr
+
+    def fake_set_mergeable(self, number: int, mergeable: bool | None) -> PullRequest:
+        """Set what GitHub reports as ``mergeable`` (``None``: not computed yet)."""
+        pr = replace(self._pull(number), mergeable=mergeable)
+        self._pulls[number] = pr
+        return pr
+
+    def fake_set_draft(self, number: int, draft: bool) -> PullRequest:
+        """Mark a pull request as draft or ready for review."""
+        pr = replace(self._pull(number), draft=draft)
+        self._pulls[number] = pr
         return pr
 
     def fake_add_pull_files(self, number: int, files: Sequence[str]) -> None:

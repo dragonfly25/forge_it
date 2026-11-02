@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
 
 from forge.core.errors import ExitCode, PreconditionError
-from forge.core.github import GhCliClient, GitHubClient, GitHubError
+from forge.core.github import (
+    MIN_GH_VERSION,
+    GhCliClient,
+    GitHubClient,
+    GitHubError,
+    parse_gh_version,
+)
 
 REPO = "acme/shop"
 TS = "2026-03-01T10:00:00Z"
@@ -66,13 +73,15 @@ def pull_json(number: int, **extra: Any) -> dict[str, Any]:
         "number": number,
         "title": "p",
         "body": "Closes #1",
-        "head": {"ref": "task/1"},
+        "head": {"ref": "task/1", "sha": "abc123"},
         "base": {"ref": "main"},
         "state": "open",
         "merged_at": None,
         "draft": False,
         "user": {"login": "alice"},
         "requested_reviewers": [{"login": "carol"}],
+        "labels": [{"name": "forge:task"}],
+        "assignees": [{"login": "bob"}],
         "html_url": f"https://github.com/{REPO}/pull/{number}",
     }
     data.update(extra)
@@ -114,6 +123,11 @@ def test_list_labels_paginates_and_flattens() -> None:
     assert runner.calls[0].stdin is None
 
 
+def test_list_labels_sorted_by_name() -> None:
+    runner = FakeRunner().add([[{"name": "b"}, {"name": "A"}, {"name": "c"}]])
+    assert [lb.name for lb in client(runner).list_labels()] == ["A", "b", "c"]
+
+
 def test_create_and_update_label() -> None:
     runner = FakeRunner().add({"name": "x", "color": "00ff00", "description": "d"})
     runner.add({"name": "status:ready", "color": "111111", "description": ""})
@@ -139,6 +153,44 @@ def test_milestones() -> None:
     assert runner.calls[1].body == {"state": "closed"}
 
 
+def test_list_milestones_sorted_by_number_with_due_on() -> None:
+    rows = [
+        {"number": 5, "title": "M2", "due_on": "2026-06-30T07:00:00Z"},
+        {"number": 2, "title": "M1"},
+    ]
+    runner = FakeRunner().add([rows])
+    milestones = client(runner).list_milestones()
+    assert [m.number for m in milestones] == [2, 5]
+    assert milestones[0].due_on is None
+    assert milestones[1].due_on == datetime(2026, 6, 30, 7, tzinfo=UTC)
+
+
+def test_update_milestone() -> None:
+    updated = {"number": 3, "title": "M1b", "state": "open", "due_on": "2026-07-01T10:00:00Z"}
+    runner = FakeRunner().add(updated).add(updated)
+    gh = client(runner)
+    due = datetime(2026, 7, 1, 12, tzinfo=timezone(timedelta(hours=2)))
+    milestone = gh.update_milestone(3, title="M1b", description="d", state="open", due_on=due)
+    assert milestone.due_on == datetime(2026, 7, 1, 10, tzinfo=UTC)
+    call = runner.calls[0]
+    assert call.argv == ["gh", "api", "-X", "PATCH", "repos/acme/shop/milestones/3", "--input", "-"]
+    assert call.body == {
+        "title": "M1b",
+        "description": "d",
+        "state": "open",
+        "due_on": "2026-07-01T10:00:00Z",
+    }
+    gh.update_milestone(3, title="M1b")
+    assert runner.calls[1].body == {"title": "M1b"}
+
+
+def test_update_milestone_rejects_naive_due_on() -> None:
+    runner = FakeRunner()
+    with pytest.raises(GitHubError, match="naive"):
+        client(runner).update_milestone(3, due_on=datetime(2026, 7, 1))
+    assert runner.calls == []
+
+
 def test_list_issues_filters_out_pulls_and_maps_fields() -> None:
     rows = [issue_json(1), {**issue_json(2), "pull_request": {"url": "x"}}]
     runner = FakeRunner().add([rows])
@@ -156,7 +208,8 @@ def test_list_issues_filters_out_pulls_and_maps_fields() -> None:
         "api",
         "--paginate",
         "--slurp",
-        "repos/acme/shop/issues?state=open&per_page=100&labels=forge:task,status:ready",
+        "repos/acme/shop/issues?state=open&sort=created&direction=asc&per_page=100"
+        "&labels=forge:task,status:ready",
     ]
 
 
@@ -166,7 +219,9 @@ def test_list_issues_resolves_milestone_title_to_number() -> None:
     runner.add([[issue_json(1)]])
     client(runner).list_issues(state="all", milestone="M1")
     assert runner.calls[0].argv[-1] == "repos/acme/shop/milestones?state=all&per_page=100"
-    assert runner.calls[1].argv[-1] == "repos/acme/shop/issues?state=all&per_page=100&milestone=3"
+    assert runner.calls[1].argv[-1] == (
+        "repos/acme/shop/issues?state=all&sort=created&direction=asc&per_page=100&milestone=3"
+    )
 
 
 def test_list_issues_unknown_milestone_returns_empty() -> None:
@@ -278,15 +333,35 @@ def test_comments() -> None:
     assert runner.calls[2].body == {"body": "edited"}
 
 
+def test_delete_comment() -> None:
+    runner = FakeRunner().add(None)
+    client(runner).delete_comment(11)
+    call = runner.calls[0]
+    assert call.argv == ["gh", "api", "-X", "DELETE", "repos/acme/shop/issues/comments/11"]
+    assert call.stdin is None
+
+
 def test_list_pulls_head_filter_prefixes_owner() -> None:
     runner = FakeRunner().add([[pull_json(9, merged_at=TS, state="closed")]])
     pulls = client(runner).list_pulls(state="all", head="task/1", base="main")
     assert runner.calls[0].argv[-1] == (
-        "repos/acme/shop/pulls?state=all&per_page=100&head=acme:task/1&base=main"
+        "repos/acme/shop/pulls?state=all&sort=created&direction=asc&per_page=100"
+        "&head=acme:task/1&base=main"
     )
     pr = pulls[0]
     assert (pr.head, pr.base, pr.merged, pr.state) == ("task/1", "main", True, "closed")
     assert pr.requested_reviewers == ("carol",)
+    assert (pr.head_sha, pr.labels, pr.assignees) == ("abc123", ("forge:task",), ("bob",))
+    assert pr.merged_at == datetime(2026, 3, 1, 10, tzinfo=UTC)
+    assert pr.mergeable is None
+
+
+def test_pull_mergeable_and_open_fields() -> None:
+    runner = FakeRunner().add(pull_json(9, mergeable=False)).add(pull_json(9, mergeable=True))
+    gh = client(runner)
+    first = gh.get_pull(9)
+    assert (first.mergeable, first.merged, first.merged_at) == (False, False, None)
+    assert gh.get_pull(9).mergeable is True
 
 
 def test_pull_create_update_reviewers() -> None:
@@ -369,3 +444,25 @@ def test_invalid_json_is_github_error() -> None:
     runner.responses.append((0, "not json", ""))
     with pytest.raises(GitHubError, match="invalid JSON"):
         client(runner).current_user()
+
+
+# ---------------------------------------------------------------- gh version
+
+
+def test_parse_gh_version() -> None:
+    assert parse_gh_version("gh version 2.92.0 (2026-04-28)\nhttps://github.com/...") == (
+        2,
+        92,
+        0,
+    )
+    assert parse_gh_version("gh version 2.92.0 (2026-04-28)") >= MIN_GH_VERSION
+    assert parse_gh_version("gh version 2.47.1 (2024-04-01)") < MIN_GH_VERSION
+
+
+def test_min_gh_version_supports_slurp() -> None:
+    assert MIN_GH_VERSION == (2, 48, 0)
+
+
+def test_parse_gh_version_rejects_garbage() -> None:
+    with pytest.raises(ValueError, match="gh version"):
+        parse_gh_version("command not found: gh")

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -45,6 +45,20 @@ def test_labels_create_list_update(gh: FakeGitHub) -> None:
     assert (updated.color, updated.description) == ("111111", "d")
 
 
+def test_list_labels_sorted_by_name() -> None:
+    gh = FakeGitHub()
+    for name in ("b", "A", "c"):
+        gh.create_label(name, "000000")
+    assert [lb.name for lb in gh.list_labels()] == ["A", "b", "c"]
+
+
+def test_rename_label_renames_on_pulls(gh: FakeGitHub) -> None:
+    pr = gh.create_pull("p", "", "task/1", "main")
+    gh.add_labels(pr.number, ["size:S"])
+    gh.update_label("size:S", new_name="size:small")
+    assert gh.get_pull(pr.number).labels == ("size:small",)
+
+
 def test_duplicate_label_is_rejected_case_insensitively(gh: FakeGitHub) -> None:
     with pytest.raises(GitHubError):
         gh.create_label("Forge:Task", "000000")
@@ -75,6 +89,25 @@ def test_milestones(gh: FakeGitHub) -> None:
         gh.create_milestone("M1")
     with pytest.raises(GitHubError):
         gh.close_milestone(99)
+    assert gh.list_milestones()[0].due_on is None
+
+
+def test_update_milestone(gh: FakeGitHub) -> None:
+    issue = gh.create_issue("t", "b", milestone="M1")
+    due = datetime(2026, 7, 1, 12, tzinfo=timezone(timedelta(hours=2)))
+    m = gh.update_milestone(1, title="M1b", description="d", due_on=due)
+    assert (m.title, m.description, m.state) == ("M1b", "d", "open")
+    assert m.due_on == datetime(2026, 7, 1, 10, tzinfo=UTC)
+    assert gh.get_issue(issue.number).milestone == "M1b"
+    assert gh.update_milestone(1, state="closed").due_on == m.due_on
+    assert gh.list_milestones("closed")[0].title == "M1b"
+    gh.create_milestone("M2")
+    with pytest.raises(GitHubError, match="already exists"):
+        gh.update_milestone(1, title="M2")
+    with pytest.raises(GitHubError):
+        gh.update_milestone(1, due_on=datetime(2026, 7, 1))
+    with pytest.raises(GitHubError):
+        gh.update_milestone(99, title="x")
 
 
 # ---------------------------------------------------------------- issues
@@ -211,6 +244,17 @@ def test_comments(gh: FakeGitHub) -> None:
         gh.create_comment(999, "x")
 
 
+def test_delete_comment(gh: FakeGitHub) -> None:
+    issue = gh.create_issue("t", "b")
+    first = gh.create_comment(issue.number, "a")
+    second = gh.create_comment(issue.number, "b")
+    gh.delete_comment(first.id)
+    assert [c.id for c in gh.list_comments(issue.number)] == [second.id]
+    with pytest.raises(GitHubError) as exc:
+        gh.delete_comment(first.id)
+    assert exc.value.status == 404
+
+
 # ---------------------------------------------------------------- pull requests
 
 
@@ -248,9 +292,38 @@ def test_duplicate_open_pull_is_rejected(gh: FakeGitHub) -> None:
 def test_pull_labels_and_comments(gh: FakeGitHub) -> None:
     pr = gh.create_pull("p", "", "task/1", "main")
     gh.add_labels(pr.number, ["status:ready"])
+    assert gh.get_pull(pr.number).labels == ("status:ready",)
     gh.remove_label(pr.number, "status:ready")
+    assert gh.get_pull(pr.number).labels == ()
     gh.create_comment(pr.number, "on pr")
     assert [c.body for c in gh.list_comments(pr.number)] == ["on pr"]
+
+
+def test_pull_assignees(gh: FakeGitHub) -> None:
+    pr = gh.create_pull("p", "", "task/1", "main")
+    gh.add_assignees(pr.number, ["bob", "carol"])
+    gh.remove_assignees(pr.number, ["carol"])
+    assert gh.get_pull(pr.number).assignees == ("bob",)
+    with pytest.raises(GitHubError):
+        gh.add_assignees(99, ["bob"])
+
+
+def test_pull_new_fields(gh: FakeGitHub) -> None:
+    pr = gh.create_pull("p", "", "task/1", "main")
+    other = gh.create_pull("q", "", "task/2", "main")
+    assert len(pr.head_sha) == 40 and pr.head_sha != other.head_sha
+    assert (pr.mergeable, pr.merged_at, pr.labels, pr.assignees) == (True, None, (), ())
+    assert gh.fake_set_head_sha(pr.number, "f" * 40).head_sha == "f" * 40
+    assert gh.get_pull(pr.number).head_sha == "f" * 40
+    assert gh.fake_set_mergeable(pr.number, None).mergeable is None
+
+
+def test_lists_are_ordered_by_creation(gh: FakeGitHub) -> None:
+    numbers = [gh.create_issue(f"i{n}", "").number for n in range(3)]
+    pulls = [gh.create_pull(f"p{n}", "", f"task/{n}", "main").number for n in range(3)]
+    assert [i.number for i in gh.list_issues()] == numbers
+    assert [p.number for p in gh.list_pulls()] == pulls
+    assert [m.number for m in gh.list_milestones()] == [1]
 
 
 def test_reviewers_and_reviews(gh: FakeGitHub) -> None:
@@ -291,6 +364,7 @@ def test_merge_closes_linked_issues(gh: FakeGitHub) -> None:
     pr = gh.create_pull("p", f"Closes #{one.number}\nfixes #{two.number}\nsee #3", "task/1", "main")
     merged = gh.fake_merge_pull(pr.number)
     assert (merged.state, merged.merged) == ("closed", True)
+    assert merged.merged_at is not None
     for n in (one.number, two.number):
         issue = gh.get_issue(n)
         assert (issue.state, issue.state_reason) == ("closed", "completed")
@@ -304,3 +378,28 @@ def test_merge_closes_linked_issues(gh: FakeGitHub) -> None:
 def test_missing_pull_fails(gh: FakeGitHub) -> None:
     with pytest.raises(GitHubError):
         gh.get_pull(5)
+
+
+def test_merge_into_non_default_branch_keeps_issues_open() -> None:
+    gh = FakeGitHub(default_branch="develop")
+    issue = gh.create_issue("one", "")
+    pr = gh.create_pull("p", f"Closes #{issue.number}", "task/1", "main")
+    gh.fake_merge_pull(pr.number)
+    assert gh.get_issue(issue.number).state == "open"
+    pr2 = gh.create_pull("p2", f"Closes #{issue.number}", "task/2", "develop")
+    gh.fake_merge_pull(pr2.number)
+    assert gh.get_issue(issue.number).state == "closed"
+
+
+def test_merge_refuses_draft_and_unmergeable(gh: FakeGitHub) -> None:
+    draft = gh.create_pull("p", "", "task/1", "main", draft=True)
+    with pytest.raises(GitHubError, match="draft") as exc:
+        gh.fake_merge_pull(draft.number)
+    assert exc.value.status == 405
+    assert gh.get_pull(draft.number).state == "open"
+    gh.fake_set_draft(draft.number, False)
+    gh.fake_set_mergeable(draft.number, False)
+    with pytest.raises(GitHubError, match="not mergeable"):
+        gh.fake_merge_pull(draft.number)
+    gh.fake_set_mergeable(draft.number, True)
+    assert gh.fake_merge_pull(draft.number).merged is True

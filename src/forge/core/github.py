@@ -3,6 +3,9 @@
 Every GitHub call Forge makes goes through :class:`GitHubClient` (ADR 0007). Production code
 uses :class:`GhCliClient`, which shells out to ``gh api`` (REST). Tests use
 :class:`forge.core.github_fake.FakeGitHub`.
+
+List ordering is part of the contract: issues, pull requests, comments and reviews come in
+creation order (oldest first), labels by name (case-insensitive) and milestones by number.
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ import re
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 from urllib.parse import quote, urlencode
@@ -25,6 +28,22 @@ ReviewEvent = Literal["APPROVE", "REQUEST_CHANGES", "COMMENT"]
 
 STATE_REASONS: tuple[str, ...] = ("completed", "not_planned", "reopened")
 """Values GitHub accepts for an issue's ``state_reason``."""
+
+MIN_GH_VERSION: tuple[int, int, int] = (2, 48, 0)
+"""Oldest ``gh`` release with ``gh api --paginate --slurp``, which :class:`GhCliClient` uses."""
+
+_GH_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+
+
+def parse_gh_version(text: str) -> tuple[int, int, int]:
+    """Parse the output of ``gh --version`` (e.g. ``gh version 2.92.0 (2026-04-28)``).
+
+    Raises ``ValueError`` if no ``X.Y.Z`` version is found.
+    """
+    match = _GH_VERSION_RE.search(text)
+    if match is None:
+        raise ValueError(f"cannot find a gh version in {text.strip()[:80]!r}")
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
 
 
 class Unset(Enum):
@@ -51,12 +70,13 @@ class Label:
 
 @dataclass(frozen=True)
 class Milestone:
-    """A repository milestone."""
+    """A repository milestone. ``due_on`` is timezone-aware when set."""
 
     number: int
     title: str
     state: IssueState
     description: str
+    due_on: datetime | None
 
 
 @dataclass(frozen=True)
@@ -92,17 +112,26 @@ class Comment:
 
 @dataclass(frozen=True)
 class PullRequest:
-    """A pull request. ``head`` and ``base`` are branch names."""
+    """A pull request. ``head`` and ``base`` are branch names; ``head_sha`` is the head commit.
+
+    ``mergeable`` is ``None`` when GitHub has not computed it yet; list endpoints never include
+    it, so read it with ``get_pull``.
+    """
 
     number: int
     title: str
     body: str
     head: str
+    head_sha: str
     base: str
     state: IssueState
     merged: bool
+    merged_at: datetime | None
+    mergeable: bool | None
     draft: bool
     author: str
+    labels: tuple[str, ...]
+    assignees: tuple[str, ...]
     requested_reviewers: tuple[str, ...]
     url: str
 
@@ -139,7 +168,11 @@ class GitHubError(ForgeError):
 
 @runtime_checkable
 class GitHubClient(Protocol):
-    """Everything Forge needs from GitHub. Issue lists never include pull requests."""
+    """Everything Forge needs from GitHub. Issue lists never include pull requests.
+
+    Ordering: issues, pull requests, comments and reviews are listed by creation, oldest
+    first; labels by name (case-insensitive); milestones by number.
+    """
 
     def current_user(self) -> str:
         """Login of the authenticated user."""
@@ -147,7 +180,7 @@ class GitHubClient(Protocol):
 
     # labels
     def list_labels(self) -> list[Label]:
-        """All repository labels."""
+        """All repository labels, by name (case-insensitive)."""
         ...
 
     def create_label(self, name: str, color: str, description: str = "") -> Label:
@@ -167,7 +200,7 @@ class GitHubClient(Protocol):
 
     # milestones
     def list_milestones(self, state: StateFilter = "all") -> list[Milestone]:
-        """Milestones in the given state."""
+        """Milestones in the given state, by number."""
         ...
 
     def create_milestone(self, title: str, description: str = "") -> Milestone:
@@ -178,6 +211,18 @@ class GitHubClient(Protocol):
         """Close a milestone."""
         ...
 
+    def update_milestone(
+        self,
+        number: int,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        state: IssueState | None = None,
+        due_on: datetime | None = None,
+    ) -> Milestone:
+        """Change a milestone; ``None`` leaves a field unchanged. ``due_on`` must be aware."""
+        ...
+
     # issues
     def list_issues(
         self,
@@ -186,7 +231,10 @@ class GitHubClient(Protocol):
         labels: Sequence[str] = (),
         milestone: str | None = None,
     ) -> list[Issue]:
-        """Issues having all ``labels`` and, if given, the milestone with that title."""
+        """Issues having all ``labels`` and, if given, the milestone with that title.
+
+        Oldest first.
+        """
         ...
 
     def get_issue(self, number: int) -> Issue:
@@ -231,11 +279,11 @@ class GitHubClient(Protocol):
         ...
 
     def add_assignees(self, number: int, logins: Sequence[str]) -> None:
-        """Assign users."""
+        """Assign users to an issue or pull request."""
         ...
 
     def remove_assignees(self, number: int, logins: Sequence[str]) -> None:
-        """Unassign users."""
+        """Unassign users from an issue or pull request."""
         ...
 
     # comments
@@ -251,6 +299,10 @@ class GitHubClient(Protocol):
         """Edit a comment in place."""
         ...
 
+    def delete_comment(self, comment_id: int) -> None:
+        """Delete a comment."""
+        ...
+
     # pull requests
     def list_pulls(
         self,
@@ -259,7 +311,7 @@ class GitHubClient(Protocol):
         head: str | None = None,
         base: str | None = None,
     ) -> list[PullRequest]:
-        """Pull requests, optionally filtered by head and base branch names."""
+        """Pull requests, optionally filtered by head and base branch names. Oldest first."""
         ...
 
     def get_pull(self, number: int) -> PullRequest:
@@ -362,7 +414,18 @@ def _milestone_from_json(data: dict[str, Any]) -> Milestone:
         title=str(data["title"]),
         state="closed" if data.get("state") == "closed" else "open",
         description=str(data.get("description") or ""),
+        due_on=_parse_time(data.get("due_on")),
     )
+
+
+def _format_time(value: datetime) -> str:
+    """Format an aware datetime as GitHub's ``YYYY-MM-DDTHH:MM:SSZ``."""
+    if value.tzinfo is None:
+        raise GitHubError(
+            f"naive datetime {value.isoformat()} sent to GitHub",
+            hint="pass a timezone-aware datetime (e.g. datetime(..., tzinfo=UTC))",
+        )
+    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _comment_from_json(data: dict[str, Any]) -> Comment:
@@ -380,16 +443,23 @@ def _comment_from_json(data: dict[str, Any]) -> Comment:
 
 def _pull_from_json(data: dict[str, Any]) -> PullRequest:
     merged = bool(data.get("merged")) or data.get("merged_at") is not None
+    head = data.get("head") or {}
+    mergeable = data.get("mergeable")
     return PullRequest(
         number=int(data["number"]),
         title=str(data.get("title") or ""),
         body=str(data.get("body") or ""),
-        head=str((data.get("head") or {}).get("ref", "")),
+        head=str(head.get("ref", "")),
+        head_sha=str(head.get("sha") or ""),
         base=str((data.get("base") or {}).get("ref", "")),
         state="closed" if data.get("state") == "closed" else "open",
         merged=merged,
+        merged_at=_parse_time(data.get("merged_at")),
+        mergeable=bool(mergeable) if mergeable is not None else None,
         draft=bool(data.get("draft")),
         author=_login(data.get("user")),
+        labels=tuple(str(lb["name"]) for lb in data.get("labels") or ()),
+        assignees=tuple(_login(u) for u in data.get("assignees") or ()),
         requested_reviewers=tuple(_login(u) for u in data.get("requested_reviewers") or ()),
         url=str(data.get("html_url") or ""),
     )
@@ -410,7 +480,8 @@ class GhCliClient:
 
     ``repo`` is ``owner/name``. ``runner`` receives the full argv (starting with ``gh``) and
     the stdin text; it defaults to ``subprocess.run``. Lists use ``--paginate --slurp`` and
-    are flattened; request bodies are JSON sent with ``--input -``.
+    are flattened; request bodies are JSON sent with ``--input -``. Requires gh
+    >= ``MIN_GH_VERSION``.
     """
 
     def __init__(self, repo: str, runner: Runner | None = None):
@@ -509,9 +580,10 @@ class GhCliClient:
     # ------------------------------------------------------------------ labels
 
     def list_labels(self) -> list[Label]:
-        """All repository labels."""
+        """All repository labels, by name (case-insensitive)."""
         rows = self._call("GET", self._path("labels", {"per_page": "100"}), paginate=True)
-        return [_label_from_json(r) for r in rows or []]
+        labels = [_label_from_json(r) for r in rows or []]
+        return sorted(labels, key=lambda lb: (lb.name.lower(), lb.name))
 
     def create_label(self, name: str, color: str, description: str = "") -> Label:
         """Create a label."""
@@ -540,9 +612,10 @@ class GhCliClient:
     # ------------------------------------------------------------------ milestones
 
     def list_milestones(self, state: StateFilter = "all") -> list[Milestone]:
-        """Milestones in the given state."""
+        """Milestones in the given state, by number."""
         path = self._path("milestones", {"state": state, "per_page": "100"})
-        return [_milestone_from_json(r) for r in self._call("GET", path, paginate=True) or []]
+        rows = self._call("GET", path, paginate=True) or []
+        return sorted((_milestone_from_json(r) for r in rows), key=lambda m: m.number)
 
     def create_milestone(self, title: str, description: str = "") -> Milestone:
         """Create an open milestone."""
@@ -551,8 +624,29 @@ class GhCliClient:
 
     def close_milestone(self, number: int) -> Milestone:
         """Close a milestone."""
+        return self.update_milestone(number, state="closed")
+
+    def update_milestone(
+        self,
+        number: int,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        state: IssueState | None = None,
+        due_on: datetime | None = None,
+    ) -> Milestone:
+        """Change a milestone; ``None`` leaves a field unchanged. ``due_on`` must be aware."""
+        payload: dict[str, Any] = {}
+        if title is not None:
+            payload["title"] = title
+        if description is not None:
+            payload["description"] = description
+        if state is not None:
+            payload["state"] = state
+        if due_on is not None:
+            payload["due_on"] = _format_time(due_on)
         path = self._path(f"milestones/{number}")
-        return _milestone_from_json(self._call("PATCH", path, {"state": "closed"}))
+        return _milestone_from_json(self._call("PATCH", path, payload))
 
     # ------------------------------------------------------------------ issues
 
@@ -563,8 +657,11 @@ class GhCliClient:
         labels: Sequence[str] = (),
         milestone: str | None = None,
     ) -> list[Issue]:
-        """Issues having all ``labels`` and, if given, the milestone with that title."""
-        query = {"state": state, "per_page": "100"}
+        """Issues having all ``labels`` and, if given, the milestone with that title.
+
+        Oldest first.
+        """
+        query = {"state": state, "sort": "created", "direction": "asc", "per_page": "100"}
         if labels:
             query["labels"] = ",".join(labels)
         if milestone is not None:
@@ -646,13 +743,13 @@ class GhCliClient:
         self._call("PUT", self._path(f"issues/{number}/labels"), {"labels": list(labels)})
 
     def add_assignees(self, number: int, logins: Sequence[str]) -> None:
-        """Assign users."""
+        """Assign users to an issue or pull request."""
         if logins:
             path = self._path(f"issues/{number}/assignees")
             self._call("POST", path, {"assignees": list(logins)})
 
     def remove_assignees(self, number: int, logins: Sequence[str]) -> None:
-        """Unassign users."""
+        """Unassign users from an issue or pull request."""
         if logins:
             path = self._path(f"issues/{number}/assignees")
             self._call("DELETE", path, {"assignees": list(logins)})
@@ -674,6 +771,10 @@ class GhCliClient:
         path = self._path(f"issues/comments/{comment_id}")
         return _comment_from_json(self._call("PATCH", path, {"body": body}))
 
+    def delete_comment(self, comment_id: int) -> None:
+        """Delete a comment."""
+        self._call("DELETE", self._path(f"issues/comments/{comment_id}"))
+
     # ------------------------------------------------------------------ pull requests
 
     def list_pulls(
@@ -683,8 +784,8 @@ class GhCliClient:
         head: str | None = None,
         base: str | None = None,
     ) -> list[PullRequest]:
-        """Pull requests, optionally filtered by head and base branch names."""
-        query = {"state": state, "per_page": "100"}
+        """Pull requests, optionally filtered by head and base branch names. Oldest first."""
+        query = {"state": state, "sort": "created", "direction": "asc", "per_page": "100"}
         if head is not None:
             query["head"] = f"{self.owner}:{head}"
         if base is not None:
