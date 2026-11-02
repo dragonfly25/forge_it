@@ -155,17 +155,24 @@ def read_pending(git: Git, issue_number: int) -> PendingClaim | None:
 
 
 def remove_pending(
-    git: Git, issue_number: int, claim: str, *, timeout: float = LOCK_TIMEOUT
+    git: Git,
+    issue_number: int,
+    claim: str,
+    *,
+    pid: int | None = None,
+    timeout: float = LOCK_TIMEOUT,
 ) -> bool:
     """Remove the record of ``task/<issue_number>`` if it names ``claim``; True if removed.
 
-    A record naming another claim belongs to another run and is left alone. The check and
-    the removal happen under :func:`task_lock`; when the lock stays busy the record is left
-    in place (a later ``forge next`` prunes it once it is an orphan).
+    A record naming another claim belongs to another run and is left alone. With ``pid``, a
+    record written by another pid is left alone too: after a takeover two runs share a claim
+    sha, and a run that lost the record must not delete the record of the run that took over.
+    The check and the removal happen under :func:`task_lock`; when the lock stays busy the
+    record is left in place (a later ``forge next`` prunes it once it is an orphan).
     """
     with task_lock(git, issue_number, timeout=timeout) as held:
         record = read_pending(git, issue_number) if held else None
-        if record is None or record.claim != claim:
+        if record is None or record.claim != claim or (pid is not None and record.pid != pid):
             return False
         try:
             pending_path(git, issue_number).unlink()
@@ -349,15 +356,22 @@ def machine_id(path: Path | None = None) -> str:
     found = _read_machine_id(path)
     if found is not None:
         return found
-    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".machine-id.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    tmp.write_text(uuid.uuid4().hex + "\n")
     try:
-        os.link(tmp, path)
-    except FileExistsError:
-        pass
-    finally:
-        tmp.unlink(missing_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(uuid.uuid4().hex + "\n")
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            pass
+        finally:
+            tmp.unlink(missing_ok=True)
+    except OSError as exc:
+        raise PreconditionError(
+            f"cannot create the machine id {path}: {exc.strerror or exc}",
+            hint="set XDG_STATE_HOME to a writable absolute directory (Forge keeps its "
+            "machine id there), then re-run",
+        ) from exc
     found = _read_machine_id(path)
     if found is None:
         raise ForgeError(
@@ -410,7 +424,8 @@ def run_alive(
     and its pid must still be ``running``. An older record counts as gone whatever its pid
     says, because the pid may have been reused.
     """
-    if record.host != host or now - record.started_at > MAX_RUN_AGE:
+    # abs(): a record from a clock that was ahead (and later corrected) must age out too.
+    if record.host != host or abs(now - record.started_at) > MAX_RUN_AGE:
         return False
     return running(record.pid)
 

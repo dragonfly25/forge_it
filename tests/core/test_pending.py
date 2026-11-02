@@ -134,7 +134,9 @@ def test_an_old_record_is_dead_whatever_its_pid() -> None:
     assert timedelta(minutes=15) == MAX_RUN_AGE
     assert run_alive(RECORD, host="laptop", running=alive, now=at_bound)
     assert not run_alive(RECORD, host="laptop", running=alive, now=later)
-    assert run_alive(RECORD, host="laptop", running=alive, now=T0 - timedelta(hours=1))
+    # A record written by a clock that was ahead ages out the same way (ADR 0009).
+    assert run_alive(RECORD, host="laptop", running=alive, now=T0 - timedelta(minutes=1))
+    assert not run_alive(RECORD, host="laptop", running=alive, now=T0 - timedelta(hours=1))
     assert not run_alive(RECORD, host="desktop", running=alive, now=T0)
     assert not may_take_over(RECORD, SHA, host="laptop", running=alive, now=at_bound)
     assert may_take_over(RECORD, SHA, host="laptop", running=alive, now=later)
@@ -311,3 +313,16 @@ def test_machine_id_is_created_once_and_shared(tmp_path: Path) -> None:
     path.write_text("not-an-id\n")
     with pytest.raises(ForgeError, match="machine id"):
         machine_id(path)
+
+
+def test_unwritable_state_dir_is_a_precondition_error(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    state.chmod(0o500)
+    try:
+        with pytest.raises(PreconditionError) as info:
+            machine_id(state / "forge" / "machine-id")
+    finally:
+        state.chmod(0o700)
+    assert info.value.code == ExitCode.PRECONDITION
+    assert "XDG_STATE_HOME" in (info.value.hint or "")

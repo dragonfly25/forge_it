@@ -1897,3 +1897,26 @@ def test_task_on_a_busy_task_lock_says_retry(world: World) -> None:
 
     again = run(world.ctx("alice"), task=str(n))  # the lock is free again
     assert again.claimed is not None and again.claimed.own and again.claimed.claim == sha
+
+
+def test_stalled_run_whose_claim_was_taken_over_stops_before_the_lease(world: World) -> None:
+    """A run paused past the age bound finds another run's record and does not complete."""
+    n = world.task("M1-T01", ["api"])
+    git = world.git("alice")
+    ctx = world.ctx("alice")
+    taken: dict[str, PendingClaim] = {}
+
+    def other_run_takes_over() -> None:
+        mine = read_pending(git, n)
+        assert mine is not None
+        other = PendingClaim(n, mine.claim, mine.pid + 1, mine.host, mine.started_at)
+        write_pending(git, other)
+        taken["record"] = other
+
+    ctx.github.after["add_labels"] = other_run_takes_over  # type: ignore[attr-defined]
+    with pytest.raises(PreconditionError) as info:
+        run(ctx)
+    assert info.value.code == ExitCode.PRECONDITION
+    assert "took over the claim" in info.value.message
+    assert find_lease(world.fake.list_comments(n)) is None
+    assert read_pending(git, n) == taken["record"]  # the other run's record is kept

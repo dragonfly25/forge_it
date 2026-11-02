@@ -1008,6 +1008,23 @@ def _reclaim_marker(claim_sha: str) -> str:
     return f"<!-- forge:reclaim {claim_sha} -->"
 
 
+def _confirm_record(ctx: ClaimContext, record: TaskRecord, claim_sha: str) -> None:
+    """Raise exit 5 unless the pending-claim record of this claim still names this run."""
+    number = record.issue.number
+    found = read_pending(ctx.git, number)
+    if (
+        found is None
+        or found.claim != claim_sha
+        or found.pid != ctx.pid
+        or found.host != ctx.machine()
+    ):
+        raise PreconditionError(
+            f"another forge run took over the claim on #{number} ({record.meta.id}) while this "
+            "run was paused; this run stops without completing it",
+            hint=f"check `forge task show {record.meta.id}`; the other run completes the claim",
+        )
+
+
 def _post_claim(
     ctx: ClaimContext,
     login: str,
@@ -1016,8 +1033,13 @@ def _post_claim(
     *,
     resumed: bool,
     own: bool,
+    recorded: bool = False,
 ) -> Claimed:
     """Assign, label, reclaim comment, lease comment (ADR 0009 post-claim steps 1-4).
+
+    With ``recorded`` (this run wrote the pending-claim record), the record must still be this
+    run's right before the lease comment: a run that stalled long enough for another run to
+    take the claim over stops instead of completing the claim a second time.
 
     The lease comment is written **last**: once it references the claim commit the claim
     counts as complete, so an interruption anywhere before is completed by a re-run. Every
@@ -1070,6 +1092,8 @@ def _post_claim(
         heartbeat_at=now,
     )
     _confirm_claim(ctx, record, claim_sha)
+    if recorded:
+        _confirm_record(ctx, record, claim_sha)
     upsert_lease(github, number, data, comments=comments)
     default_ref = f"refs/remotes/{ctx.remote}/{ctx.config.project.default_branch}"
     return Claimed(
@@ -1299,18 +1323,19 @@ def claim_next(ctx: ClaimContext, options: NextOptions | None = None) -> NextOut
                     pushed.sha,
                     resumed=pushed.rollback is not None,
                     own=own_claim,
+                    recorded=True,
                 )
             except PreconditionError:
                 # the claim is no longer mine
-                remove_pending(ctx.git, number, pushed.sha, timeout=ctx.lock_timeout)
+                remove_pending(ctx.git, number, pushed.sha, pid=ctx.pid, timeout=ctx.lock_timeout)
                 raise
-            remove_pending(ctx.git, number, pushed.sha, timeout=ctx.lock_timeout)
+            remove_pending(ctx.git, number, pushed.sha, pid=ctx.pid, timeout=ctx.lock_timeout)
             return _finish(outcome, warnings)
         if work_follows:
             # Rolling back would drop the work pushed on top of the claim: stop instead. The
             # pending record goes, so a plain `forge next` excludes the task (incomplete_own)
             # and moves on instead of hitting this conflict on every run (ADR 0009).
-            remove_pending(ctx.git, number, pushed.sha, timeout=ctx.lock_timeout)
+            remove_pending(ctx.git, number, pushed.sha, pid=ctx.pid, timeout=ctx.lock_timeout)
             raise PreconditionError(
                 f"your incomplete claim on #{number} ({record.meta.id}) overlaps the live "
                 f"claim on #{winner.issue} ({winner.task_id}, claimed by {winner.owner}) and "
@@ -1320,7 +1345,7 @@ def claim_next(ctx: ClaimContext, options: NextOptions | None = None) -> NextOut
                 f"`forge release-claim`), then re-run `forge next --task {number}`",
             )
         problem = _yield(ctx, number, pushed)
-        remove_pending(ctx.git, number, pushed.sha, timeout=ctx.lock_timeout)
+        remove_pending(ctx.git, number, pushed.sha, pid=ctx.pid, timeout=ctx.lock_timeout)
         if problem is not None:
             warnings.append(problem)
         outcome.attempts += 1

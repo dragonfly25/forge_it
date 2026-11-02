@@ -251,8 +251,16 @@ under the same identity. Two sessions of the same tool with the same account can
   recorded pid, `started_at` and the record's file path.
 - **When a run counts as gone.** Its pid is no longer running, or its record is older than
   15 minutes (`MAX_RUN_AGE`), whatever the pid says: a claim run takes seconds plus at most
-  about 10 s of verification, and after that the pid may have been reused. Messages about a
-  live record name its file.
+  about 10 s of verification, and after that the pid may have been reused. The same holds for a
+  record dated more than 15 minutes in the future, written while the clock was ahead. Messages
+  about a live record name its file.
+  - The bound assumes no git or `gh` call stalls: they have no timeout, and a laptop can sleep
+    mid-claim. A run that resumes after another run took its claim over notices it: right before
+    the lease comment, the record must still name this run's pid and machine. Otherwise the run
+    stops with exit 5 and leaves the other run's record in place.
+- **Unwritable state directory.** If the machine id cannot be created, the run stops with exit 5.
+  The message names the file, and the hint says to set `XDG_STATE_HOME` to a writable absolute
+  directory. Agent sandboxes that only allow writes to the workspace hit this.
 - **Pruning.** Before claiming, `forge next` (not `--dry-run`) removes records whose sha is not
   the claim commit on the remote branch and whose run is gone, or that come from another machine.
 - **Machine id.** `host` in a record is a machine id (uuid4, created once and atomically), not
