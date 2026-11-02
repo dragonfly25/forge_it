@@ -224,7 +224,10 @@ under the same identity. Two sessions of the same tool with the same account can
 - Completing an incomplete claim **always** runs the post-claim verification. If the claim conflicts
   and the branch carries commits after the claim commit, Forge does not roll back, because that work
   must not be lost. It stops with exit 5, names the conflicting task, and leaves the claim
-  incomplete. Without such commits it yields as usual.
+  incomplete. It also drops the pending-claim record, so a plain `forge next` excludes the task
+  as `incomplete_own` instead of stopping again. Without such commits it yields as usual.
+- Records live per clone. A host without a reliable pid check, such as Windows, treats every pid
+  as running, so the takeover is never automatic there and `--task` is needed.
 
 ### Known limits
 - Staleness relies on client clocks: committer dates and lease timestamps. A machine whose clock
