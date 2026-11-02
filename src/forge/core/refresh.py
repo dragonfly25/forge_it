@@ -25,7 +25,7 @@ from typing import Any, Protocol
 
 from forge.core.config import ForgeConfig
 from forge.core.errors import ExitCode, ForgeError, PreconditionError
-from forge.core.git import Git, GitError
+from forge.core.git import CommitInfo, Git, GitError
 from forge.core.github import GitHubClient, GitHubError, Issue
 from forge.core.output import Result
 from forge.core.tasks import (
@@ -115,11 +115,14 @@ class TaskBranch:
 
     ``trailers`` holds one mapping per commit between the merge-base with the default branch
     and the tip, following first parents only, newest first. Which event counts depends on
-    the task id, known only once the issue is parsed (see :meth:`state`).
+    the task id, known only once the issue is parsed (see :meth:`state`). ``commits`` holds
+    the same commits with their sha and committer date, when gathered from git (claim and
+    lease logic needs them; the pure refresh plan does not).
     """
 
     tip: str
     trailers: tuple[Mapping[str, str], ...] = ()
+    commits: tuple[CommitInfo, ...] = ()
 
     def state(self, task_id: str) -> BranchState:
         """Return the branch state, counting only events whose ``Forge-Task`` is ``task_id``."""
@@ -223,7 +226,7 @@ def gather_task_branches(git: Git, default_branch: str, remote: str = "origin") 
             )
             continue
         commits = git.commits(f"{merge_base}..{tip}", first_parent=True)
-        branches[int(name)] = TaskBranch(tip, tuple(c.trailers for c in commits))
+        branches[int(name)] = TaskBranch(tip, tuple(c.trailers for c in commits), tuple(commits))
     return BranchScan(branches, tuple(warnings))
 
 

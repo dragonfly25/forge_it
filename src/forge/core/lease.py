@@ -1,0 +1,476 @@
+"""Leases: the lease comment, last activity, staleness and heartbeat (spec §8.2, ADR 0009).
+
+A task has a **live claim** when its branch exists, its last Forge event (ADR 0008) is a
+claim and the claim is not stale. The **claim commit** carries that last ``Forge-Claim``
+event. **Last activity** is the later of the branch tip's committer date and the lease
+comment's ``heartbeat_at``, the latter only when the lease comment names the same claim
+commit. A claim is **stale** when its last activity is more than ``lease_hours`` old.
+
+The lease comment is one comment per issue::
+
+    <!-- forge:lease -->
+    ...human summary...
+    <!-- forge:lease-data {"task": ..., "owner": ..., ...} -->
+
+When several comments carry the marker the newest one is authoritative and is edited in
+place; if the edit fails, a new comment is created and becomes the newest.
+
+All timestamps are UTC ISO 8601 with a ``Z`` suffix. The clock is always injected.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any, Protocol
+
+from forge.core.config import ForgeConfig
+from forge.core.errors import ForgeError, PreconditionError
+from forge.core.git import CommitInfo, Git
+from forge.core.github import Comment, GitHubClient, GitHubError
+from forge.core.profile import AgentProfile
+from forge.core.refresh import TaskBranch, TaskRecord, fetch_task_refs, gather_task_branches
+from forge.core.tasks import (
+    BranchEvent,
+    TaskBodyError,
+    TaskMetadata,
+    last_event_from_trailers,
+    parse_body,
+)
+
+LEASE_MARKER = "<!-- forge:lease -->"
+"""First line of every lease comment."""
+
+_DATA_PREFIX = "<!-- forge:lease-data "
+_DATA_RE = re.compile(r"^<!-- forge:lease-data (\{.*\}) -->[ \t]*$", re.MULTILINE)
+_DATA_KEYS = ("task", "owner", "agent", "claim", "claimed_at", "heartbeat_at", "released_at")
+
+
+# --------------------------------------------------------------------------- timestamps
+
+
+def format_time(value: datetime) -> str:
+    """Return ``value`` as UTC ISO 8601 with a ``Z`` suffix, to the second."""
+    if value.tzinfo is None:
+        raise ValueError("timestamps must be timezone-aware")
+    return value.astimezone(UTC).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_time(text: str) -> datetime:
+    """Parse a UTC ISO 8601 timestamp (``Z`` or an explicit offset). Raises ``ValueError``."""
+    value = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if value.tzinfo is None:
+        raise ValueError(f"timestamp without a timezone: {text!r}")
+    return value.astimezone(UTC)
+
+
+# --------------------------------------------------------------------------- lease comment
+
+
+@dataclass(frozen=True)
+class LeaseData:
+    """The machine data of a lease comment (ADR 0009)."""
+
+    task: str
+    owner: str
+    agent: str | None
+    claim: str
+    claimed_at: datetime
+    heartbeat_at: datetime
+    released_at: datetime | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        """Return the JSON object stored on the ``forge:lease-data`` line."""
+        return {
+            "task": self.task,
+            "owner": self.owner,
+            "agent": self.agent,
+            "claim": self.claim,
+            "claimed_at": format_time(self.claimed_at),
+            "heartbeat_at": format_time(self.heartbeat_at),
+            "released_at": None if self.released_at is None else format_time(self.released_at),
+        }
+
+
+@dataclass(frozen=True)
+class FoundLease:
+    """The authoritative (newest) lease comment and its data (``None`` if unreadable)."""
+
+    comment: Comment
+    data: LeaseData | None
+
+
+def render_lease(data: LeaseData, *, branch: str) -> str:
+    """Render a lease comment body: marker, human summary, final machine-data line."""
+    payload = json.dumps(data.to_json(), separators=(",", ":"))
+    # ``>`` never occurs in logins, ids or shas; escaping it keeps ``-->`` out of the line.
+    payload = payload.replace(">", "\\u003e")
+    lines = [
+        LEASE_MARKER,
+        f"**Forge lease** for `{data.task}` on `{branch}`",
+        "",
+        f"- Owner: {data.owner}",
+        f"- Agent: {data.agent or 'unknown'}",
+        f"- Claimed: {format_time(data.claimed_at)} (claim commit `{data.claim[:12]}`)",
+        f"- Last heartbeat: {format_time(data.heartbeat_at)}",
+    ]
+    if data.released_at is not None:
+        lines.append(f"- Released: {format_time(data.released_at)}")
+    lines += ["", f"{_DATA_PREFIX}{payload} -->"]
+    return "\n".join(lines) + "\n"
+
+
+def is_lease_comment(body: str) -> bool:
+    """True when ``body`` starts with the lease marker."""
+    return body.lstrip().startswith(LEASE_MARKER)
+
+
+def parse_lease(body: str) -> LeaseData | None:
+    """Return the data of a lease comment, or ``None`` when it is not one or is unreadable.
+
+    The last ``forge:lease-data`` line counts. Missing keys, wrong types or bad timestamps
+    make the data unreadable (``None``); the comment still counts as a lease comment.
+    """
+    if not is_lease_comment(body):
+        return None
+    matches = _DATA_RE.findall(body)
+    if not matches:
+        return None
+    try:
+        raw = json.loads(matches[-1])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(raw, dict) or set(raw) != set(_DATA_KEYS):
+        return None
+    try:
+        task, owner, claim = raw["task"], raw["owner"], raw["claim"]
+        agent, released = raw["agent"], raw["released_at"]
+        if not all(isinstance(v, str) and v for v in (task, owner, claim)):
+            return None
+        if agent is not None and not isinstance(agent, str):
+            return None
+        if released is not None and not isinstance(released, str):
+            return None
+        return LeaseData(
+            task=task,
+            owner=owner,
+            agent=agent,
+            claim=claim,
+            claimed_at=parse_time(str(raw["claimed_at"])),
+            heartbeat_at=parse_time(str(raw["heartbeat_at"])),
+            released_at=None if released is None else parse_time(released),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def find_lease(comments: Sequence[Comment]) -> FoundLease | None:
+    """Return the newest comment carrying the lease marker (comments come oldest first)."""
+    for comment in reversed(comments):
+        if is_lease_comment(comment.body):
+            return FoundLease(comment, parse_lease(comment.body))
+    return None
+
+
+def upsert_lease(
+    github: GitHubClient,
+    issue_number: int,
+    data: LeaseData,
+    *,
+    comments: Sequence[Comment] | None = None,
+) -> Comment:
+    """Write ``data`` into the issue's lease comment.
+
+    The newest lease comment is edited in place. If there is none, or the edit fails with
+    :class:`GitHubError` (e.g. a 403 on another user's comment), a new comment is created; it
+    is then the newest and therefore authoritative. ``comments`` avoids a second listing when
+    the caller already has them.
+    """
+    if comments is None:
+        comments = github.list_comments(issue_number)
+    body = render_lease(data, branch=TaskMetadata.branch_name(issue_number))
+    found = find_lease(comments)
+    if found is not None:
+        if found.comment.body == body:
+            return found.comment
+        try:
+            return github.update_comment(found.comment.id, body)
+        except GitHubError:
+            pass
+    return github.create_comment(issue_number, body)
+
+
+# --------------------------------------------------------------------------- activity
+
+
+def last_activity(tip_date: datetime, lease: LeaseData | None, claim_sha: str) -> datetime:
+    """Return the later of ``tip_date`` and the lease heartbeat for the same claim commit.
+
+    A heartbeat left over from another claim (``lease.claim != claim_sha``) never counts.
+    """
+    if lease is not None and lease.claim == claim_sha and lease.heartbeat_at > tip_date:
+        return lease.heartbeat_at
+    return tip_date
+
+
+def stale_at(activity: datetime, lease_hours: int) -> datetime:
+    """Return when a claim whose last activity is ``activity`` becomes stale."""
+    return activity + timedelta(hours=lease_hours)
+
+
+def is_stale(activity: datetime, lease_hours: int, now: datetime) -> bool:
+    """True when ``activity`` is more than ``lease_hours`` before ``now``.
+
+    A timestamp in the future (clock skew between machines) is simply not stale.
+    """
+    return now > stale_at(activity, lease_hours)
+
+
+# --------------------------------------------------------------------------- claims on branches
+
+
+@dataclass(frozen=True)
+class ClaimInfo:
+    """The claim carried by a task branch whose last Forge event is ``Forge-Claim``."""
+
+    issue: int
+    task_id: str
+    tip: str
+    tip_date: datetime
+    sha: str
+    date: datetime
+    owner: str
+    agent: str | None
+    index: int  # position of the claim commit in the branch's first-parent commits
+
+    @property
+    def order_key(self) -> tuple[datetime, int]:
+        """Order between two claims: claim commit committer date, then issue number."""
+        return (self.date, self.issue)
+
+    def is_mine(self, login: str, agent_id: str) -> bool:
+        """True when the claim names ``login`` (case-insensitively) and ``agent_id``."""
+        return self.owner.casefold() == login.casefold() and self.agent == agent_id
+
+
+def event_commit_index(commits: Sequence[CommitInfo], task_id: str) -> int | None:
+    """Index of the newest commit carrying a Forge event for ``task_id`` (or ``None``)."""
+    for index, commit in enumerate(commits):
+        if last_event_from_trailers([commit.trailers], task_id=task_id) is not None:
+            return index
+    return None
+
+
+def find_claim(issue_number: int, branch: TaskBranch, task_id: str) -> ClaimInfo | None:
+    """Return the claim of ``branch`` when its last Forge event for ``task_id`` is a claim.
+
+    ``branch.commits`` must be populated (:func:`gather_task_branches` does it).
+    """
+    index = event_commit_index(branch.commits, task_id)
+    if index is None:
+        return None
+    commit = branch.commits[index]
+    event = last_event_from_trailers([commit.trailers], task_id=task_id)
+    if event is None or event.event is not BranchEvent.CLAIM:
+        return None
+    return ClaimInfo(
+        issue=issue_number,
+        task_id=task_id,
+        tip=branch.tip,
+        tip_date=branch.commits[0].date,
+        sha=commit.sha,
+        date=commit.date,
+        owner=event.author,
+        agent=event.agent,
+        index=index,
+    )
+
+
+# --------------------------------------------------------------------------- context and checks
+
+
+class LeaseContext(Protocol):
+    """What lease operations need; ``forge.core.claim.ClaimContext`` satisfies it."""
+
+    @property
+    def config(self) -> ForgeConfig:
+        """The project configuration."""
+        ...
+
+    @property
+    def git(self) -> Git:
+        """Git access to the repository."""
+        ...
+
+    @property
+    def github(self) -> GitHubClient:
+        """GitHub access to ``config.github.repo``."""
+        ...
+
+    @property
+    def agent(self) -> AgentProfile:
+        """The active agent (``--agent`` or ``default_agent``)."""
+        ...
+
+    @property
+    def profile_login(self) -> str:
+        """The ``github`` field of the machine profile."""
+        ...
+
+    @property
+    def remote(self) -> str:
+        """The git remote holding the task branches (``origin``)."""
+        ...
+
+    def now(self) -> datetime:
+        """Current time from the injected clock (timezone-aware)."""
+        ...
+
+
+def check_identity(github: GitHubClient, profile_login: str) -> str:
+    """Return the authenticated GitHub login; exit 5 if it differs from the profile's."""
+    login = github.current_user()
+    if login.casefold() != profile_login.casefold():
+        raise PreconditionError(
+            f"the GitHub login {login!r} (gh) differs from the profile's github {profile_login!r}",
+            hint=f"run `forge profile set github={login}` or `gh auth switch` to the "
+            f"{profile_login!r} account",
+        )
+    return login
+
+
+def check_full_history(git: Git) -> None:
+    """Raise :class:`PreconditionError` (exit 5) on a shallow clone."""
+    if git.is_shallow():
+        raise PreconditionError(
+            "the repository is a shallow clone; claims need full history to find merge-bases",
+            hint="run `git fetch --unshallow`; in GitHub Actions use actions/checkout with "
+            "`fetch-depth: 0`",
+        )
+
+
+def load_task(github: GitHubClient, issue_number: int) -> TaskRecord:
+    """Return the issue and its parsed metadata; :class:`ForgeError` if it is not a task."""
+    issue = github.get_issue(issue_number)
+    try:
+        meta = parse_body(issue.body, issue_number=issue.number, milestone=issue.milestone)
+    except TaskBodyError as exc:
+        raise ForgeError(exc.message, hint=exc.hint) from exc
+    if meta is None:
+        raise ForgeError(
+            f"issue #{issue_number} is not a Forge task (no Forge block)",
+            hint="pass the issue number of a Forge task",
+        )
+    return TaskRecord(issue, meta)
+
+
+def read_branch(ctx: LeaseContext, issue_number: int) -> TaskBranch | None:
+    """Fetch the task branches and return ``task/<issue_number>`` (``None`` if absent)."""
+    default = ctx.config.project.default_branch
+    fetch_task_refs(ctx.git, default, ctx.remote)
+    return gather_task_branches(ctx.git, default, ctx.remote).branches.get(issue_number)
+
+
+# --------------------------------------------------------------------------- heartbeat
+
+
+@dataclass(frozen=True)
+class OwnClaim:
+    """A live claim of the current user on one task, with its lease comment."""
+
+    record: TaskRecord
+    claim: ClaimInfo
+    lease: LeaseData | None
+    comments: tuple[Comment, ...]
+    login: str
+
+
+def require_own_live_claim(ctx: LeaseContext, issue_number: int) -> OwnClaim:
+    """Check that ``task/<issue_number>`` holds a live claim of mine; return it.
+
+    Raises :class:`PreconditionError` (exit 5) when the login differs from the profile, the
+    clone is shallow, or the task has no live claim made by my login and my agent.
+    """
+    login = check_identity(ctx.github, ctx.profile_login)
+    check_full_history(ctx.git)
+    record = load_task(ctx.github, issue_number)
+    branch = read_branch(ctx, issue_number)
+    name = TaskMetadata.branch_name(issue_number)
+    claim = None if branch is None else find_claim(issue_number, branch, record.meta.id)
+    if claim is None:
+        raise PreconditionError(
+            f"#{issue_number} ({record.meta.id}) has no claim: {name} "
+            + ("does not exist" if branch is None else "does not end with a claim"),
+            hint=f"claim it first with `forge next --task {record.meta.id}`",
+        )
+    if not claim.is_mine(login, ctx.agent.id):
+        raise PreconditionError(
+            f"the claim on #{issue_number} ({record.meta.id}) belongs to {claim.owner} "
+            f"with agent {claim.agent or 'unknown'}, not to {login} with agent {ctx.agent.id}",
+            hint="use the agent that made the claim (--agent), or claim another task",
+        )
+    comments = tuple(ctx.github.list_comments(issue_number))
+    found = find_lease(comments)
+    lease = None if found is None else found.data
+    activity = last_activity(claim.tip_date, lease, claim.sha)
+    if is_stale(activity, ctx.config.lease_hours, ctx.now()):
+        raise PreconditionError(
+            f"your claim on #{issue_number} ({record.meta.id}) went stale at "
+            f"{format_time(stale_at(activity, ctx.config.lease_hours))}",
+            hint=f"take it over again with `forge reclaim {issue_number}`",
+        )
+    return OwnClaim(record, claim, lease, comments, login)
+
+
+@dataclass(frozen=True)
+class HeartbeatOutcome:
+    """Result of :func:`heartbeat`."""
+
+    issue: int
+    task_id: str
+    claim: str
+    heartbeat_at: datetime
+    stale_at: datetime
+
+    def to_data(self) -> dict[str, Any]:
+        """JSON ``data`` for ``forge heartbeat``."""
+        return {
+            "issue": self.issue,
+            "id": self.task_id,
+            "claim": self.claim,
+            "heartbeat_at": format_time(self.heartbeat_at),
+            "stale_at": format_time(self.stale_at),
+        }
+
+
+def heartbeat(ctx: LeaseContext, issue_number: int) -> HeartbeatOutcome:
+    """Refresh the lease of my live claim on ``issue_number`` (sets ``heartbeat_at``).
+
+    Requires a live claim that is mine (exit 5 otherwise). ``claimed_at`` is kept when the
+    lease comment already names this claim, else it is the claim commit's date.
+    """
+    own = require_own_live_claim(ctx, issue_number)
+    now = ctx.now()
+    claim = own.claim
+    lease = own.lease
+    claimed_at = lease.claimed_at if lease is not None and lease.claim == claim.sha else claim.date
+    data = LeaseData(
+        task=own.record.meta.id,
+        owner=own.login,
+        agent=ctx.agent.id,
+        claim=claim.sha,
+        claimed_at=claimed_at,
+        heartbeat_at=now,
+    )
+    upsert_lease(ctx.github, issue_number, data, comments=own.comments)
+    activity = last_activity(claim.tip_date, data, claim.sha)
+    return HeartbeatOutcome(
+        issue=issue_number,
+        task_id=own.record.meta.id,
+        claim=claim.sha,
+        heartbeat_at=now,
+        stale_at=stale_at(activity, ctx.config.lease_hours),
+    )
