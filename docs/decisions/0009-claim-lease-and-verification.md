@@ -187,3 +187,20 @@ The worktree path is `<profile.worktrees_dir or <parent-of-repo>/<repo>-worktree
 - The roadmap order (Phase 7), the `forge status` stale view (Phase 4) and `forge handoff`
   (Phase 6) build on this. Handoff must write `Forge-Handoff` with `no_verify` on the event push.
 - A pull request that stays open keeps its zones reserved however long it waits for review.
+
+## Implementation notes (Phase 3)
+
+- The lease comment is written **last** and marks the post-claim steps as complete. On a reclaim,
+  the reclaim comment is posted before the lease comment, so a re-run after an interruption still
+  posts it.
+- A claim that a previous run pushed but never finished is checked against overlapping claims
+  again before its post-claim steps are completed. Otherwise a claim pushed but never verified
+  could keep zones that overlap another kept claim.
+- `release-claim --delete-branch` also requires each Forge event commit to be empty and not a
+  merge, because a handoff commit (ADR 0008) may carry work.
+- Claims left on closed issues do not hold zones.
+- Claim and release commits take their committer date from the injected clock
+  (`Git.commit_tree(date=...)`).
+- `heartbeat` and `release-claim` also accept **my own stale claim**, when the branch's last event
+  is still my claim and nobody has reclaimed it. Each reports a warning. A heartbeat renews the
+  claim.
