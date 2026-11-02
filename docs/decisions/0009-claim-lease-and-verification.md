@@ -1,0 +1,189 @@
+# 0009 — Claim, lease and post-claim zone verification
+
+- Status: accepted
+- Date: 2026-11-02
+
+## Context
+
+Spec §8.1–§8.4 define the claim (a compare-and-swap push to `task/<n>`), the lease, the
+post-claim zone verification, reclaim and release. Building them exposes these gaps:
+
+1. The verification rule in §8.1 ("if another live claim overlaps by zone and its claim commit
+   is earlier, release") is **unsafe**. Take A, which pushes and verifies before B pushes, so A
+   never sees B. B then pushes and sees A. If B's claim commit has the earlier timestamp, B keeps
+   its claim. A has already kept its own, so both now hold overlapping zones.
+2. "Active milestones" and "milestone order (roadmap)" are mentioned, but the roadmap model only
+   arrives in Phase 7.
+3. ADR 0007 left two questions open:
+   - Re-running a claim whose push landed before an interruption looks like a lost race.
+   - Should Forge's own commits and pushes bypass user git hooks?
+4. Several points are unspecified:
+   - the format of the lease comment, and which timestamp counts as activity;
+   - which login goes into `Forge-Claim`;
+   - exit codes for the different "cannot claim" cases;
+   - what `release-claim` writes on the branch;
+   - whether in-review tasks hold their zones.
+
+## Decision
+
+### Live claim and activity
+- A task has a **live claim** when its branch exists, its last Forge event (ADR 0008) is
+  `claim`, and the claim is not stale.
+- The **claim commit** is the commit that carries that last `Forge-Claim` event.
+- **Last activity** is the later of:
+  - the committer date of the branch tip;
+  - `heartbeat_at` in the lease comment, but only when the lease comment's `claim` field equals
+    the claim commit sha. A heartbeat left over from an earlier claim never extends a later one.
+- **Stale** means last activity is more than `lease_hours` ago.
+- The clock is injectable, and all timestamps are UTC ISO 8601 with a `Z` suffix.
+
+### Lease comment
+- There is one comment per issue. It starts with `<!-- forge:lease -->`, followed by a short
+  human summary (owner, agent, claimed, last heartbeat, branch).
+- Machine data sits on a final line, `<!-- forge:lease-data {json} -->`, with the keys `task`,
+  `owner`, `agent`, `claim` (sha), `claimed_at`, `heartbeat_at` and `released_at` (null unless
+  released).
+- When several comments carry the marker, the **newest** one is authoritative. Forge edits it in
+  place. If the edit fails (for example a 403 on another user's comment), Forge creates a new
+  comment, which then becomes the newest.
+
+### Who claims
+- The claim login is the authenticated GitHub user (`GitHubClient.current_user()`). If the
+  profile's `github` field differs from it, Forge stops with exit 5, naming both logins.
+- `Forge-Agent` is the active agent id from the profile (`--agent` or `default_agent`).
+- `forge next` and `reclaim` check the CLI version against `forge_version` and exit 5 on a
+  mismatch.
+- Profile violations of `config.models` are reported as warnings and never block a claim.
+
+### Selection (`forge next`)
+- **Active milestones** are the open GitHub milestones. An issue with no milestone counts as
+  active, and its task id gives its milestone.
+- **Candidates** are tasks whose derived status (ADR 0008) is `ready` or `handoff`. With
+  `--reclaim`, an `in-progress` task whose claim is stale is a candidate too. A task is excluded
+  when:
+  - an open PR exists from its branch;
+  - it carries `blocked:conflict`;
+  - its zones overlap a **zone holder**, which is any task with a live claim or an open PR.
+    In-review work is unmerged, so it keeps its zones even after its lease goes stale.
+- **Order**:
+  1. `handoff` before everything else;
+  2. milestone, in natural order of the id prefix (M0 < M1 < M10). The roadmap order replaces
+     this in Phase 7.
+  3. wave (the topological level over all parsed tasks; on a cycle, all waves count as 0, with
+     a warning);
+  4. size, S before M;
+  5. issue number.
+- Tasks whose tier the agent cannot serve (ADR 0005) are skipped unless `--any-tier` is given.
+- `--task <M1-T07|#42|42>` restricts selection to that task, under the same checks. If the task
+  is not claimable, Forge exits 3 with the reason.
+- With no candidate left, or after `claim.max_attempts` lost races, Forge exits 3. The `data`
+  then counts the exclusions by reason.
+- `--dry-run` prints the ordered candidates and pushes nothing.
+
+### Claim push
+- Forge builds the claim commit with `commit-tree`. It is empty: its tree is the parent's tree.
+- **New claim**: the parent is `origin/<default>`, and the lease expects that the ref does not
+  exist.
+- **Resume** (handoff, release or reclaim): the parent is the current tip, and the lease
+  expects that tip.
+- The message and trailers follow §8.1.
+- Forge takes the pre-push snapshot of live claims (see below) **before** it creates the claim
+  commit.
+
+### Idempotent own claim (ADR 0007 open item)
+- When the last event of a live claim names **my login and my agent id**, the claim is mine.
+- If its lease comment does not yet reference that claim commit, a previous run stopped after the
+  push. `forge next` then resumes that task first: it skips the push and completes the
+  post-claim steps.
+- If the lease comment already references the claim commit, the claim is deliberate and complete,
+  and `next` does not offer the task again. It says "you already hold #n". `next --task` on that
+  task completes the post-claim steps again, which is idempotent, and exits 0.
+- If a push reports a lost race but the remote tip is my claim commit, the claim is treated as
+  won. `Git.push` already does this (ADR 0007).
+
+### Post-claim zone verification (safe variant of §8.1)
+After a successful push, Forge lists the live claims again (snapshot S2). Each claim C there that
+belongs to another task and overlaps my zones is a conflict. The **order** between two claims is
+the committer date of the claim commit, then the issue number.
+- If C comes before my claim in that order, I **yield** at once.
+- If my claim comes first, I **wait for C to go away**. Forge polls every 2 s, five times at most
+  (10 s in total; the interval and limit are injectable). C has gone away when it is no longer a
+  live claim on that commit. If C is still live after the last poll, I yield.
+
+This is safe without any timing assumption. Of two overlapping claims, the one pushed later
+always sees the earlier one. If the later one comes first in the order, it keeps its claim only
+once the earlier one has disappeared. Otherwise it yields. So at most one keeps the zones. When
+both see each other, exactly one keeps: the other yields at once, and the first one's wait ends.
+
+To **yield**:
+- a new claim deletes the branch with a lease on my claim sha;
+- a resumed claim pushes the previous tip back, with a lease on my claim sha.
+
+After yielding, Forge moves on to the next candidate. The yielded task is not retried in the same
+run.
+
+The lease comment, assignment and labels are written only **after** verification succeeds.
+
+### Post-claim steps
+1. Assign the issue to me. On a reclaim, also unassign the previous claimant.
+2. Set the labels for `in-progress`.
+3. Upsert the lease comment. `claim` is set to the claim sha, and `claimed_at` and
+   `heartbeat_at` are set to now.
+4. On a reclaim, post a comment that names the previous claimant and when their claim went stale.
+5. Create the worktree, or check out the branch with `--no-worktree` or when
+   `worktrees.enabled: false`.
+6. Write `.forge/local/current.json`.
+
+The worktree path is `<profile.worktrees_dir or <parent-of-repo>/<repo>-worktrees>/task-<n>`.
+- An existing worktree that is already on `task/<n>` is reused.
+- If a local `task/<n>` already exists and is not an ancestor of the claimed tip, Forge leaves it
+  untouched and exits 5. The claim stays held, so re-running `next --task` completes the steps.
+- Checking out in the main working tree requires it to be clean (exit 5 otherwise).
+
+`.forge/local/` gets its own `.gitignore` containing `*`, so it is ignored even before
+`forge init` (Phase 8) adds the rule.
+
+`current.json` holds `{task, issue, branch, base, claim, agent, claimed_at, worktree}`.
+- For a new claim, `base` is the `origin/<default>` sha at the time of the claim.
+- On a resume, `base` is the merge-base.
+
+### Heartbeat, release, reclaim
+- **`forge heartbeat`** applies to the current task, which is found from `current.json`, or from
+  the current branch `task/<n>`. It requires a live claim that is mine (exit 5 otherwise) and sets
+  `heartbeat_at`.
+- **`forge release-claim`** also requires a live claim that is mine. It:
+  - pushes an empty `Forge-Release` commit on top of the **remote** tip, with a lease. Local
+    commits that were never pushed are not published; Forge warns with how many there are.
+  - unassigns me and sets the derived status (`ready` or `blocked`);
+  - posts a comment, and sets `released_at` in the lease comment;
+  - removes `current.json`.
+
+  With `--delete-branch`, Forge deletes the branch with a lease, but only if every commit since
+  the merge-base is a Forge event commit. Otherwise it keeps the branch and warns.
+- **`forge reclaim <n>`** behaves like `forge next --task <n> --reclaim`. A fresh claim held by
+  someone else exits 3, and the message says when the claim becomes stale.
+
+### Hooks (ADR 0007 open item)
+- Forge's event commits (claim, handoff, release) are created with `commit-tree`, so commit hooks
+  never run.
+- Their pushes use `--no-verify` (`Git.push(..., no_verify=True)`). They carry no user code: the
+  tree is the parent's tree.
+- Pushes that carry user code, such as the wip commit in handoff, sync and ship, run the user's
+  hooks. Phases 5 and 6 revisit this.
+
+### Exit codes
+| Code | When |
+|---|---|
+| 0 | claimed, resumed, heartbeat or release done |
+| 3 | nothing claimable, `max_attempts` exhausted, the requested task is not claimable, or reclaim of a fresh claim |
+| 5 | version mismatch, profile missing or invalid, profile/gh login mismatch, shallow clone, dirty tree for an in-place checkout, no current task, the claim is not mine, a local branch that diverged |
+| 1 | anything else (GitHub/git failures) |
+
+## Consequences
+
+- Concurrency safety does not depend on clocks. Clocks affect only staleness and which of two
+  simultaneous claimants keeps its claim.
+- A losing claimant can wait up to about 10 s before moving on. Tests inject the sleep.
+- The roadmap order (Phase 7), the `forge status` stale view (Phase 4) and `forge handoff`
+  (Phase 6) build on this. Handoff must write `Forge-Handoff` with `no_verify` on the event push.
+- A pull request that stays open keeps its zones reserved however long it waits for review.
