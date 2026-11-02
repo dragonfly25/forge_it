@@ -1,0 +1,18 @@
+# Forge preset for Claude Code (https://code.claude.com).
+# Aliases (opus, sonnet, haiku, fable) always point to the latest model of each family.
+tool: claude-code
+provider: anthropic
+updated: 2026-11-02
+supports_effort: true
+tiers:
+  strong: opus
+  standard: sonnet
+  light: haiku
+effort:
+  low: low
+  medium: medium
+  high: high
+known_models:
+  strong: [opus, fable, claude-opus-5-5, claude-fable-5-1]
+  standard: [sonnet, claude-sonnet-5-5]
+  light: [haiku, claude-haiku-5-5]

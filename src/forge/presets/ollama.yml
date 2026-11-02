@@ -1,0 +1,9 @@
+# Forge preset for local models served by Ollama.
+# Tiers are chosen during `forge setup` from the output of `ollama list`.
+tool: ollama
+provider: local
+updated: 2026-11-02
+supports_effort: false
+tiers: {}
+effort: {}
+known_models: {}

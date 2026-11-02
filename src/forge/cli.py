@@ -2,40 +2,60 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated
 
 import typer
 
 from forge import __version__
+from forge.commands._output import GlobalOptions, run_command
+from forge.core.output import Result
 
 app = typer.Typer(
     name="forge",
     help="Coordinate several people and AI agents working in parallel on one GitHub repository.",
-    no_args_is_help=True,
     add_completion=False,
 )
 
 
-def _version_callback(value: bool) -> None:
-    """Print the Forge version and exit when ``--version`` is given."""
-    if value:
-        typer.echo(f"forge {__version__}")
-        raise typer.Exit(code=0)
-
-
-@app.callback()
+@app.callback(invoke_without_command=True)
 def main(
+    ctx: typer.Context,
     version: Annotated[
         bool,
-        typer.Option(
-            "--version",
-            "-V",
-            help="Show the Forge version and exit.",
-            callback=_version_callback,
-            is_eager=True,
-        ),
+        typer.Option("--version", "-V", help="Show the Forge version and exit."),
     ] = False,
-    # Phase 1: add the global options from spec §16 here
-    # (--json, --agent, --repo, --verbose, --yes) and store them on ctx.obj.
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Print one JSON envelope on stdout (ADR 0004)."),
+    ] = False,
+    agent: Annotated[
+        str | None,
+        typer.Option("--agent", envvar="FORGE_AGENT", help="Active agent id from the profile."),
+    ] = None,
+    repo: Annotated[
+        Path | None,
+        typer.Option("--repo", help="Path to the repository (default: current directory)."),
+    ] = None,
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", "-v", help="Print more detail."),
+    ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="Answer yes to confirmations."),
+    ] = False,
 ) -> None:
     """Forge: coordinate people and AI agents on one GitHub repository."""
+    opts = GlobalOptions(json=json_output, agent=agent, repo=repo, verbose=verbose, yes=yes)
+    ctx.obj = opts
+    if version:
+        if opts.json:
+            run_command(opts, lambda: Result(data={"version": __version__}))
+        typer.echo(f"forge {__version__}")
+        raise typer.Exit(code=0)
+    if ctx.invoked_subcommand is None:
+        help_text = ctx.get_help()  # rich help prints itself and returns ""
+        if help_text:
+            typer.echo(help_text)
+        raise typer.Exit(code=0)
