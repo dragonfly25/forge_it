@@ -4,16 +4,21 @@ Login and agent id alone cannot tell a claim whose run crashed after the push fr
 that another live run (same account, same agent) is still completing. Before pushing a
 claim, ``forge next`` writes ``<git-common-dir>/forge/pending/task-<n>.json``::
 
-    {"claim": "<sha>", "pid": 4242, "host": "laptop", "started_at": "2026-11-02T09:00:00Z"}
+    {"claim": "<sha>", "previous": "<sha>"|null, "pid": 4242, "host": "<machine id>",
+     "started_at": "2026-11-02T09:00:00Z"}
 
 and removes it once the post-claim GitHub steps are done, or after yielding or losing the
-race. An incomplete claim of mine is taken over automatically only when the record exists
-on this machine, names that claim commit and its pid is no longer running
-(:func:`may_take_over`). The git common dir is shared by every worktree of one clone, so
-runs started from a task worktree see the same records.
+race. ``previous`` is the remote tip the claim push replaced (``null``: the push created the
+branch), so a run that takes the claim over knows what to restore if it must yield. An
+incomplete claim of mine is taken over automatically only when the record exists on this
+machine, names that claim commit and its run is gone (:func:`may_take_over`): its pid is no
+longer running, or the record is older than :data:`MAX_RUN_AGE` (the pid may have been
+reused). The git common dir is shared by every worktree of one clone, so runs started from a
+task worktree see the same records.
 
-``host`` is not the network hostname, which can change with the network, but a per-clone
-machine id (:func:`machine_id`, ``<git-common-dir>/forge/machine-id``).
+``host`` is not the network hostname, which can change with the network, but a machine id
+kept outside the clone (:func:`machine_id`, ``$XDG_STATE_HOME/forge/machine-id``), so a
+container that shares the clone but has its own home (and pid namespace) gets its own id.
 
 Reading a record and replacing it is a read-modify-write: two runs of one clone could both
 see the same dead record and both take the claim over. Every such update happens under an
@@ -31,11 +36,12 @@ import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
-from forge.core.errors import ForgeError
+from forge.core.errors import ForgeError, PreconditionError
 from forge.core.git import Git
 from forge.core.lease import format_time, parse_time
 
@@ -43,30 +49,51 @@ if sys.platform != "win32":
     import fcntl
 
 _KEYS = ("claim", "pid", "host", "started_at")
+_OPTIONAL_KEYS = ("previous",)
 _RECORD_RE = re.compile(r"task-([1-9][0-9]*)\.json")
 _MACHINE_ID_RE = re.compile(r"[0-9a-f]{32}")
 LOCK_TIMEOUT = 2.0
 """Seconds :func:`task_lock` waits for another run's lock (it is held for milliseconds)."""
+MAX_RUN_AGE: Final = timedelta(minutes=15)
+"""A record older than this belongs to a run that is gone, whatever its pid says.
+
+A claim run takes seconds plus at most about 10 s of verification polling; after this long
+the recorded pid may have been reused by an unrelated process.
+"""
+
+
+class Unknown(Enum):
+    """Type of :data:`UNKNOWN`."""
+
+    UNKNOWN = "unknown"
+
+
+UNKNOWN: Final = Unknown.UNKNOWN
+"""``previous`` of a record written before Forge recorded it (the key is absent)."""
 
 
 @dataclass(frozen=True)
 class PendingClaim:
-    """A claim that a run has pushed (or is pushing) but not yet completed."""
+    """A claim that a run has pushed (or is pushing) but not yet completed.
+
+    ``previous`` is the remote tip the claim push replaced (``None``: it created the branch),
+    or :data:`UNKNOWN` for a record that does not say.
+    """
 
     issue: int
     claim: str
     pid: int
     host: str
     started_at: datetime
+    previous: str | Unknown | None = UNKNOWN
 
     def to_json(self) -> dict[str, Any]:
         """The JSON object stored in the record file."""
-        return {
-            "claim": self.claim,
-            "pid": self.pid,
-            "host": self.host,
-            "started_at": format_time(self.started_at),
-        }
+        data: dict[str, Any] = {"claim": self.claim}
+        if not isinstance(self.previous, Unknown):
+            data["previous"] = self.previous
+        data.update(pid=self.pid, host=self.host, started_at=format_time(self.started_at))
+        return data
 
 
 def forge_dir(git: Git) -> Path:
@@ -110,7 +137,10 @@ def read_pending(git: Git, issue_number: int) -> PendingClaim | None:
         raw = json.loads(path.read_text())
     except (OSError, ValueError):
         return None
-    if not isinstance(raw, dict) or set(raw) != set(_KEYS):
+    if not isinstance(raw, dict) or not set(_KEYS) <= set(raw) <= {*_KEYS, *_OPTIONAL_KEYS}:
+        return None
+    previous = raw.get("previous", UNKNOWN)
+    if not (previous is UNKNOWN or previous is None or (isinstance(previous, str) and previous)):
         return None
     claim, pid, host, started = raw["claim"], raw["pid"], raw["host"], raw["started_at"]
     if not (isinstance(claim, str) and claim and isinstance(host, str) and host):
@@ -121,7 +151,7 @@ def read_pending(git: Git, issue_number: int) -> PendingClaim | None:
         started_at = parse_time(started)
     except ValueError:
         return None
-    return PendingClaim(issue_number, claim, pid, host, started_at)
+    return PendingClaim(issue_number, claim, pid, host, started_at, previous)
 
 
 def remove_pending(
@@ -164,21 +194,21 @@ def prune_orphans(
     pid: int,
     host: str,
     running: Callable[[int], bool],
+    now: datetime,
 ) -> list[int]:
     """Remove records left behind by runs that are gone; return their issue numbers.
 
     ``claims`` maps an issue to the claim commit its remote branch ends with (its last Forge
     event). A record is an orphan when it names another sha (or the task has no claim), and
-    its run is gone: its pid is not ``running``, or it was written by another ``host``. A
-    record whose sha is still the remote claim is kept (it allows the takeover), and so is a
-    live run's record. Each removal re-reads the record under :func:`task_lock`; a record
-    whose lock is busy is left for a later run.
+    its run is gone (not :func:`run_alive`). A record whose sha is still the remote claim is
+    kept (it allows the takeover), and so is a live run's record. Each removal re-reads the
+    record under :func:`task_lock`; a record whose lock is busy is left for a later run.
     """
     pruned: list[int] = []
     for record in list_pending(git):
         if claims.get(record.issue) == record.claim:
             continue
-        if record.host == host and running(record.pid):
+        if run_alive(record, host=host, running=running, now=now):
             continue
         with task_lock(git, record.issue, pid=pid, host=host, timeout=0) as held:
             if not held or read_pending(git, record.issue) != record:
@@ -207,6 +237,8 @@ def task_lock(
 ) -> Iterator[bool]:
     """Hold the exclusive lock of ``task/<issue_number>``'s record; yield False if busy.
 
+    Raises :class:`PreconditionError` on Windows (:func:`require_flock`).
+
     The lock is ``<git-common-dir>/forge/pending/task-<n>.lock``, holding ``{pid, host}``
     (default: this process) for diagnostics, locked with ``flock`` and removed on exit. The
     kernel releases a ``flock`` when its process dies, so a lock file left by a crashed run
@@ -215,6 +247,7 @@ def task_lock(
     local (read and write records, no network), so ``timeout`` seconds is plenty; a lock
     still busy after it yields False and the caller treats the task as in flight.
     """
+    require_flock()
     path = lock_path(git, issue_number)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = _acquire(path, timeout)
@@ -231,6 +264,21 @@ def task_lock(
         # unlink (inode check in _acquire) and retries on a fresh file.
         path.unlink(missing_ok=True)
         os.close(fd)
+
+
+def require_flock(platform: str | None = None) -> None:
+    """Raise :class:`PreconditionError` where :func:`task_lock` cannot work (Windows).
+
+    Claims are serialised with ``flock``, which Windows lacks; an ``O_EXCL`` lock file would
+    need a stale-lock break that cannot be made atomic. Forge supports macOS, Linux and WSL.
+    ``platform`` defaults to ``sys.platform``.
+    """
+    if (platform if platform is not None else sys.platform) == "win32":
+        raise PreconditionError(
+            "claims need macOS, Linux or WSL: Forge serialises them with flock, which "
+            "Windows does not provide",
+            hint="run forge from WSL",
+        )
 
 
 def _acquire(path: Path, timeout: float) -> int | None:
@@ -253,11 +301,6 @@ def _acquire(path: Path, timeout: float) -> int | None:
 
 
 def _try_lock(path: Path) -> int | None:
-    if sys.platform == "win32":  # pragma: no cover - Forge v0 runs on macOS, Linux and WSL
-        try:
-            return os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o644)
-        except FileExistsError:
-            return None
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -270,15 +313,39 @@ def _try_lock(path: Path) -> int | None:
 # --------------------------------------------------------------------------- machine identity
 
 
-def machine_id(git: Git) -> str:
-    """This clone's machine id: ``<git-common-dir>/forge/machine-id``, created once.
+def state_dir(env: Mapping[str, str] = os.environ) -> Path:
+    """Forge's per-user state directory: ``$XDG_STATE_HOME/forge``.
+
+    Falls back to ``~/.local/state/forge`` when ``XDG_STATE_HOME`` is unset, empty or
+    relative (the XDG spec says relative values must be ignored).
+    """
+    xdg = env.get("XDG_STATE_HOME", "")
+    if xdg and Path(xdg).is_absolute():
+        base = Path(xdg)
+    else:
+        home = env.get("HOME")
+        base = (Path(home) if home else Path.home()) / ".local" / "state"
+    return base / "forge"
+
+
+def machine_id_path(env: Mapping[str, str] = os.environ) -> Path:
+    """Where :func:`machine_id` keeps the id: ``<state dir>/machine-id``."""
+    return state_dir(env) / "machine-id"
+
+
+def machine_id(path: Path | None = None) -> str:
+    """This machine's id, kept in ``path`` (default :func:`machine_id_path`), created once.
 
     A random uuid4 (hex) instead of the hostname, which can change with the network and
-    would then disable the automatic takeover of this machine's records. The file is created
-    atomically (written to a temporary file, then hard-linked into place, which fails if
-    another run created it first), so concurrent first runs agree on one id.
+    would then disable the automatic takeover of this machine's records. It lives outside
+    any clone, in the user's state directory: pids are only comparable within one pid
+    namespace, and a container that shares a clone with the host (a devcontainer) but has
+    its own filesystem and home gets its own id, so neither side takes the other's live
+    records for dead. The file is created atomically (written to a temporary file, then
+    hard-linked into place, which fails if another run created it first), so concurrent
+    first runs agree on one id.
     """
-    path = forge_dir(git) / "machine-id"
+    path = machine_id_path() if path is None else path
     found = _read_machine_id(path)
     if found is not None:
         return found
@@ -330,18 +397,37 @@ def pid_running(pid: int) -> bool:
     return True
 
 
+def run_alive(
+    record: PendingClaim,
+    *,
+    host: str,
+    running: Callable[[int], bool],
+    now: datetime,
+) -> bool:
+    """True when the run that wrote ``record`` may still be running.
+
+    It must have been written on this ``host`` less than :data:`MAX_RUN_AGE` before ``now``,
+    and its pid must still be ``running``. An older record counts as gone whatever its pid
+    says, because the pid may have been reused.
+    """
+    if record.host != host or now - record.started_at > MAX_RUN_AGE:
+        return False
+    return running(record.pid)
+
+
 def may_take_over(
     record: PendingClaim | None,
     claim_sha: str,
     *,
     host: str,
     running: Callable[[int], bool],
+    now: datetime,
 ) -> bool:
     """True when an incomplete claim may be completed automatically (ADR 0009 amendment).
 
-    The record must exist, come from this ``host``, name ``claim_sha``, and its pid must no
-    longer be ``running``.
+    The record must exist, come from this ``host``, name ``claim_sha``, and its run must be
+    gone (not :func:`run_alive`).
     """
     if record is None or record.host != host or record.claim != claim_sha:
         return False
-    return not running(record.pid)
+    return not run_alive(record, host=host, running=running, now=now)

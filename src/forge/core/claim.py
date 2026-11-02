@@ -57,12 +57,18 @@ from forge.core.lease import (
 )
 from forge.core.models import can_serve
 from forge.core.pending import (
+    LOCK_TIMEOUT,
+    UNKNOWN,
     PendingClaim,
+    Unknown,
     machine_id,
     may_take_over,
+    pending_path,
     prune_orphans,
     read_pending,
     remove_pending,
+    require_flock,
+    run_alive,
     task_lock,
     write_pending,
 )
@@ -122,7 +128,8 @@ class ClaimContext:
     ``max_polls`` bound the wait of the post-claim verification (2 s x 5 by default).
     ``pid``, ``host`` and ``pid_running`` identify this run in pending-claim records and tell
     whether the run that wrote one is still alive (injected by tests). ``host`` defaults to
-    the clone's machine id (:func:`forge.core.pending.machine_id`), never the hostname.
+    this machine's id (:func:`forge.core.pending.machine_id`, kept in the user's state
+    directory), never the hostname. ``lock_timeout`` bounds the wait for a busy task lock.
     ``run_id`` makes the ``Forge-Run`` trailer of each run's event commits.
     """
 
@@ -142,11 +149,12 @@ class ClaimContext:
     host: str | None = None
     pid_running: Callable[[int], bool] = _pid_running
     run_id: Callable[[], str] = _new_run_id
+    lock_timeout: float = LOCK_TIMEOUT
 
     def machine(self) -> str:
-        """This machine's id in pending-claim records: :attr:`host`, else the clone's id."""
+        """This machine's id in pending-claim records: :attr:`host`, else the stored id."""
         if self.host is None:
-            self.host = machine_id(self.git)
+            self.host = machine_id()
         return self.host
 
     def now(self) -> datetime:
@@ -700,16 +708,24 @@ class _Lost:
     warning: str
 
 
+@dataclass(frozen=True)
+class _Busy:
+    """Another run of this clone holds the task lock right now."""
+
+
 def _claim_trailers(login: str, agent: str, task_id: str, run_id: str) -> dict[str, str]:
     return {TRAILER_CLAIM: login, TRAILER_AGENT: agent, TRAILER_TASK: task_id, TRAILER_RUN: run_id}
 
 
-def _mark_pending(ctx: ClaimContext, issue_number: int, claim_sha: str) -> None:
+def _mark_pending(
+    ctx: ClaimContext, issue_number: int, claim_sha: str, previous: str | Unknown | None
+) -> None:
     """Write this run's pending-claim record for ``claim_sha`` (ADR 0009 amendment).
 
+    ``previous`` is the remote tip the claim push replaced (``None``: it created the branch).
     The caller holds :func:`task_lock` for ``issue_number``.
     """
-    record = PendingClaim(issue_number, claim_sha, ctx.pid, ctx.machine(), ctx.now())
+    record = PendingClaim(issue_number, claim_sha, ctx.pid, ctx.machine(), ctx.now(), previous)
     write_pending(ctx.git, record)
 
 
@@ -717,9 +733,8 @@ def _live_here(ctx: ClaimContext, record: PendingClaim | None) -> bool:
     """True when ``record`` was written by another run that is still alive on this machine."""
     return (
         record is not None
-        and record.host == ctx.machine()
         and record.pid != ctx.pid
-        and ctx.pid_running(record.pid)
+        and run_alive(record, host=ctx.machine(), running=ctx.pid_running, now=ctx.now())
     )
 
 
@@ -733,9 +748,10 @@ def _push_claim(
     second: a push can never "win" with another run's identical commit.
 
     The pending-claim record is written under the task lock between creating the commit and
-    pushing it, and removed again when the push loses. If another live run of this clone
-    already has a record for the task, it is claiming it right now: no push, the task
-    counts as lost.
+    pushing it, and removed again when the push loses. The record names the tip the push
+    replaces (``previous``), so a run that takes this claim over knows what to restore on a
+    yield. If another live run of this clone already has a record for the task (or holds
+    its lock), it is claiming it right now: no push, the task counts as lost.
     """
     view = candidate.view
     name = TaskMetadata.branch_name(view.issue)
@@ -749,46 +765,71 @@ def _push_claim(
         _claim_trailers(login, ctx.agent.id, view.task_id, run_id),
         date=ctx.now(),
     )
-    with task_lock(ctx.git, view.issue, pid=ctx.pid, host=ctx.machine()) as held:
+    lock = task_lock(ctx.git, view.issue, pid=ctx.pid, host=ctx.machine(), timeout=ctx.lock_timeout)
+    with lock as held:
         if not held or _live_here(ctx, read_pending(ctx.git, view.issue)):
             return _Lost(
-                f"#{view.issue}: another forge run of this clone is claiming it; "
-                "trying the next task"
+                f"#{view.issue}: another forge run of this clone is claiming it "
+                f"(record: {pending_path(ctx.git, view.issue)}); trying the next task"
             )
-        _mark_pending(ctx, view.issue, sha)
+        _mark_pending(ctx, view.issue, sha, tip)
     result = ctx.git.push(sha, ref, lease=Lease(ref, tip), remote=ctx.remote, no_verify=True)
     if not result.ok:
-        remove_pending(ctx.git, view.issue, sha)
+        remove_pending(ctx.git, view.issue, sha, timeout=ctx.lock_timeout)
         return _Lost(f"#{view.issue}: lost the race; trying the next task")
     return _Pushed(sha, tip)
 
 
-def _take_over(ctx: ClaimContext, view: TaskView, *, explicit: bool, warnings: list[str]) -> bool:
-    """Make this run the one completing my incomplete claim on ``view``; False if not allowed.
+def _take_over(
+    ctx: ClaimContext, view: TaskView, *, explicit: bool, warnings: list[str]
+) -> _Pushed | _Busy | None:
+    """Make this run the one completing my incomplete claim on ``view``.
 
-    Under the task lock the record is read again: without ``explicit`` (``--task``) it must
-    still allow the takeover (:func:`may_take_over`: this machine, the same claim sha, a dead
-    pid), so of two runs that both saw the same dead record only the first takes over. With
-    ``explicit`` the takeover always happens, with a warning when the record belongs to a
-    run that is still alive on this machine (ADR 0009 amendment).
+    Returns the claim with its rollback target, :class:`_Busy` when the task lock stays
+    busy, or ``None`` when the takeover is not allowed. Under the task lock the record is
+    read again: without ``explicit`` (``--task``) it must still allow the takeover
+    (:func:`may_take_over`: this machine, the same claim sha, a run that is gone), so of two
+    runs that both saw the same dead record only the first takes over. With ``explicit``
+    the takeover always happens, with a warning when the record belongs to a run that is
+    still alive on this machine (ADR 0009 amendment). The record's ``previous`` is kept.
     """
     claim = view.claim
     assert claim is not None
-    with task_lock(ctx.git, view.issue, pid=ctx.pid, host=ctx.machine()) as held:
+    lock = task_lock(ctx.git, view.issue, pid=ctx.pid, host=ctx.machine(), timeout=ctx.lock_timeout)
+    with lock as held:
         if not held:
-            return False
+            return _Busy()
         record = read_pending(ctx.git, view.issue)
         if not explicit:
-            if not may_take_over(record, claim.sha, host=ctx.machine(), running=ctx.pid_running):
-                return False
+            if not may_take_over(
+                record, claim.sha, host=ctx.machine(), running=ctx.pid_running, now=ctx.now()
+            ):
+                return None
         elif record is not None and _live_here(ctx, record):
             warnings.append(
                 f"#{view.issue}: taking over your incomplete claim although the run that "
                 f"recorded it (pid {record.pid}, started {format_time(record.started_at)}) "
-                "is still running on this machine"
+                f"is still running on this machine (record: {pending_path(ctx.git, view.issue)})"
             )
-        _mark_pending(ctx, view.issue, claim.sha)
-    return True
+        previous = _recorded_previous(record, claim.sha)
+        _mark_pending(ctx, view.issue, claim.sha, previous)
+    return _Pushed(claim.sha, _rollback_target(ctx, view, previous))
+
+
+def _recorded_previous(record: PendingClaim | None, claim_sha: str) -> str | Unknown | None:
+    """The tip ``claim_sha``'s push replaced, as its pending record says (or UNKNOWN)."""
+    return UNKNOWN if record is None or record.claim != claim_sha else record.previous
+
+
+def _rollback_target(
+    ctx: ClaimContext, view: TaskView, previous: str | Unknown | None
+) -> str | None:
+    """The tip to restore when yielding my claim on ``view`` (``None``: delete the branch).
+
+    The record written before the claim push knows it; only a record that does not say
+    (absent, or written by an older Forge) falls back to :func:`_own_rollback`.
+    """
+    return _own_rollback(ctx, view) if isinstance(previous, Unknown) else previous
 
 
 class _Index:
@@ -1052,7 +1093,10 @@ def _post_claim(
 def _own_rollback(ctx: ClaimContext, view: TaskView) -> str | None:
     """For my own pushed claim: the tip to restore on yield (``None``: delete the branch).
 
-    The previous tip is the claim commit's first parent. A new claim was made on the default
+    A guess from git history, used only when no pending record says (:func:`_rollback_target`).
+    It can be wrong when the task's events reached the default branch through a
+    fast-forward or rebase merge before a new claim. The previous tip is the claim commit's
+    first parent. A new claim was made on the default
     branch tip, so a parent that is not on the task branch is a previous tip only when its
     history carries a Forge event of this task (a resumed branch already merged into the
     default branch); otherwise the claim created the branch.
@@ -1104,6 +1148,8 @@ def claim_next(ctx: ClaimContext, options: NextOptions | None = None) -> NextOut
     """
     opts = options or NextOptions()
     check_version(ctx)
+    if not opts.dry_run:
+        require_flock()
     login = check_identity(ctx.github, ctx.profile_login)
     check_full_history(ctx.git, "claims")
 
@@ -1145,7 +1191,12 @@ def claim_next(ctx: ClaimContext, options: NextOptions | None = None) -> NextOut
     if not opts.dry_run:
         remote_claims = {n: v.claim.sha for n, v in snap.views.items() if v.claim is not None}
         pruned = prune_orphans(
-            ctx.git, remote_claims, pid=ctx.pid, host=ctx.machine(), running=ctx.pid_running
+            ctx.git,
+            remote_claims,
+            pid=ctx.pid,
+            host=ctx.machine(),
+            running=ctx.pid_running,
+            now=ctx.now(),
         )
         outcome.info += [f"removed a leftover pending-claim record of #{n}" for n in pruned]
 
@@ -1163,11 +1214,14 @@ def claim_next(ctx: ClaimContext, options: NextOptions | None = None) -> NextOut
                     login,
                     view.record,
                     view.claim.sha,
-                    resumed=_own_rollback(ctx, view) is not None,
+                    resumed=_rollback_target(
+                        ctx, view, _recorded_previous(read_pending(ctx.git, target), view.claim.sha)
+                    )
+                    is not None,
                     own=True,
                 )
             finally:
-                remove_pending(ctx.git, target, view.claim.sha)
+                remove_pending(ctx.git, target, view.claim.sha, timeout=ctx.lock_timeout)
             return _finish(outcome, warnings)
         queue = [target]  # an explicit request always completes my incomplete claim
     elif target is not None:
@@ -1194,10 +1248,17 @@ def claim_next(ctx: ClaimContext, options: NextOptions | None = None) -> NextOut
         if queue:
             view = snap.views[queue.pop(0)]
             assert view.claim is not None
-            if not _take_over(ctx, view, explicit=target is not None, warnings=warnings):
+            taken = _take_over(ctx, view, explicit=target is not None, warnings=warnings)
+            if isinstance(taken, _Busy) and target is not None:
+                outcome.code = ExitCode.NOTHING_AVAILABLE
+                outcome.reason = (
+                    f"another forge run is working on #{view.issue} right now; retry in a moment"
+                )
+                return _finish(outcome, warnings)
+            if not isinstance(taken, _Pushed):
                 continue  # another run took it over first: the selection excludes it
             record = view.record
-            pushed = _Pushed(view.claim.sha, _own_rollback(ctx, view))
+            pushed = taken
             own_claim = True
             work_follows = view.claim.tip != view.claim.sha
         else:
@@ -1240,15 +1301,16 @@ def claim_next(ctx: ClaimContext, options: NextOptions | None = None) -> NextOut
                     own=own_claim,
                 )
             except PreconditionError:
-                remove_pending(ctx.git, number, pushed.sha)  # the claim is no longer mine
+                # the claim is no longer mine
+                remove_pending(ctx.git, number, pushed.sha, timeout=ctx.lock_timeout)
                 raise
-            remove_pending(ctx.git, number, pushed.sha)
+            remove_pending(ctx.git, number, pushed.sha, timeout=ctx.lock_timeout)
             return _finish(outcome, warnings)
         if work_follows:
             # Rolling back would drop the work pushed on top of the claim: stop instead. The
             # pending record goes, so a plain `forge next` excludes the task (incomplete_own)
             # and moves on instead of hitting this conflict on every run (ADR 0009).
-            remove_pending(ctx.git, number, pushed.sha)
+            remove_pending(ctx.git, number, pushed.sha, timeout=ctx.lock_timeout)
             raise PreconditionError(
                 f"your incomplete claim on #{number} ({record.meta.id}) overlaps the live "
                 f"claim on #{winner.issue} ({winner.task_id}, claimed by {winner.owner}) and "
@@ -1258,7 +1320,7 @@ def claim_next(ctx: ClaimContext, options: NextOptions | None = None) -> NextOut
                 f"`forge release-claim`), then re-run `forge next --task {number}`",
             )
         problem = _yield(ctx, number, pushed)
-        remove_pending(ctx.git, number, pushed.sha)
+        remove_pending(ctx.git, number, pushed.sha, timeout=ctx.lock_timeout)
         if problem is not None:
             warnings.append(problem)
         outcome.attempts += 1
@@ -1283,6 +1345,7 @@ def _abandoned(ctx: ClaimContext, view: TaskView) -> bool:
         view.claim.sha,
         host=ctx.machine(),
         running=ctx.pid_running,
+        now=ctx.now(),
     )
 
 
@@ -1462,6 +1525,7 @@ def release_claim(
     Raises :class:`PreconditionError` (exit 5) when the branch does not end with my claim.
     ``local_ref`` is the local branch to compare with (default ``refs/heads/task/<n>``).
     """
+    require_flock()
     login = check_identity(ctx.github, ctx.profile_login)
     check_full_history(ctx.git, "claims")
     github = ctx.github
@@ -1591,7 +1655,8 @@ def release_claim(
         claimed_at = claim.date if claim is not None else now
         released = LeaseData(task_id, login, ctx.agent.id, claim_sha, claimed_at, now, now)
     upsert_lease(github, issue_number, released, comments=github.list_comments(issue_number))
-    remove_pending(ctx.git, issue_number, claim_sha)  # a leftover of an incomplete claim
+    # a leftover of an incomplete claim
+    remove_pending(ctx.git, issue_number, claim_sha, timeout=ctx.lock_timeout)
     return ReleaseOutcome(
         issue=issue_number,
         task_id=task_id,

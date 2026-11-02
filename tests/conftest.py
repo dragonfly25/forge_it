@@ -44,6 +44,7 @@ def isolated_git(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempP
         "GIT_WORK_TREE",
         "GIT_INDEX_FILE",
         "XDG_CONFIG_HOME",
+        "XDG_STATE_HOME",
     ):
         monkeypatch.delenv(var, raising=False)
 

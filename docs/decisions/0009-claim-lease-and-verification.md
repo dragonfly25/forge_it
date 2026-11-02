@@ -214,10 +214,11 @@ The worktree path is `<profile.worktrees_dir or <parent-of-repo>/<repo>-worktree
 Login and agent id alone cannot tell an interrupted run from **another run that is still alive**
 under the same identity. Two sessions of the same tool with the same account can run at once.
 - Before pushing a claim, `next` writes a **pending-claim record** under the git common dir:
-  `<git-common-dir>/forge/pending/task-<n>.json` with `{claim, pid, host, started_at}`. It removes
-  the record once the post-claim steps are done, or after yielding.
+  `<git-common-dir>/forge/pending/task-<n>.json` with `{claim, previous, pid, host, started_at}`.
+  It removes the record once the post-claim steps are done, or after yielding.
 - `forge next` without `--task` takes over my incomplete claim **only** when such a record exists on
-  this host, names that claim sha, and its pid is no longer running. Otherwise the task is excluded,
+  this host, names that claim sha, and its run is gone (its pid is no longer running, or the record
+  is older than 15 minutes). Otherwise the task is excluded,
   with the message "an incomplete claim of yours on #n may still be in progress; run
   `forge next --task <n>` to complete it".
 - `forge next --task <n>` (an explicit request) always completes my incomplete claim.
@@ -226,8 +227,7 @@ under the same identity. Two sessions of the same tool with the same account can
   must not be lost. It stops with exit 5, names the conflicting task, and leaves the claim
   incomplete. It also drops the pending-claim record, so a plain `forge next` excludes the task
   as `incomplete_own` instead of stopping again. Without such commits it yields as usual.
-- Records live per clone. A host without a reliable pid check, such as Windows, treats every pid
-  as running, so the takeover is never automatic there and `--task` is needed.
+- Records live per clone. Claims need macOS, Linux or WSL (see the re-review amendment).
 
 ### Amendment: re-review of the same-identity rules
 - **Unique event commits.** Claim and release commits carry a `Forge-Run: <uuid4 hex>` trailer,
@@ -245,17 +245,33 @@ under the same identity. Two sessions of the same tool with the same account can
     `incomplete_own`.
   - A fresh claim whose task already has a record from a live run of this clone is not pushed.
     The task counts as a lost race.
+  - `next --task` on a task whose lock another run holds exits 3 with "another forge run is
+    working on #n right now; retry in a moment".
 - **Explicit takeover of a live record.** `next --task` still takes over, and warns with the
-  recorded pid and `started_at`.
+  recorded pid, `started_at` and the record's file path.
+- **When a run counts as gone.** Its pid is no longer running, or its record is older than
+  15 minutes (`MAX_RUN_AGE`), whatever the pid says: a claim run takes seconds plus at most
+  about 10 s of verification, and after that the pid may have been reused. Messages about a
+  live record name its file.
 - **Pruning.** Before claiming, `forge next` (not `--dry-run`) removes records whose sha is not
-  the claim commit on the remote branch and whose run is gone: a dead pid, or another machine.
-- **Machine id.** `host` in a record is a per-clone id in `<git-common-dir>/forge/machine-id`
-  (uuid4, created once and atomically), not the hostname, which can change with the network.
-- **Rollback target.** On a yield of my own incomplete claim, the previous tip is the claim
-  commit's first parent.
-  - When that parent is not on the task branch (it is already in the default branch), it is
-    still restored if its first-parent history has a Forge event of the task.
-  - Otherwise the claim created the branch, and the branch is deleted.
+  the claim commit on the remote branch and whose run is gone, or that come from another machine.
+- **Machine id.** `host` in a record is a machine id (uuid4, created once and atomically), not
+  the hostname, which can change with the network. It lives outside the clone, in
+  `$XDG_STATE_HOME/forge/machine-id` (default `~/.local/state/forge/machine-id`; a relative
+  `XDG_STATE_HOME` is ignored). Pids only make sense inside one pid namespace: a container that
+  shares the clone but has its own home gets its own id, so the host never reads a live
+  container run's pid as dead, and the other way round.
+- **Rollback target.** The record also stores `previous`: the remote tip the claim push
+  replaced, or `null` when the push created the branch. A run that takes the claim over keeps
+  it, and on a yield restores that tip or deletes the branch.
+  - Only a record without `previous` (written by an older Forge) falls back to a guess: the
+    claim commit's first parent, restored when it is on the task branch, or when its
+    first-parent history has a Forge event of the task; otherwise the branch is deleted. The
+    guess is wrong when the task's events reached the default branch through a fast-forward
+    or rebase merge before a new claim.
+- **Platforms.** Claims and releases need `flock`, so they need macOS, Linux or WSL. On Windows
+  `forge next` (except `--dry-run`) and `release-claim` stop with exit 5 before changing
+  anything. There is no `O_EXCL` fallback.
 - **Re-check before writing.** The post-claim steps check that the branch's last Forge event is
   still my claim, both before the first GitHub write and right before the lease comment.
   `ls-remote` answers when the tip is the claim; otherwise Forge fetches. If the claim changed,
@@ -269,3 +285,8 @@ under the same identity. Two sessions of the same tool with the same account can
   minutes off the `Date` header of a GitHub API response.
 - A claim pushed but never verified, whose run crashed and was never re-run, holds its task and
   zones until it goes stale.
+- Two pid namespaces that share both the clone and the state directory (a container that mounts
+  the host's home, say) get the same machine id, and Forge cannot tell them apart. A run on one
+  side may then read a live run on the other side as dead and take its claim over or prune its
+  record. Give such containers their own `XDG_STATE_HOME`, or complete incomplete claims there
+  only with `forge next --task <n>` after checking that no other run is working on the task.

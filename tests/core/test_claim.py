@@ -8,6 +8,7 @@ post-fetch) and an injected ``sleep``; nothing sleeps for real.
 
 from __future__ import annotations
 
+import sys
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -39,10 +40,12 @@ from forge.core.github import GitHubError, Issue
 from forge.core.github_fake import FakeGitHub
 from forge.core.lease import LEASE_MARKER, find_claim, find_lease, format_time, heartbeat
 from forge.core.pending import (
+    MAX_RUN_AGE,
     PendingClaim,
     machine_id,
     pending_path,
     read_pending,
+    task_lock,
     write_pending,
 )
 from forge.core.profile import AgentProfile
@@ -137,6 +140,7 @@ class UserGitHub:
         self._login = login
         self._lock = lock
         self.fail: dict[str, int] = {}  # method name -> number of calls that raise
+        self.after: dict[str, Callable[[], None]] = {}  # method name -> hook run once after it
 
     def __getattr__(self, name: str) -> Any:
         attr = getattr(self._fake, name)
@@ -149,7 +153,11 @@ class UserGitHub:
                 raise GitHubError(f"injected failure in {name}", status=502)
             with self._lock:
                 self._fake.fake_set_user(self._login)
-                return attr(*args, **kwargs)
+                result = attr(*args, **kwargs)
+            hook = self.after.pop(name, None)
+            if hook is not None:
+                hook()
+            return result
 
         return call
 
@@ -1165,7 +1173,9 @@ def test_incomplete_claim_is_taken_over_only_with_a_dead_record_of_this_host(
     out = run(world.ctx("alice"), task=str(n))
     assert out.code == ExitCode.OK and out.claimed is not None
     assert any(
-        f"(pid 101, started {format_time(T0)}) is still running" in w for w in out.warnings
+        f"(pid 101, started {format_time(T0)}) is still running on this machine "
+        f"(record: {path})" in w
+        for w in out.warnings
     ), out.warnings
     assert out.claimed.own and out.claimed.claim == sha
     assert world.remote_tip(n) == sha
@@ -1581,7 +1591,10 @@ def test_same_clone_run_skips_a_task_another_live_run_is_claiming(world: World) 
     assert first.claimed is not None and first.claimed.issue == t1
     assert second.claimed is not None and second.claimed.issue == t2
     assert {e.issue: e.reason for e in second.exclusions}[t1] is Reason.LOST_RACE
-    assert any("another forge run of this clone is claiming it" in w for w in second.warnings)
+    assert any(
+        f"another forge run of this clone is claiming it (record: {pending_path(git, t1)})" in w
+        for w in second.warnings
+    ), second.warnings
     assert world.remote_tip(t1) == first.claimed.claim
     assert not pending_path(git, t1).exists() and not pending_path(git, t2).exists()
 
@@ -1662,19 +1675,26 @@ def test_next_prunes_orphan_records_of_runs_that_are_gone(world: World) -> None:
     assert read_pending(git, claimed) is not None
 
 
-def test_machine_id_replaces_the_hostname(world: World) -> None:
+def test_machine_id_replaces_the_hostname(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     n = world.task("M1-T01", ["api"])
     sha = world.push_event("alice", n, claim_of("M1-T01", "alice"), T0)
     ctx = world.ctx("alice", host=None)
     git = world.git("alice")
-    assert ctx.machine() == machine_id(git)
-    write_pending(git, PendingClaim(n, sha, 101, machine_id(git), T0))
+    assert ctx.machine() == machine_id()
+    assert (tmp_path / "state" / "forge" / "machine-id").read_text().strip() == ctx.machine()
+    write_pending(git, PendingClaim(n, sha, 101, machine_id(), T0))
     out = run(world.ctx("alice", host=None))
     assert out.claimed is not None and out.claimed.own and out.claimed.issue == n
 
 
 def test_yield_after_resume_restores_a_previous_tip_already_in_main(world: World) -> None:
-    """The previous tip is the claim's first parent, even when main already contains it."""
+    """The previous tip is the claim's first parent, even when main already contains it.
+
+    The record here has no ``previous`` (written by an older Forge): the fallback guess.
+    """
     held = world.task("M1-T01", ["api"])
     mine = world.task("M1-T02", ["api"])
     run(world.ctx("carol", clock=Clock(T0)), task="M1-T01")
@@ -1733,3 +1753,147 @@ def test_post_claim_stops_when_the_branch_changed_after_verification(
     assert issue.assignees == () and "status:ready" in issue.labels
     assert "status:in-progress" not in issue.labels
     assert not pending_path(git, n).exists()
+
+
+class Crash(Exception):
+    """Simulates a run killed at a given point."""
+
+
+def test_taken_over_fresh_claim_yields_by_deleting_the_branch_despite_task_events_in_main(
+    world: World,
+) -> None:
+    """The record says the claim created the branch, whatever main's history suggests.
+
+    The task's earlier claim and release reached main through a fast-forward merge and its
+    branch was deleted. A fresh claim is pushed on main's tip, the run crashes, another run
+    takes it over and must yield: it deletes the branch instead of recreating it at main.
+    """
+    mine = world.task("M1-T01", ["api"])
+    world.push_event("alice", mine, claim_of("M1-T01", "alice"), T0 - timedelta(hours=3))
+    released = world.push_event(
+        "alice", mine, {TRAILER_RELEASE: "alice", TRAILER_TASK: "M1-T01"}, T0 - timedelta(hours=2)
+    )
+    remote = world.git_world.remote_git
+    remote.update_ref("refs/heads/main", released)  # fast-forward merge of the task branch
+    remote.run("update-ref", "-d", f"refs/heads/task/{mine}")
+
+    git = world.git("alice")
+
+    def crash(src: str, dst: str, result: PushResult) -> None:
+        git.after_push = None
+        raise Crash
+
+    git.after_push = crash
+    with pytest.raises(Crash):
+        run(world.ctx("alice", pid=101, clock=Clock(T0 + timedelta(minutes=1))))
+    sha = world.remote_tip(mine)
+    assert sha is not None and git.rev_parse(f"{sha}^") == released
+    left = read_pending(git, mine)
+    assert left is not None and left.claim == sha and left.previous is None
+
+    held = world.task("M1-T02", ["api"])
+    world.push_event("carol", held, claim_of("M1-T02", "carol"), T0)  # earlier in the order
+    out = run(world.ctx("alice", pid=102, clock=Clock(T0 + timedelta(minutes=2))))
+    assert out.code == ExitCode.NOTHING_AVAILABLE and out.attempts == 1
+    assert any(f"#{mine}: yielded to #{held}" in w for w in out.warnings), out.warnings
+    assert world.remote_tip(mine) is None  # deleted, not pushed back to main's tip
+    assert world.claimed_issues() == {held}
+    assert not pending_path(git, mine).exists()
+
+
+def test_takeover_keeps_the_recorded_previous_tip(world: World) -> None:
+    """A run that takes over rewrites the record with its own pid and the same ``previous``."""
+    n = world.task("M1-T01", ["api"])
+    sha = world.push_event("alice", n, claim_of("M1-T01", "alice"), T0)
+    git = world.git("alice")
+    write_pending(git, PendingClaim(n, sha, 101, HOST, T0, None))
+    seen: list[PendingClaim | None] = []
+    ctx = world.ctx("alice", pid=102)
+    ctx.github.after["add_assignees"] = lambda: seen.append(read_pending(git, n))  # type: ignore[attr-defined]
+    out = run(ctx)
+    assert out.claimed is not None and out.claimed.own and not out.claimed.resumed
+    assert seen == [PendingClaim(n, sha, 102, HOST, T0, None)]
+
+
+def test_an_old_record_counts_as_dead_even_if_its_pid_runs(world: World) -> None:
+    """After MAX_RUN_AGE the recorded pid may belong to an unrelated process (pid reuse)."""
+    n = world.task("M1-T01", ["api"])
+    sha = world.push_event("alice", n, claim_of("M1-T01", "alice"), T0)
+    git = world.git("alice")
+    write_pending(git, PendingClaim(n, sha, 101, HOST, T0, None))
+    world.alive = {101}
+    young = run(world.ctx("alice", clock=Clock(T0 + MAX_RUN_AGE)))
+    assert young.code == ExitCode.NOTHING_AVAILABLE
+    assert {e.issue: e.reason for e in young.exclusions} == {n: Reason.INCOMPLETE_OWN}
+    assert find_lease(world.fake.list_comments(n)) is None
+
+    old = run(world.ctx("alice", clock=Clock(T0 + MAX_RUN_AGE + timedelta(seconds=1))))
+    assert old.code == ExitCode.OK and old.claimed is not None
+    assert old.claimed.issue == n and old.claimed.own and old.claimed.claim == sha
+    assert not any("is still running" in w for w in old.warnings)
+    assert not pending_path(git, n).exists()
+
+
+def test_claims_and_releases_refuse_windows(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    n = world.task("M1-T01", ["api"])
+    m = world.task("M1-T02", ["web"])
+    held = run(world.ctx("alice"), task=str(m))
+    assert held.claimed is not None
+    tip = world.remote_tip(m)
+    monkeypatch.setattr(sys, "platform", "win32")
+    with pytest.raises(PreconditionError, match="claims need macOS, Linux or WSL") as info:
+        run(world.ctx("alice"))
+    assert info.value.code == ExitCode.PRECONDITION
+    assert world.remote_tip(n) is None
+    with pytest.raises(PreconditionError, match="claims need macOS, Linux or WSL"):
+        release_claim(world.ctx("alice"), m)
+    assert world.remote_tip(m) == tip  # nothing released
+    assert world.fake.get_issue(m).assignees == ("alice",)
+    dry = run(world.ctx("alice"), dry_run=True)  # read-only: no lock needed
+    assert [c.view.issue for c in dry.candidates] == [n]
+
+
+@pytest.mark.parametrize("write", ["add_assignees", "add_labels"])
+def test_release_landing_during_github_writes_stops_before_the_lease_comment(
+    world: World, write: str
+) -> None:
+    """The release lands after the first branch check, while assigning or labelling."""
+    n = world.task("M1-T01", ["api"])
+    git = world.git("alice")
+    ctx = world.ctx("alice")
+    landed: dict[str, str] = {}
+
+    def other_session() -> None:
+        trailers = {TRAILER_RELEASE: "alice", TRAILER_TASK: "M1-T01"}
+        landed["tip"] = world.push_event("alice-other", n, trailers, T0)
+
+    ctx.github.after[write] = other_session  # type: ignore[attr-defined]
+    with pytest.raises(PreconditionError) as info:
+        run(ctx)
+    assert info.value.code == ExitCode.PRECONDITION
+    assert "ends with a release by alice" in info.value.message
+    assert "the lease comment was not written" in info.value.message
+    assert landed and world.remote_tip(n) == landed["tip"]
+    assert find_lease(world.fake.list_comments(n)) is None
+    assert _lease_comments(world, n) == []
+    assert not pending_path(git, n).exists()
+
+
+def test_task_on_a_busy_task_lock_says_retry(world: World) -> None:
+    """``--task`` while another run of this clone holds the task lock: a retry message."""
+    n = world.task("M1-T01", ["api"])
+    sha = world.push_event("alice", n, claim_of("M1-T01", "alice"), T0)
+    git = world.git("alice")
+    ctx = world.ctx("alice")
+    ctx.lock_timeout = 0
+    with task_lock(git, n, pid=999) as held:
+        assert held
+        out = run(ctx, task=str(n))
+    assert out.code == ExitCode.NOTHING_AVAILABLE and out.claimed is None
+    assert out.reason == f"another forge run is working on #{n} right now; retry in a moment"
+    assert find_lease(world.fake.list_comments(n)) is None
+    assert world.remote_tip(n) == sha
+    assert read_pending(git, n) is None
+
+    again = run(world.ctx("alice"), task=str(n))  # the lock is free again
+    assert again.claimed is not None and again.claimed.own and again.claimed.claim == sha
