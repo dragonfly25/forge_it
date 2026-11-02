@@ -43,6 +43,9 @@ TRAILER_CLAIM = "Forge-Claim"
 TRAILER_AGENT = "Forge-Agent"
 TRAILER_HANDOFF = "Forge-Handoff"
 TRAILER_RELEASE = "Forge-Release"
+TRAILER_RUN = "Forge-Run"
+"""Random id (uuid4 hex) of the run that made a Forge event commit. Two runs under the same
+identity, parent and second would otherwise build byte-identical commits (ADR 0009)."""
 
 TASK_ID_RE = re.compile(r"^M(\d+)-T(\d+)$")
 """Task id grammar, e.g. ``M1-T07``. Use with ``fullmatch``."""

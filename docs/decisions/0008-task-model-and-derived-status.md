@@ -84,3 +84,4 @@ The inputs are the issue (state, state_reason, labels), its metadata, the closed
 - Marker detection follows CommonMark fences. To quote an example Forge block in an issue, use a fence longer than the example's own ```` ``` ```` (e.g. ````` ```` `````) or `~~~`. `upsert_block` refuses to overwrite a block that contains anything other than the YAML fence.
 - Label names are compared case-insensitively, as on GitHub.
 - If the body ends inside an unclosed code fence, `upsert_block` first appends a matching closing fence line, so the block is never swallowed by the user's fence. Fences opened inside list items are tracked as well.
+- Phase 3 (ADR 0009) adds a `Forge-Run: <uuid4 hex>` trailer to claim and release commits, so two runs under the same identity never create identical event commits. It is not an event trailer and does not affect the last-event rule.

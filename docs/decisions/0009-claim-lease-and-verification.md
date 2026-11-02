@@ -229,6 +229,39 @@ under the same identity. Two sessions of the same tool with the same account can
 - Records live per clone. A host without a reliable pid check, such as Windows, treats every pid
   as running, so the takeover is never automatic there and `--task` is needed.
 
+### Amendment: re-review of the same-identity rules
+- **Unique event commits.** Claim and release commits carry a `Forge-Run: <uuid4 hex>` trailer,
+  one id per run. Otherwise two runs under one identity, on one parent and in the same second,
+  build byte-identical claim commits, and both "win" the push.
+- **Task lock.** Every read-then-write of a pending-claim record holds
+  `<git-common-dir>/forge/pending/task-<n>.lock`: the takeover, the write before a fresh claim
+  push, removal and pruning.
+  - The lock is a `flock` on that file, which holds `{pid, host}` for diagnostics and is removed
+    on release. The kernel drops a `flock` when its process dies, so a crashed holder never
+    leaves a held lock. An `O_EXCL` file would need a stale-lock break, and that cannot be made
+    atomic without a second lock.
+  - Under the lock, an automatic takeover re-reads the record and requires that it still names
+    the dead pid and the same sha. A run that loses this check excludes the task as
+    `incomplete_own`.
+  - A fresh claim whose task already has a record from a live run of this clone is not pushed.
+    The task counts as a lost race.
+- **Explicit takeover of a live record.** `next --task` still takes over, and warns with the
+  recorded pid and `started_at`.
+- **Pruning.** Before claiming, `forge next` (not `--dry-run`) removes records whose sha is not
+  the claim commit on the remote branch and whose run is gone: a dead pid, or another machine.
+- **Machine id.** `host` in a record is a per-clone id in `<git-common-dir>/forge/machine-id`
+  (uuid4, created once and atomically), not the hostname, which can change with the network.
+- **Rollback target.** On a yield of my own incomplete claim, the previous tip is the claim
+  commit's first parent.
+  - When that parent is not on the task branch (it is already in the default branch), it is
+    still restored if its first-parent history has a Forge event of the task.
+  - Otherwise the claim created the branch, and the branch is deleted.
+- **Re-check before writing.** The post-claim steps check that the branch's last Forge event is
+  still my claim, both before the first GitHub write and right before the lease comment.
+  `ls-remote` answers when the tip is the claim; otherwise Forge fetches. If the claim changed,
+  Forge exits 5 and the lease comment is not written. Labels may already be set when the change
+  lands between the two checks.
+
 ### Known limits
 - Staleness relies on client clocks: committer dates and lease timestamps. A machine whose clock
   runs ahead by more than `lease_hours` makes its claims look fresh to everyone until that time
