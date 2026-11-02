@@ -6,14 +6,16 @@ Section references (§) point to `docs/spec.md`.
 
 ---
 
-## [ ] Phase 0 — Scaffold
-- `pyproject.toml` (hatchling, src layout, entry point `forge`), `src/forge/{__init__,__main__,cli}.py` with `forge --version`.
-- ruff, mypy, pytest configuration; `tests/` with a smoke test.
-- `.github/workflows/ci.yml` for the framework repo itself (lint, types, tests on Python 3.11 and 3.12).
-- `README.md` skeleton, `CHANGELOG.md`, `docs/decisions/0000-template.md`.
-- Draft `install.sh` (§17) — structure only, real URL is a placeholder.
+## [x] Phase 0 — Scaffold
+- [x] `pyproject.toml` (hatchling, src layout, entry point `forge`), `src/forge/{__init__,__main__,cli}.py` with `forge --version`.
+- [x] ruff, mypy, pytest configuration; `tests/` with a smoke test.
+- [x] `.github/workflows/ci.yml` for the framework repo itself (lint, types, tests on Python 3.11 and 3.12).
+- [x] `README.md` skeleton, `CHANGELOG.md`, `docs/decisions/0000-template.md`.
+- [x] Draft `install.sh` (§17) — structure only; uses the real repository URL (ADR 0001), version defaults to `main` until the first tag.
 
 **Done when:** `uv run forge --version` prints the version; `uv run pytest` passes; CI workflow is valid YAML.
+
+Also done in Phase 0: naming (ADR 0001), build subagents in `.claude/agents/` (ADR 0002).
 
 ## [ ] Phase 1 — Core foundations
 - `core/config.py`, `core/team.py`, `core/zones.py`, `core/profile.py`: dataclasses + YAML loaders with validation (§6), clear error messages. Profile agents have `providers` (list), `tiers`, `effort`; config has the `models` constraints block.

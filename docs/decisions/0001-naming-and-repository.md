@@ -25,5 +25,6 @@ The §5.1 tree was also brought in line with the build plan: it now lists `core/
 
 ## Consequences
 
+- Work is pushed to `origin` only on `phase/<n>-<name>` branches, with one PR per phase. Nothing is pushed directly to `main`, and phase PRs are merged by the user (recorded in `CLAUDE.md`).
 - `install.sh`, the README and the CI install step use the real URL. Releases are git tags (`v<x.y.z>`), because the package is not published to PyPI.
 - The command name `forge` collides with Foundry's `forge` (Solidity toolchain). The README warns about this. A user who needs both can install Forge under another name with `uv tool install` and a wrapper, or put one of them earlier on `PATH`.

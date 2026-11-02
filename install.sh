@@ -17,6 +17,9 @@ set -euo pipefail
 FORGE_VERSION="${FORGE_VERSION:-main}"
 FORGE_REPO_URL="${FORGE_REPO_URL:-https://github.com/dragonfly25/forge_it}"
 
+# PATH as the user's shell sees it, before this script extends it.
+ORIGINAL_PATH="${PATH}"
+
 info() { printf '==> %s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 die() {
@@ -43,7 +46,8 @@ check_git() {
   raw="$(git --version)" # e.g. "git version 2.39.3 (Apple Git-146)"
   version="$(printf '%s' "${raw}" | sed -E 's/^git version ([0-9]+)\.([0-9]+).*/\1.\2/')"
   case "${version}" in
-    [0-9]*.[0-9]*) ;;
+    *[!0-9.]* | "" | .* | *.) die "Could not parse the git version from '${raw}'." ;;
+    *.*) ;;
     *) die "Could not parse the git version from '${raw}'." ;;
   esac
   major="${version%%.*}"
@@ -58,7 +62,8 @@ check_git() {
 # Returns 1 (no) when there is no terminal.
 confirm() {
   local prompt="$1" answer=""
-  if [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+  # Opening /dev/tty fails without a controlling terminal (CI, Docker, ssh without -t).
+  if ! { : >/dev/tty; } 2>/dev/null; then
     return 1
   fi
   printf '%s [y/N] ' "${prompt}" >/dev/tty
@@ -83,7 +88,7 @@ check_gh() {
   fi
   if [ "$(uname -s)" = "Darwin" ] && have brew; then
     if confirm "gh is missing. Install it now with 'brew install gh'?"; then
-      brew install gh
+      brew install gh || die "'brew install gh' failed."
       have gh || die "gh is still not on PATH after 'brew install gh'."
       return 0
     fi
@@ -99,27 +104,38 @@ ensure_uv() {
   else
     have curl || die "curl is required to install uv."
     info "Installing uv with the official installer..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
+    curl -LsSf https://astral.sh/uv/install.sh | sh || die "The uv installer failed. See https://docs.astral.sh/uv/getting-started/installation/"
   fi
-  # Make sure uv (and later the forge binary) is on PATH for this script.
+  # Make sure uv is on PATH for this script. The uv installer honours
+  # UV_INSTALL_DIR, then XDG_BIN_HOME, then ~/.local/bin.
+  local uv_bin="${UV_INSTALL_DIR:-${XDG_BIN_HOME:-${HOME}/.local/bin}}"
   case ":${PATH}:" in
-    *":${HOME}/.local/bin:"*) ;;
-    *) export PATH="${HOME}/.local/bin:${PATH}" ;;
+    *":${uv_bin}:"*) ;;
+    *) export PATH="${uv_bin}:${PATH}" ;;
   esac
-  have uv || die "uv is not on PATH after installation. Add \$HOME/.local/bin to PATH and run this script again."
+  have uv || die "uv is not on PATH after installation. Add ${uv_bin} to PATH and run this script again."
 }
 
 # 5. Install Forge as a uv tool. uv provisions Python 3.12 itself.
 install_forge() {
   info "Installing Forge (${FORGE_VERSION}) from ${FORGE_REPO_URL}..."
-  uv tool install --force --python 3.12 "git+${FORGE_REPO_URL}@${FORGE_VERSION}"
+  uv tool install --force --python 3.12 "git+${FORGE_REPO_URL}@${FORGE_VERSION}" ||
+    die "Installing Forge with uv failed. Check FORGE_VERSION='${FORGE_VERSION}' and your network."
 }
 
 # 6. Next steps.
 print_next_steps() {
-  info "Forge is installed."
-  if ! have forge; then
+  local tool_bin forge_bin found
+  tool_bin="$(uv tool dir --bin)"
+  forge_bin="${tool_bin}/forge"
+  [ -x "${forge_bin}" ] || die "Forge was installed but ${forge_bin} is missing."
+  info "Installed: $("${forge_bin}" --version)"
+  # Check against the user's own PATH, not the one this script extended.
+  found="$(PATH="${ORIGINAL_PATH}" command -v forge 2>/dev/null || true)"
+  if [ -z "${found}" ]; then
     warn "'forge' is not on PATH in your shell yet. Run 'uv tool update-shell', then restart your shell."
+  elif [ "${found}" != "${forge_bin}" ]; then
+    warn "'forge' on your PATH is ${found}, not Forge (${forge_bin}). It may be Foundry's forge: put ${tool_bin} first on PATH."
   fi
   printf '\nNext steps:\n'
   if ! gh auth status >/dev/null 2>&1; then

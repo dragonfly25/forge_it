@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   checks:
@@ -29,6 +29,8 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked
+      - name: Check Python version
+        run: uv run python -c "import sys; v = '%d.%d' % sys.version_info[:2]; assert v == '${{ matrix.python-version }}', v; print('Python', v)"
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy src/forge/core

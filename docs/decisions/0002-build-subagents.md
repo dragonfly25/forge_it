@@ -29,7 +29,7 @@ These subagents build Forge itself. They are separate from the subagents Forge s
 | docs-writer | sonnet | high | Read, Write, Edit, Grep, Glob |
 | reviewer | opus | high | Read, Grep, Glob, Bash |
 
-The reviewer must never edit files. A tools list cannot enforce this while Bash is allowed, so its prompt restricts Bash to read-only git and quality-gate commands.
+The docs-writer has no Bash. Shell scripts it writes are syntax-checked by test-runner (`bash -n`). The reviewer must never edit files. A tools list cannot enforce this while Bash is allowed, so its prompt restricts Bash to read-only git and quality-gate commands.
 
 Orchestration rules:
 - The orchestrator plans each phase, writes briefs, delegates, verifies and integrates. It writes code itself only for small glue or fixes.
