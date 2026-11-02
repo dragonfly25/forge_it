@@ -19,7 +19,7 @@ This document is the source of truth for building Forge. When something here is 
 ### Non-goals (v0)
 - No hosted service, database or web dashboard.
 - No direct LLM API calls from the CLI. The CLI is deterministic; reasoning happens in the user's agent.
-- No autonomous orchestrator running headless agents (planned for v2, see §17).
+- No autonomous orchestrator running headless agents (planned for v2, see §19).
 - No support for hosts other than GitHub.
 
 ---
