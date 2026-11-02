@@ -13,7 +13,7 @@ import pytest
 from forge.core.config import ForgeConfig, load_config
 from forge.core.errors import ExitCode, ForgeError, PreconditionError
 from forge.core.git import Git, Lease
-from forge.core.github import GitHubClient, Issue, PullRequest
+from forge.core.github import GitHubClient, GitHubError, Issue, PullRequest
 from forge.core.github_fake import FakeGitHub
 from forge.core.refresh import (
     BranchScan,
@@ -266,6 +266,16 @@ def test_not_planned_dependency_counts_as_closed_with_warning() -> None:
     assert "depends_on" in warning
 
 
+def test_not_planned_warning_skips_proposed_case_insensitively() -> None:
+    dropped = issue(
+        1, meta("M1-T01"), labels=with_status(Status.DONE), state="closed", reason="not_planned"
+    )
+    proposed = issue(2, meta("M1-T02", ["M1-T01"]), labels=("forge:task", "Status:Proposed"))
+    plan = plan_refresh([dropped, proposed], {}, set())
+    assert plan.warnings == ()
+    assert by_issue(plan)[2] == (Status.PROPOSED, Status.PROPOSED)
+
+
 def test_to_data_shape() -> None:
     t = issue(1, meta("M1-T01"), labels=with_status(Status.BLOCKED))
     data = plan_refresh([t], {}, set()).to_data()
@@ -278,9 +288,10 @@ def test_to_data_shape() -> None:
             "to": "ready",
             "added": ["status:ready"],
             "removed": ["status:blocked"],
+            "applied": True,
         }
     ]
-    assert data["counts"]["changed"] == 1
+    assert data["counts"]["changed"] == 1 and data["counts"]["failed"] == 0
 
 
 # --------------------------------------------------------------------------- apply
@@ -325,6 +336,38 @@ def test_apply_then_replan_is_idempotent() -> None:
 
     again = plan_refresh(fake.list_issues(state="all"), {1: claimed("M1-T01")}, set())
     assert again.changes == ()
+
+
+class FailOnIssue(FakeGitHub):
+    """FakeGitHub whose label writes fail for the issues in ``failing``."""
+
+    def __init__(self, failing: set[int]) -> None:
+        super().__init__()
+        self.failing = failing
+
+    def add_labels(self, number: int, labels: Sequence[str]) -> None:
+        if number in self.failing:
+            raise GitHubError(f"HTTP 502 on issue {number}", status=502)
+        super().add_labels(number, labels)
+
+
+def test_failed_changes_are_marked_and_not_counted_as_changed() -> None:
+    fake = FailOnIssue({2})
+    fake.create_label("forge:task", "5319e7")
+    for task_id in ("M1-T01", "M1-T02", "M1-T03"):
+        fake.create_issue(task_id, body(meta(task_id)), labels=["forge:task"])
+    plan = plan_refresh(fake.list_issues(state="all"), {}, set())
+    failures = apply_refresh(fake, plan)
+    assert list(failures) == [2]
+    assert failures[2].startswith("issue #2 (M1-T02): label update failed")
+    data = plan.to_data(failed=failures.keys())
+    assert [(c["issue"], c["applied"]) for c in data["changes"]] == [
+        (1, True),
+        (2, False),
+        (3, True),
+    ]
+    assert data["counts"]["changed"] == 2 and data["counts"]["failed"] == 1
+    assert plan.counts["changed"] == 3  # the plan itself still counts every planned change
 
 
 # --------------------------------------------------------------------------- gather

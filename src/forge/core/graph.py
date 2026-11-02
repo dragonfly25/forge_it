@@ -10,8 +10,10 @@ is all :meth:`TaskGraph.has_cycle` and the wave computation need (linear time). 
 cycles is bounded by a ``limit``: first one shortest cycle per cyclic component (and every
 self-loop), then further *elementary* cycles from Johnson's algorithm with blocking (for each
 start node ``s`` in natural order, only nodes greater than ``s`` are visited, so each cycle is
-reported once, rotated to start at its smallest id) until the limit is reached. Work stays
-proportional to ``limit * (nodes + edges)`` even on dense graphs.
+reported once, rotated to start at its smallest id) until the limit is reached. Johnson's
+search needs the strongly connected component of each start node within the nodes not
+smaller than it, which changes with the start node, so it is recomputed per start node:
+listing costs O((nodes + limit) * (nodes + edges)), bounded even on dense graphs.
 The path order follows ``depends_on``: ``["A", "B"]`` means A depends on B and B depends on A.
 """
 
@@ -68,7 +70,8 @@ class GraphCycleError(GraphError):
     """The dependency graph contains one or more cycles.
 
     ``cycles`` lists the cycles shown (bounded). When the listing was truncated, ``truncated``
-    is true and ``more_components`` names the cyclic components that may hold further cycles.
+    is true and ``more_components`` names the cyclic components holding cycles not shown
+    (when even one cycle per component did not fit, only those left without one).
     """
 
     def __init__(
@@ -206,7 +209,9 @@ class TaskGraph:
 
         Every cyclic component (and every self-loop) gets one representative cycle before
         further cycles fill up to ``limit``; if there are more components than ``limit``,
-        the first ones in natural order win. Runtime stays bounded on dense graphs.
+        the first ones in natural order win. Runtime is O((n + limit)·(n + e)) for n tasks
+        and e edges: Johnson's search recomputes, for each start node, the strongly connected
+        component it needs, at O(n + e) each, and finds each cycle in O(n + e).
         """
         return self._bounded_cycles(limit)[0]
 
@@ -293,8 +298,10 @@ class TaskGraph:
     def _bounded_cycles(self, limit: int) -> tuple[list[list[str]], list[list[str]]]:
         """Return ``(cycles, incomplete_components)`` with at most ``limit`` cycles.
 
-        ``incomplete_components`` lists the cyclic components whose cycles may not all be
-        shown; it is empty when the listing is exhaustive.
+        ``incomplete_components`` is empty when the listing is exhaustive. When the
+        representatives alone exceed ``limit`` (phase 1), it lists the components with a
+        representative (or self-loop) left out, so components already shown are not repeated.
+        Otherwise it lists the components whose enumeration stopped or never started.
         """
         limit = max(limit, 0)
         components = self.cycle_components()
@@ -313,17 +320,18 @@ class TaskGraph:
             return True
 
         # Phase 1: one representative per component, then every self-loop.
-        overflow = False
-        for component in components:
+        dropped = [False] * len(components)
+        for position, component in enumerate(components):
             if len(component) == 1:
-                overflow |= not add([component[0]])
+                dropped[position] |= not add([component[0]])
             else:
-                overflow |= not add(self._shortest_cycle(component))
-        for component in components:
+                dropped[position] |= not add(self._shortest_cycle(component))
+        for position, component in enumerate(components):
             if len(component) > 1:
                 for node in component:
                     if node in self._deps[node]:
-                        overflow |= not add([node])
+                        dropped[position] |= not add([node])
+        overflow = any(dropped)
 
         # Phase 2: Johnson's enumeration, component by component, until the limit.
         if not overflow:
@@ -348,7 +356,8 @@ class TaskGraph:
                 complete[position] = True
 
         chosen.sort(key=lambda c: [natural_key(n) for n in c])
-        incomplete = [c for c, done in zip(components, complete, strict=True) if not done]
+        missing = dropped if overflow else [not done for done in complete]
+        incomplete = [c for c, miss in zip(components, missing, strict=True) if miss]
         return chosen, incomplete
 
     # ------------------------------------------------------------------ waves

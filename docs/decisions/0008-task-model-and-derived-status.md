@@ -73,7 +73,7 @@ The inputs are the issue (state, state_reason, labels), its metadata, the closed
 
 ## Implementation notes (Phase 2)
 
-- `refresh` data: `counts = {issues, tasks, skipped, changed, warnings, statuses}`, where `statuses` maps each status to the number of tasks in it. When two issues share a task id, the lowest issue number is used for dependency resolution, and both are still relabelled. A warning is emitted.
+- `refresh` data: `counts = {issues, tasks, skipped, changed, failed, warnings, statuses}`. Each change carries `applied: bool`. `changed` counts only applied changes and `failed` counts changes whose GitHub update failed, where `statuses` maps each status to the number of tasks in it. When two issues share a task id, the lowest issue number is used for dependency resolution, and both are still relabelled. A warning is emitted.
 - Task branches must be named exactly `task/<n>` with no leading zeros. Other branches under `task/` are ignored. If `origin/<default>` is missing locally or on the remote, refresh stops with exit 5 and names `project.default_branch`. A shallow clone also stops with exit 5, with the hint `fetch-depth: 0` / `git fetch --unshallow`. A task branch with no common history becomes a warning and is treated as absent.
 - `refresh` does not check the CLI version against `forge_version`. It is a safe, idempotent relabel that also runs in CI. The check is added to `next` and `ship`, which refuse with exit 5, and to `setup` and `status`, which warn (Phase 3, 4, 6 and 8).
 - The radar workflow template (Phase 8) must check out with `fetch-depth: 0`, so that merge-bases exist.
@@ -83,3 +83,4 @@ The inputs are the issue (state, state_reason, labels), its metadata, the closed
 - `refresh` fetches `+refs/heads/<default>` and `+refs/heads/task/*` explicitly, with prune, so single-branch clones work. Per-issue GitHub failures are reported as warnings, the run continues, and the exit code is 1.
 - Marker detection follows CommonMark fences. To quote an example Forge block in an issue, use a fence longer than the example's own ```` ``` ```` (e.g. ````` ```` `````) or `~~~`. `upsert_block` refuses to overwrite a block that contains anything other than the YAML fence.
 - Label names are compared case-insensitively, as on GitHub.
+- If the body ends inside an unclosed code fence, `upsert_block` first appends a matching closing fence line, so the block is never swallowed by the user's fence. Fences opened inside list items are tracked as well.

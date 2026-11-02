@@ -37,6 +37,7 @@ from forge.core.tasks import (
     TaskMetadata,
     derive_status,
     desired_labels,
+    has_label,
     last_event_from_trailers,
     parse_body,
 )
@@ -63,8 +64,11 @@ class RefreshChange:
     added: tuple[str, ...]
     removed: tuple[str, ...]
 
-    def to_data(self) -> dict[str, Any]:
-        """ADR 0008 shape: ``{"issue", "id", "from", "to", "added", "removed"}``."""
+    def to_data(self, *, applied: bool = True) -> dict[str, Any]:
+        """ADR 0008 shape: ``{"issue", "id", "from", "to", "added", "removed", "applied"}``.
+
+        ``applied`` is false when applying the change failed.
+        """
         return {
             "issue": self.issue,
             "id": self.task_id,
@@ -72,6 +76,7 @@ class RefreshChange:
             "to": None if self.to_status is None else self.to_status.value,
             "added": list(self.added),
             "removed": list(self.removed),
+            "applied": applied,
         }
 
 
@@ -83,12 +88,21 @@ class RefreshPlan:
     warnings: tuple[str, ...]
     counts: Mapping[str, Any]
 
-    def to_data(self) -> dict[str, Any]:
-        """ADR 0008 ``data``: ``{"changes": [...], "warnings": [...], "counts": {...}}``."""
+    def to_data(self, failed: Set[int] = frozenset()) -> dict[str, Any]:
+        """ADR 0008 ``data``: ``{"changes": [...], "warnings": [...], "counts": {...}}``.
+
+        ``failed`` holds the issue numbers whose changes could not be applied: they are
+        marked ``"applied": false``, and ``counts`` reports ``changed`` (applied changes
+        only) and ``failed`` separately.
+        """
+        counts = dict(self.counts)
+        n_failed = sum(1 for c in self.changes if c.issue in failed)
+        counts["changed"] = len(self.changes) - n_failed
+        counts["failed"] = n_failed
         return {
-            "changes": [c.to_data() for c in self.changes],
+            "changes": [c.to_data(applied=c.issue not in failed) for c in self.changes],
             "warnings": list(self.warnings),
-            "counts": dict(self.counts),
+            "counts": counts,
         }
 
 
@@ -237,7 +251,7 @@ def _parse_records(issues: Sequence[Issue], warnings: list[str]) -> list[TaskRec
 
 def _not_planned_warnings(rec: TaskRecord, not_planned: Set[str]) -> list[str]:
     """Warn an open, non-proposed task about dependencies closed as ``not_planned``."""
-    if rec.issue.state == "closed" or Status.PROPOSED.label in rec.issue.labels:
+    if rec.issue.state == "closed" or has_label(rec.issue.labels, Status.PROPOSED.label):
         return []
     return [
         f"issue #{rec.issue.number} ({rec.meta.id}): dependency {dep} was closed as not "
@@ -343,19 +357,19 @@ def ensure_labels(github: GitHubClient) -> list[str]:
     return created
 
 
-def apply_refresh(github: GitHubClient, plan: RefreshPlan) -> list[str]:
+def apply_refresh(github: GitHubClient, plan: RefreshPlan) -> dict[int, str]:
     """Apply ``plan``: ensure the catalogue labels exist, then add and remove labels.
 
     Each issue is applied independently: a :class:`GitHubError` on one issue is recorded and
-    the remaining issues still proceed. Returns one warning per failed issue (empty when all
-    succeeded). A failure while creating catalogue labels propagates, before any issue
-    changes. Re-running refresh converges, because the next plan starts from the labels
-    actually present.
+    the remaining issues still proceed. Returns a warning per failed issue, keyed by issue
+    number (empty when all succeeded). A failure while creating catalogue labels propagates,
+    before any issue changes. Re-running refresh converges, because the next plan starts
+    from the labels actually present.
     """
     if not plan.changes:
-        return []
+        return {}
     ensure_labels(github)
-    failures: list[str] = []
+    failures: dict[int, str] = {}
     for change in plan.changes:
         try:
             if change.added:
@@ -363,7 +377,7 @@ def apply_refresh(github: GitHubClient, plan: RefreshPlan) -> list[str]:
             for label in change.removed:
                 github.remove_label(change.issue, label)
         except GitHubError as exc:
-            failures.append(
+            failures[change.issue] = (
                 f"issue #{change.issue} ({change.task_id}): label update failed: "
                 f"{exc.message}; re-run forge refresh"
             )
@@ -396,8 +410,8 @@ def run_refresh(ctx: RefreshContext) -> Result:
     """Read GitHub, then fetch and read git; plan and apply the label changes.
 
     Order matters for concurrent claims: issues and pull requests are listed **before** the
-    fetch (see the module docstring). ``data`` is :meth:`RefreshPlan.to_data` with
-    ``counts["failed"]`` added; every warning, including per-issue apply failures, is
+    fetch (see the module docstring). ``data`` is :meth:`RefreshPlan.to_data` with the failed
+    issues marked; every warning, including per-issue apply failures, is
     repeated as a warning message. The exit code is 1 when any issue failed to update.
     """
     git = ctx.git
@@ -410,14 +424,13 @@ def run_refresh(ctx: RefreshContext) -> Result:
     plan = plan_refresh(issues, scan.branches, heads, warnings=scan.warnings)
     failures = apply_refresh(ctx.github, plan)
 
-    data = plan.to_data()
-    data["warnings"].extend(failures)
+    data = plan.to_data(failed=failures.keys())
+    data["warnings"].extend(failures.values())
     data["counts"]["warnings"] += len(failures)
-    data["counts"]["failed"] = len(failures)
     result = Result(data=data)
     for warning in data["warnings"]:
         result.warn(warning)
-    n = len(plan.changes) - len(failures)
+    n = data["counts"]["changed"]
     summary = f"refresh: {n} task{'s' if n != 1 else ''} updated"
     if failures:
         result.code = ExitCode.ERROR

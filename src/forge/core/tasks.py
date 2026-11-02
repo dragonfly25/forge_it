@@ -188,40 +188,96 @@ def _is_marker(line: str, marker: str) -> bool:
 
 
 _FENCE_RE = re.compile(r"^(`{3,}|~{3,})(.*)$")
+_LIST_MARKER_RE = re.compile(r"^([-*+]|[0-9]{1,9}[.)])( {1,4})(?=`{3}|~{3})")
 
 
-def _fence_open(line: str) -> str | None:
-    """Return the fence run (e.g. `````` or ``~~~``) when ``line`` opens a fenced code block."""
-    if _indent_width(line) >= 4:
+@dataclass(frozen=True)
+class _Fence:
+    """An open fenced code block: its fence ``run`` and the ``indent`` of its content.
+
+    ``indent`` is 0 for a top-level fence and the list item's content column for a fence
+    opened right after a list marker (e.g. ``- ```` or ``1. ~~~``).
+    """
+
+    run: str
+    indent: int
+
+    @property
+    def closer(self) -> str:
+        """A line that closes this fence: the same run, indented to the content column."""
+        return " " * self.indent + self.run
+
+
+def _fence_open(line: str) -> _Fence | None:
+    """Return the fence opened by ``line``, or ``None``.
+
+    Besides a top-level fence (indented by at most 3 columns), the common CommonMark case of
+    a fence opened right after a list marker (``-``, ``*``, ``+``, ``1.`` or ``1)``) and one
+    to four spaces is recognised; its content and closer are indented to the list item's
+    content column. Nested list markers and block quotes are not tracked.
+    """
+    indent = _indent_width(line)
+    if indent >= 4:
         return None
-    match = _FENCE_RE.match(line.lstrip(" \t"))
+    rest = line.lstrip(" \t")
+    content_indent = 0
+    item = _LIST_MARKER_RE.match(rest)
+    if item is not None:
+        content_indent = indent + len(item.group(0))
+        rest = rest[len(item.group(0)) :]
+    match = _FENCE_RE.match(rest)
     if match is None:
         return None
     run, info = match.groups()
     if run[0] == "`" and "`" in info:
         return None  # CommonMark: a backtick fence's info string cannot contain backticks
-    return run
+    return _Fence(run=run, indent=content_indent)
 
 
-def _fence_closes(line: str, run: str) -> bool:
-    """True when ``line`` closes a fenced code block opened with ``run``."""
-    if _indent_width(line) >= 4:
+def _fence_closes(line: str, fence: _Fence) -> bool:
+    """True when ``line`` closes ``fence``: the same character, at least as long, alone."""
+    if _indent_width(line) - fence.indent >= 4:
         return False
     stripped = line.strip()
-    return len(stripped) >= len(run) and set(stripped) == {run[0]}
+    return len(stripped) >= len(fence.run) and set(stripped) == {fence.run[0]}
 
 
-def _find_span(body: str, issue_number: int | None) -> _Span | None:
-    """Locate the Forge block, ignoring markers quoted inside Markdown code blocks.
+def _leaves_list_item(line: str, fence: _Fence) -> bool:
+    """True when a non-blank ``line`` is indented less than a list-item fence's content.
 
-    Outside the block, fenced code blocks (backticks or tildes, any length >= 3) are tracked
-    and markers inside them are ignored. Between a begin marker and its end marker, fences are
-    not tracked: the block's own ```yaml fence is checked by :func:`_extract_yaml`.
+    Such a line ends the list item, and with it the fenced code block (CommonMark).
+    """
+    return fence.indent > 0 and bool(line.strip()) and _indent_width(line) < fence.indent
+
+
+@dataclass(frozen=True)
+class _Scan:
+    """Marker lines found outside code blocks, plus the fence still open at the end."""
+
+    begins: list[tuple[int, str, int]]
+    ends: list[tuple[int, str, int]]
+    open_fence: _Fence | None
+    swallowed_begin: bool
+    """A begin marker sat inside a fence with no end marker after it in that fence: likely a
+    real block hidden by a fence left open above it (the block's own closing fence then
+    closed it, leaving the end marker visible)."""
+
+
+def _scan(body: str) -> _Scan:
+    """Find the marker lines of ``body``, ignoring markers quoted inside Markdown code blocks.
+
+    Outside the block, fenced code blocks (backticks or tildes, any length >= 3, top-level or
+    right after a list marker) are tracked and markers inside them are ignored. Between a
+    begin marker and its end marker, fences are not tracked: the block's own ```yaml fence is
+    checked by :func:`_extract_yaml`. ``open_fence`` is the fence left unclosed at the end of
+    the body, if any.
     """
     begins: list[tuple[int, str, int]] = []
     ends: list[tuple[int, str, int]] = []
-    fence: str | None = None
+    fence: _Fence | None = None
     in_block = False
+    pending_begin = False  # a begin marker seen inside the current fence, no end after it
+    swallowed = False
     for line in _lines_with_offsets(body):
         content = line[1]
         if in_block:
@@ -232,9 +288,20 @@ def _find_span(body: str, issue_number: int | None) -> _Span | None:
                 begins.append(line)
             continue
         if fence is not None:
-            if _fence_closes(content, fence):
+            closes = _fence_closes(content, fence)
+            if closes or _leaves_list_item(content, fence):
+                swallowed |= pending_begin
+                pending_begin = False
                 fence = None
-            continue
+                if closes:
+                    continue
+                # The list item ended: handle the line as ordinary text below.
+            else:
+                if _is_marker(content, BEGIN_MARKER):
+                    pending_begin = True
+                elif _is_marker(content, END_MARKER):
+                    pending_begin = False
+                continue
         if _is_marker(content, BEGIN_MARKER):
             begins.append(line)
             in_block = True
@@ -242,6 +309,13 @@ def _find_span(body: str, issue_number: int | None) -> _Span | None:
             ends.append(line)
         else:
             fence = _fence_open(content)
+    return _Scan(begins, ends, fence, swallowed)
+
+
+def _find_span(body: str, issue_number: int | None) -> _Span | None:
+    """Locate the Forge block (see :func:`_scan`); ``None`` when there are no markers."""
+    scan = _scan(body)
+    begins, ends = scan.begins, scan.ends
     if not begins and not ends:
         return None
     fix_one = f"keep exactly one `{BEGIN_MARKER}` … `{END_MARKER}` block in the issue body"
@@ -256,10 +330,14 @@ def _find_span(body: str, issue_number: int | None) -> _Span | None:
             hint=f"add `{END_MARKER}` on its own line after the YAML block",
         )
     if not begins:
+        hint = f"add `{BEGIN_MARKER}` on its own line before the YAML block"
+        if scan.swallowed_begin:
+            hint = (
+                f"`{BEGIN_MARKER}` seems to be inside a code block: a code fence (``` or ~~~) "
+                f"above it is probably not closed; close it, or {hint[0].lower()}{hint[1:]}"
+            )
         raise TaskBodyError(
-            f"`{END_MARKER}` without `{BEGIN_MARKER}`",
-            issue_number=issue_number,
-            hint=f"add `{BEGIN_MARKER}` on its own line before the YAML block",
+            f"`{END_MARKER}` without `{BEGIN_MARKER}`", issue_number=issue_number, hint=hint
         )
     b_start, _, b_end = begins[0]
     e_start, e_content, _ = ends[0]
@@ -501,6 +579,10 @@ def upsert_block(body: str, meta: TaskMetadata, *, issue_number: int | None = No
     anything besides whitespace and a single ```yaml fence is not: rather than destroy human
     notes, :class:`TaskBodyError` is raised. It is also raised on unbalanced or repeated
     markers.
+
+    When the body ends inside an unclosed code fence, a matching closing fence line is added
+    first (the only change to the human text); otherwise the appended block would be quoted
+    by that fence and the result would not parse back.
     """
     newline = "\r\n" if "\r\n" in body else "\n"
     block = _render_block(meta, newline)
@@ -518,6 +600,11 @@ def upsert_block(body: str, meta: TaskMetadata, *, issue_number: int | None = No
                     "may sit between them",
                 ) from exc
         return body[: span.start] + block + body[span.end :]
+    open_fence = _scan(body).open_fence
+    if open_fence is not None:
+        if not body.endswith("\n"):
+            body += newline
+        body += open_fence.closer + newline
     if not body:
         return block + newline
     if body.endswith(newline + newline):
@@ -605,7 +692,7 @@ _META_NAMES: frozenset[str] = (
 )
 
 
-def _has_label(labels: Iterable[str], name: str) -> bool:
+def has_label(labels: Iterable[str], name: str) -> bool:
     """True when ``labels`` contains ``name``, compared case-insensitively as on GitHub."""
     wanted = name.casefold()
     return any(label.casefold() == wanted for label in labels)
@@ -769,7 +856,7 @@ def derive_status(
     """
     if issue.state == "closed":
         return Derived(None if issue.state_reason == "not_planned" else Status.DONE)
-    if _has_label(issue.labels, Status.PROPOSED.label):
+    if has_label(issue.labels, Status.PROPOSED.label):
         return Derived(Status.PROPOSED)
     if has_open_pr:
         return Derived(Status.IN_REVIEW)

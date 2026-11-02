@@ -29,6 +29,7 @@ from forge.core.tasks import (
     TaskType,
     derive_status,
     desired_labels,
+    has_label,
     last_event_from_trailers,
     metadata_labels,
     parse_body,
@@ -436,6 +437,76 @@ def test_nested_fence_lengths() -> None:
 
 def test_unclosed_example_fence_hides_later_markers() -> None:
     assert parse_body(f"````\n{block(EXAMPLE_YAML)}") is None
+
+
+@pytest.mark.parametrize(
+    ("opening", "closer"),
+    [("```", "```"), ("~~~", "~~~"), ("````text", "````"), ("~~~~~", "~~~~~")],
+)
+@pytest.mark.parametrize("tail", ["\n", ""])
+def test_upsert_closes_a_fence_left_open_at_the_end(opening: str, closer: str, tail: str) -> None:
+    body = f"Notes\n\n{opening}\nsome code{tail}"
+    out = upsert_block(body, META)
+    assert out.startswith(f"Notes\n\n{opening}\nsome code\n{closer}\n")
+    assert parse_body(out) == META
+    assert upsert_block(out, META) == out
+    assert out.count(BEGIN_MARKER) == 1
+    again = upsert_block(out, replace(META, size=Size.S))
+    assert again.count(BEGIN_MARKER) == 1
+    assert parse_body(again) == replace(META, size=Size.S)
+
+
+def test_upsert_closes_an_unclosed_example_fence() -> None:
+    body = f"````\n{block(EXAMPLE_YAML)}"
+    assert parse_body(body) is None
+    out = upsert_block(body, META)
+    assert out.startswith(body + "````\n\n" + BEGIN_MARKER)
+    assert parse_body(out) == META and upsert_block(out, META) == out
+
+
+def test_upsert_closes_an_open_list_item_fence_with_crlf() -> None:
+    body = "Steps:\r\n\r\n10. ~~~\r\n    code\r\n"
+    out = upsert_block(body, META)
+    assert out.startswith(body + "    ~~~\r\n\r\n" + BEGIN_MARKER)
+    assert parse_body(out) == META and upsert_block(out, META) == out
+
+
+def test_end_without_begin_hints_at_an_unclosed_fence() -> None:
+    body = f"Notes\n```\nsome code\n\n{block(VALID_YAML)}"
+    err = body_error(body)
+    assert "without" in err.reason
+    assert err.hint is not None and "not closed" in err.hint and "code fence" in err.hint
+    # A plain stray end marker keeps the plain hint.
+    plain = body_error(f"text\n{END_MARKER}\n")
+    assert plain.hint is not None and "not closed" not in plain.hint
+    # So does a stray end marker after a closed example that quotes a whole block.
+    quoted = body_error(f"````\n{block(EXAMPLE_YAML)}````\n{END_MARKER}\n")
+    assert quoted.hint is not None and "not closed" not in quoted.hint
+
+
+@pytest.mark.parametrize("marker", ["- ", "* ", "+ ", "1. ", "1) ", "12.  ", "  - "])
+@pytest.mark.parametrize("run", ["````", "~~~"])
+def test_example_in_list_item_fence_is_not_the_block(marker: str, run: str) -> None:
+    pad = " " * len(marker)
+    quoted = "".join(f"{pad}{ln}\n" for ln in block(EXAMPLE_YAML).splitlines())
+    example = f"Steps:\n\n{marker}{run}markdown\n{quoted}{pad}{run}\n"
+    assert parse_body(example) is None
+    meta = parse_body(example + "\n" + block(VALID_YAML))
+    assert meta is not None and meta.id == "M1-T07"
+    out = upsert_block(example, META)
+    assert out.startswith(example) and parse_body(out) == META
+
+
+def test_list_item_fence_ends_with_its_list_item() -> None:
+    # An unindented line ends the list item, and with it the fence (CommonMark).
+    body = f"- ```\n  code\n{block(VALID_YAML)}"
+    meta = parse_body(body)
+    assert meta is not None and meta.id == "M1-T07"
+
+
+def test_has_label_is_case_insensitive() -> None:
+    assert has_label(["Status:Proposed"], "status:proposed")
+    assert not has_label(["status:ready"], "status:proposed")
 
 
 def test_inline_marker_mentions_are_not_markers() -> None:

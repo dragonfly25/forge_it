@@ -367,3 +367,29 @@ def test_cycle_error_not_truncated_when_exhaustive() -> None:
     assert not info.value.truncated
     assert info.value.more_components == []
     assert "more cycles" not in str(info.value)
+
+
+def test_cycle_error_lists_only_components_without_a_shown_cycle() -> None:
+    deps: dict[str, list[str]] = {}
+    for i in range(1, 31):
+        deps[f"A{i}"] = [f"B{i}"]
+        deps[f"B{i}"] = [f"A{i}"]
+    with pytest.raises(GraphCycleError) as info:
+        TaskGraph(deps).waves()
+    err = info.value
+    assert len(err.cycles) == 20 and err.truncated
+    assert len(err.more_components) == 10
+    shown = {frozenset(c) for c in err.cycles}
+    assert shown.isdisjoint(frozenset(c) for c in err.more_components)
+    assert {frozenset(c) for c in err.more_components} | shown == {
+        frozenset((f"A{i}", f"B{i}")) for i in range(1, 31)
+    }
+
+
+def test_phase_one_overflow_lists_component_with_a_dropped_self_loop() -> None:
+    # The representative of the component fits, its inner self-loop does not.
+    deps = {"A": ["B", "A"], "B": ["A"]}
+    g = TaskGraph(deps)
+    assert g.cycles(limit=1) == [["A", "B"]]
+    cycles, incomplete = g._bounded_cycles(1)
+    assert cycles == [["A", "B"]] and incomplete == [["A", "B"]]
