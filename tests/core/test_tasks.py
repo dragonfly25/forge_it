@@ -341,6 +341,127 @@ def test_split_body_without_block() -> None:
     assert split_body("hello") == ("hello", None, "")
 
 
+# -- upsert: human notes inside the markers ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        f"my notes\n```yaml\n{VALID_YAML}\n```\n",
+        f"```yaml\n{VALID_YAML}\n```\nremember to ask Bob\n",
+        "just some notes, no fence\n",
+        f"```yaml\n{VALID_YAML}\n```\n```yaml\n{VALID_YAML}\n```\n",
+        "```yaml\nid: M1-T01\nnotes that were never fenced off\n",
+    ],
+)
+def test_upsert_refuses_to_destroy_notes_inside_markers(inner: str) -> None:
+    body = f"before\n{BEGIN_MARKER}\n{inner}{END_MARKER}\nafter\n"
+    with pytest.raises(TaskBodyError) as info:
+        upsert_block(body, META, issue_number=9)
+    err = info.value
+    assert err.issue_number == 9
+    assert err.hint is not None and "move your notes outside the forge markers" in err.hint
+
+
+def test_upsert_replaces_invalid_yaml_in_a_proper_fence() -> None:
+    body = "keep\n" + block("id: [M1-T01\nsize: : :") + "tail\n"
+    with pytest.raises(TaskBodyError):
+        parse_body(body)
+    out = upsert_block(body, META)
+    assert out.startswith("keep\n") and out.endswith("tail\n")
+    assert parse_body(out) == META
+
+
+def test_upsert_replaces_empty_block() -> None:
+    body = f"keep\n{BEGIN_MARKER}\n\n  \n{END_MARKER}\ntail\n"
+    out = upsert_block(body, META)
+    assert out == f"keep\n{BEGIN_MARKER}\n{render_metadata(META)}{END_MARKER}\ntail\n"
+
+
+# -- code fences and inline mentions ----------------------------------------------------------
+
+EXAMPLE_YAML = VALID_YAML.replace("M1-T07", "M9-T99")
+
+
+def test_example_in_fence_and_real_block() -> None:
+    example = f"How a block looks:\n\n````markdown\n{block(EXAMPLE_YAML)}````\n\n"
+    body = example + block(VALID_YAML) + "footer\n"
+    meta = parse_body(body)
+    assert meta is not None and meta.id == "M1-T07" and meta.size is Size.S
+    out = upsert_block(body, META)
+    assert out.startswith(example)
+    assert out.endswith("footer\n")
+    assert parse_body(out) == META
+
+
+def test_only_example_in_fence_is_not_a_block() -> None:
+    body = f"Example:\n````\n{block(EXAMPLE_YAML)}````\n"
+    assert parse_body(body) is None
+    assert split_body(body) == (body, None, "")
+    out = upsert_block(body, META)
+    assert out.startswith(body + "\n" + BEGIN_MARKER)
+    assert parse_body(out) == META
+
+
+def test_example_in_tilde_fence_with_info_string() -> None:
+    body = f"~~~~ markdown\n{block(EXAMPLE_YAML)}~~~~\n"
+    assert parse_body(body) is None
+    out = upsert_block(body, META)
+    assert out.startswith(body) and parse_body(out) == META
+
+
+def test_example_in_indented_code_block() -> None:
+    indented = "".join(f"    {ln}\n" for ln in block(EXAMPLE_YAML).splitlines())
+    body = f"Example:\n\n{indented}\n"
+    assert parse_body(body) is None
+    assert parse_body(body + block(VALID_YAML)) is not None
+    tab = body.replace("    ", "\t")
+    assert parse_body(tab) is None
+
+
+def test_nested_fence_lengths() -> None:
+    # A ``` line inside a ```` fence does not close it, so the markers stay quoted.
+    inner = f"```\n{block(EXAMPLE_YAML)}```\n"
+    body = f"`````\n````\n{inner}````\n`````\n" + block(VALID_YAML)
+    meta = parse_body(body)
+    assert meta is not None and meta.id == "M1-T07"
+    # The example's own ``` lines are shorter, and a tilde line does not close a backtick
+    # fence.
+    mixed = f"````\n~~~\n{block(EXAMPLE_YAML)}~~~\n````\n"
+    assert parse_body(mixed) is None
+    # A longer closing run closes a shorter fence.
+    longer = f"```\nx\n`````\n{block(VALID_YAML)}"
+    assert parse_body(longer) is not None
+
+
+def test_unclosed_example_fence_hides_later_markers() -> None:
+    assert parse_body(f"````\n{block(EXAMPLE_YAML)}") is None
+
+
+def test_inline_marker_mentions_are_not_markers() -> None:
+    body = (
+        f"Put the metadata between {BEGIN_MARKER} and {END_MARKER}.\n`{BEGIN_MARKER}` starts it.\n"
+    )
+    assert parse_body(body) is None
+    out = upsert_block(body, META)
+    assert out.startswith(body) and parse_body(out) == META
+    assert parse_body(body + block(VALID_YAML)) is not None
+
+
+def test_unicode_line_separators_are_preserved() -> None:
+    before = "notes\u2028more\x85x\x0c\u2028\n"
+    after = "\n\u2028tail\x85\n"
+    body = before + block(VALID_YAML).rstrip("\n") + after
+    b, _, a = split_body(body)
+    assert (b, a) == (before, after)
+    out = upsert_block(body, META)
+    assert out.startswith(before) and out.endswith(after)
+    assert parse_body(out) == META
+    # A begin marker after a U+2028 on the same line is not alone on its line.
+    glued = f"x\u2028{BEGIN_MARKER}\n```yaml\n{VALID_YAML}\n```\n{END_MARKER}\n"
+    assert "without" in body_error(glued).reason
+
+
 # -- labels ---------------------------------------------------------------------------------
 
 
@@ -398,6 +519,30 @@ def test_desired_labels_without_meta_touches_status_only() -> None:
     assert diff.remove == {"status:ready"}
 
 
+def test_status_from_labels_case_insensitive() -> None:
+    assert Status.from_labels(["Status:Ready"]) is Status.READY
+    assert Status.from_labels(["STATUS:IN-PROGRESS"]) is Status.IN_PROGRESS
+
+
+def test_desired_labels_case_insensitive() -> None:
+    current = ["Status:Ready", "Forge:Task", "Size:m", "TIER:Standard", "type:IMPL"]
+    assert desired_labels(current, Status.READY, META).empty
+    diff = desired_labels(current, Status.BLOCKED, replace(META, size=Size.S))
+    assert diff.add == {"status:blocked", "size:S"}
+    assert diff.remove == {"Status:Ready", "Size:m"}
+
+
+def test_derive_status_proposed_label_case_insensitive() -> None:
+    result = derive_status(
+        issue=issue(labels=("Status:Proposed",)),
+        meta=META,
+        deps_closed=ALL_CLOSED,
+        branch=NO_BRANCH,
+        has_open_pr=False,
+    )
+    assert result.status is Status.PROPOSED
+
+
 def test_desired_labels_idempotent() -> None:
     current = [Status.READY.label, *metadata_labels(META), BLOCKED_CONFLICT]
     assert desired_labels(current, Status.READY, META).empty
@@ -437,6 +582,21 @@ def test_last_event_none_and_malformed_skipped() -> None:
     claim = {TRAILER_CLAIM: "b"}
     event = last_event_from_trailers([both, claim])
     assert event is not None and event.author == "b"
+
+
+def test_last_event_filtered_by_task_id() -> None:
+    commits = [
+        {TRAILER_CLAIM: "mallory"},  # no Forge-Task
+        {TRAILER_TASK: "M1-T08", TRAILER_CLAIM: "eve"},  # another task
+        {TRAILER_TASK: "m1-t07", TRAILER_CLAIM: "case"},  # value is case-sensitive
+        {"forge-task": "M1-T07", "forge-handoff": "bob"},  # keys are not
+        {TRAILER_TASK: "M1-T07", TRAILER_CLAIM: "alice"},
+    ]
+    event = last_event_from_trailers(commits, task_id="M1-T07")
+    assert event == ForgeEvent(BranchEvent.HANDOFF, "bob", None, "M1-T07")
+    assert last_event_from_trailers(commits, task_id="M2-T01") is None
+    unfiltered = last_event_from_trailers(commits)
+    assert unfiltered is not None and unfiltered.author == "mallory"
 
 
 # -- derive_status ------------------------------------------------------------------------

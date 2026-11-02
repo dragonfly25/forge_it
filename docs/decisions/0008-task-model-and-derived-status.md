@@ -46,7 +46,7 @@ Spec §7 defines tasks as issues with a metadata block, status labels as a *view
   - `Forge-Handoff: <github>`;
   - `Forge-Release: <github>`.
   Handoff and release commits are empty if there is nothing to save.
-- The **last Forge event** of a branch is the event trailer on the newest commit between the tip and its merge-base with `origin/<default>` that carries one. A *live claim* requires that this event is `Forge-Claim` (Phase 3 adds staleness).
+- The **last Forge event** of a branch is the event trailer on the newest commit that carries one, among the commits between the tip and its merge-base with `origin/<default>`. Only the **first-parent** history is walked, and only commits whose `Forge-Task` equals the task's id count. Events from merged-in or cherry-picked commits of other tasks are ignored. A *live claim* requires that this event is `Forge-Claim` (Phase 3 adds staleness).
 
 ### Derived status (`derive_status`, pure)
 The inputs are the issue (state, state_reason, labels), its metadata, the closed/open state of each dependency, the branch state (exists, last event) and whether an open PR from `task/<n>` exists. The first matching rule wins:
@@ -74,7 +74,12 @@ The inputs are the issue (state, state_reason, labels), its metadata, the closed
 ## Implementation notes (Phase 2)
 
 - `refresh` data: `counts = {issues, tasks, skipped, changed, warnings, statuses}`, where `statuses` maps each status to the number of tasks in it. When two issues share a task id, the lowest issue number is used for dependency resolution, and both are still relabelled. A warning is emitted.
-- Task branches must be named exactly `task/<n>` with no leading zeros. Other branches under `task/` are ignored. If `origin/<default>` is missing, the whole branch history is scanned for events.
+- Task branches must be named exactly `task/<n>` with no leading zeros. Other branches under `task/` are ignored. If `origin/<default>` is missing locally or on the remote, refresh stops with exit 5 and names `project.default_branch`. A shallow clone also stops with exit 5, with the hint `fetch-depth: 0` / `git fetch --unshallow`. A task branch with no common history becomes a warning and is treated as absent.
 - `refresh` does not check the CLI version against `forge_version`. It is a safe, idempotent relabel that also runs in CI. The check is added to `next` and `ship`, which refuse with exit 5, and to `setup` and `status`, which warn (Phase 3, 4, 6 and 8).
 - The radar workflow template (Phase 8) must check out with `fetch-depth: 0`, so that merge-bases exist.
 - `core/refresh.run_refresh` takes a `RefreshContext` protocol (`config`, `git`, `github`), because core cannot import `commands/`. `commands/_context.AppContext` satisfies it and is the shared context for every command. Tests swap the GitHub client with `monkeypatch.setattr(_context, "github_factory", ...)`.
+- A dependency closed as `not_planned` still counts as closed (the literal reading of spec §7.2), so its dependents are not blocked by it. `refresh` emits a warning on each open, non-proposed dependent that names the dependent and the dropped dependency, and suggests removing it from `depends_on` or reopening it.
+- `refresh` lists issues and PRs **before** fetching branches, so a claim that lands mid-run is never reverted. One harmless window remains. A claim can land after the fetch while refresh, working from its older snapshot, adds a different status (e.g. blocked → ready). The issue then briefly carries two `status:*` labels, and the next refresh resolves it.
+- `refresh` fetches `+refs/heads/<default>` and `+refs/heads/task/*` explicitly, with prune, so single-branch clones work. Per-issue GitHub failures are reported as warnings, the run continues, and the exit code is 1.
+- Marker detection follows CommonMark fences. To quote an example Forge block in an issue, use a fence longer than the example's own ```` ``` ```` (e.g. ````` ```` `````) or `~~~`. `upsert_block` refuses to overwrite a block that contains anything other than the YAML fence.
+- Label names are compared case-insensitively, as on GitHub.

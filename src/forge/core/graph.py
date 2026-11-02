@@ -5,17 +5,20 @@ depends on (``depends_on``). Every algorithm is iterative so large plans never h
 recursion limit, and every output is sorted with :func:`natural_key` so it is deterministic
 regardless of input order.
 
-Cycle reporting: strongly connected components are found with an iterative Tarjan; inside
-each non-trivial component every *elementary* cycle is enumerated (Johnson-style: for each
+Cycle reporting: strongly connected components are found with an iterative Tarjan, which
+is all :meth:`TaskGraph.has_cycle` and the wave computation need (linear time). Listing
+cycles is bounded by a ``limit``: first one shortest cycle per cyclic component (and every
+self-loop), then further *elementary* cycles from Johnson's algorithm with blocking (for each
 start node ``s`` in natural order, only nodes greater than ``s`` are visited, so each cycle is
-reported exactly once, rotated to start at its smallest id). Self-loops are one-node cycles.
+reported once, rotated to start at its smallest id) until the limit is reached. Work stays
+proportional to ``limit * (nodes + edges)`` even on dense graphs.
 The path order follows ``depends_on``: ``["A", "B"]`` means A depends on B and B depends on A.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from collections.abc import Set as AbstractSet
 
 from forge.core.errors import ForgeError
@@ -28,6 +31,7 @@ __all__ = [
 ]
 
 _DIGITS = re.compile(r"(\d+)")
+_ERROR_CYCLE_LIMIT = 20
 
 NaturalKey = tuple[tuple[str | int, ...], str]
 
@@ -55,12 +59,30 @@ class GraphError(ForgeError):
     """The dependency graph cannot be processed (e.g. unknown dependencies)."""
 
 
-class GraphCycleError(GraphError):
-    """The dependency graph contains one or more cycles; ``cycles`` lists them."""
+def _format_component(component: list[str]) -> str:
+    shown = component if len(component) <= 5 else [*component[:3], f"… +{len(component) - 3}"]
+    return "{" + ", ".join(shown) + "}"
 
-    def __init__(self, cycles: list[list[str]]):
+
+class GraphCycleError(GraphError):
+    """The dependency graph contains one or more cycles.
+
+    ``cycles`` lists the cycles shown (bounded). When the listing was truncated, ``truncated``
+    is true and ``more_components`` names the cyclic components that may hold further cycles.
+    """
+
+    def __init__(
+        self,
+        cycles: list[list[str]],
+        more_components: Iterable[list[str]] = (),
+    ):
         self.cycles = cycles
+        self.more_components: list[list[str]] = [list(c) for c in more_components]
+        self.truncated = bool(self.more_components)
         listed = "; ".join(_format_cycle(c) for c in cycles)
+        if self.truncated:
+            names = ", ".join(_format_component(c) for c in self.more_components)
+            listed += f"; … and more cycles in components {names}"
         super().__init__(
             f"dependency cycle(s): {listed}",
             hint="remove one depends_on edge from each cycle listed",
@@ -163,67 +185,178 @@ class TaskGraph:
                     components.append(_sorted(component))
         return components
 
-    def cycles(self) -> list[list[str]]:
-        """Every elementary cycle once, rotated to start at its smallest id, sorted.
+    def _is_cyclic(self, component: list[str]) -> bool:
+        return len(component) > 1 or component[0] in self._deps[component[0]]
 
-        Enumeration is exponential in the worst case (dense components), which is acceptable
-        for task plans of realistic size.
+    def cycle_components(self) -> list[list[str]]:
+        """Components holding a cycle: SCCs with more than one task, plus self-loops.
+
+        Each component is naturally sorted; components are ordered by their smallest id.
         """
-        found: list[list[str]] = []
-        for component in self._sccs():
-            members = set(component)
-            if len(component) == 1:
-                node = component[0]
-                if node in self._deps[node]:
-                    found.append([node])
-                continue
-            rank = {node: i for i, node in enumerate(component)}
-            for start in component:
-                allowed = {n for n in members if rank[n] >= rank[start]}
-                path: list[str] = [start]
-                on_path: set[str] = {start}
-                work: list[tuple[str, list[str], int]] = [
-                    (start, [d for d in self._deps[start] if d in allowed], 0)
-                ]
-                while work:
-                    node, succ, pos = work[-1]
-                    if pos >= len(succ):
-                        work.pop()
-                        path.pop()
-                        on_path.discard(node)
-                        continue
-                    work[-1] = (node, succ, pos + 1)
-                    nxt = succ[pos]
-                    if nxt == start:
-                        if len(path) > 1:
-                            found.append(list(path))
-                        continue
-                    if nxt in on_path:
-                        continue
-                    path.append(nxt)
-                    on_path.add(nxt)
-                    work.append((nxt, [d for d in self._deps[nxt] if d in allowed], 0))
-            # self-loops inside a larger component are elementary cycles too
-            for node in component:
-                if node in self._deps[node]:
-                    found.append([node])
-        found.sort(key=lambda c: [natural_key(n) for n in c])
+        found = [c for c in self._sccs() if self._is_cyclic(c)]
+        found.sort(key=lambda c: natural_key(c[0]))
         return found
 
     def has_cycle(self) -> bool:
         """True when the graph contains at least one cycle (including self-loops)."""
-        return any(
-            len(component) > 1 or component[0] in self._deps[component[0]]
-            for component in self._sccs()
-        )
+        return any(self._is_cyclic(c) for c in self._sccs())
+
+    def cycles(self, limit: int = 20) -> list[list[str]]:
+        """At most ``limit`` elementary cycles, each rotated to start at its smallest id, sorted.
+
+        Every cyclic component (and every self-loop) gets one representative cycle before
+        further cycles fill up to ``limit``; if there are more components than ``limit``,
+        the first ones in natural order win. Runtime stays bounded on dense graphs.
+        """
+        return self._bounded_cycles(limit)[0]
+
+    def _shortest_cycle(self, component: list[str]) -> list[str]:
+        """Shortest cycle through the smallest id of a non-trivial SCC (BFS)."""
+        members = set(component)
+        start = component[0]
+        parent: dict[str, str] = {}
+        queue = [start]
+        for node in queue:
+            for nxt in self._deps[node]:
+                if nxt not in members or nxt == node:
+                    continue
+                if nxt == start:
+                    path = [node]
+                    while path[-1] != start:
+                        path.append(parent[path[-1]])
+                    path.reverse()
+                    return path
+                if nxt not in parent:
+                    parent[nxt] = node
+                    queue.append(nxt)
+        raise AssertionError(f"component {component} has no cycle")  # pragma: no cover
+
+    def _scc_of(self, start: str, allowed: set[str]) -> set[str]:
+        """Nodes of ``allowed`` that are both reachable from and reaching ``start``."""
+
+        def reach(edges: Mapping[str, Iterable[str]]) -> set[str]:
+            seen = {start}
+            todo = [start]
+            while todo:
+                node = todo.pop()
+                for nxt in edges.get(node, ()):
+                    if nxt in allowed and nxt not in seen:
+                        seen.add(nxt)
+                        todo.append(nxt)
+            return seen
+
+        return reach(self._deps) & reach(self._rdeps)
+
+    def _johnson(self, start: str, allowed: set[str]) -> Iterator[list[str]]:
+        """Johnson's circuit search from ``start`` inside ``allowed`` (iterative, blocking).
+
+        Yields every elementary cycle of length > 1 through ``start``; self-loops excluded.
+        """
+
+        def succ(node: str) -> list[str]:
+            return [d for d in self._deps[node] if d in allowed and d != node]
+
+        blocked: set[str] = {start}
+        blocked_by: dict[str, set[str]] = {}
+        path: list[str] = [start]
+        stack: list[tuple[str, Iterator[str]]] = [(start, iter(succ(start)))]
+        closed: list[bool] = [False]
+        while stack:
+            node, successors = stack[-1]
+            nxt = next(successors, None)
+            if nxt is not None:
+                if nxt == start:
+                    yield list(path)
+                    closed[-1] = True
+                elif nxt not in blocked:
+                    path.append(nxt)
+                    blocked.add(nxt)
+                    stack.append((nxt, iter(succ(nxt))))
+                    closed.append(False)
+                continue
+            stack.pop()
+            path.pop()
+            found = closed.pop()
+            if found:
+                todo = [node]
+                while todo:
+                    member = todo.pop()
+                    if member in blocked:
+                        blocked.discard(member)
+                        todo.extend(blocked_by.pop(member, ()))
+            else:
+                for target in succ(node):
+                    blocked_by.setdefault(target, set()).add(node)
+            if closed:
+                closed[-1] = closed[-1] or found
+
+    def _bounded_cycles(self, limit: int) -> tuple[list[list[str]], list[list[str]]]:
+        """Return ``(cycles, incomplete_components)`` with at most ``limit`` cycles.
+
+        ``incomplete_components`` lists the cyclic components whose cycles may not all be
+        shown; it is empty when the listing is exhaustive.
+        """
+        limit = max(limit, 0)
+        components = self.cycle_components()
+        chosen: list[list[str]] = []
+        seen: set[tuple[str, ...]] = set()
+        complete = [False] * len(components)
+
+        def add(cycle: list[str]) -> bool:
+            key = tuple(cycle)
+            if key in seen:
+                return True
+            if len(chosen) >= limit:
+                return False
+            seen.add(key)
+            chosen.append(cycle)
+            return True
+
+        # Phase 1: one representative per component, then every self-loop.
+        overflow = False
+        for component in components:
+            if len(component) == 1:
+                overflow |= not add([component[0]])
+            else:
+                overflow |= not add(self._shortest_cycle(component))
+        for component in components:
+            if len(component) > 1:
+                for node in component:
+                    if node in self._deps[node]:
+                        overflow |= not add([node])
+
+        # Phase 2: Johnson's enumeration, component by component, until the limit.
+        if not overflow:
+            for position, component in enumerate(components):
+                stopped = False
+                if len(component) > 1:
+                    rank = {node: i for i, node in enumerate(component)}
+                    for start in component:
+                        allowed = self._scc_of(
+                            start, {n for n in component if rank[n] >= rank[start]}
+                        )
+                        if len(allowed) < 2:
+                            continue
+                        for cycle in self._johnson(start, allowed):
+                            if not add(cycle):
+                                stopped = True
+                                break
+                        if stopped:
+                            break
+                if stopped:
+                    break
+                complete[position] = True
+
+        chosen.sort(key=lambda c: [natural_key(n) for n in c])
+        incomplete = [c for c, done in zip(components, complete, strict=True) if not done]
+        return chosen, incomplete
 
     # ------------------------------------------------------------------ waves
 
     def wave_of(self, *, ignore_unknown: bool = False) -> dict[str, int]:
         """Map each task to its wave (topological level); see :meth:`waves`."""
-        cycles = self.cycles()
-        if cycles:
-            raise GraphCycleError(cycles)
+        if self.has_cycle():
+            raise GraphCycleError(*self._bounded_cycles(_ERROR_CYCLE_LIMIT))
         unknown = self.unknown_dependencies()
         if unknown and not ignore_unknown:
             listed = "; ".join(f"{node} -> {', '.join(deps)}" for node, deps in unknown.items())

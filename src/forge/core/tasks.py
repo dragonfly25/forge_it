@@ -147,25 +147,101 @@ class _Span:
 
 
 def _lines_with_offsets(text: str) -> list[tuple[int, str, int]]:
-    """Return ``(start, content_without_terminator, end_including_terminator)`` per line."""
+    """Return ``(start, content_without_terminator, end_including_terminator)`` per line.
+
+    Only ``\n`` ends a line (a preceding ``\r`` is stripped from the content), unlike
+    :meth:`str.splitlines`, so that other Unicode separators stay inside their line.
+    """
     out: list[tuple[int, str, int]] = []
     pos = 0
-    for raw in text.splitlines(keepends=True):
-        content = raw.rstrip("\r\n")
-        out.append((pos, content, pos + len(raw)))
-        pos += len(raw)
+    for raw in text.split("\n"):
+        end = pos + len(raw)
+        if end < len(text):
+            end += 1  # the "\n" terminator
+        elif not raw:
+            break  # text ends with "\n" (or is empty): no extra empty line
+        out.append((pos, raw.removesuffix("\r"), end))
+        pos = end
     return out
 
 
+def _indent_width(line: str) -> int:
+    """Width of the leading whitespace of ``line``, with tabs advancing to a multiple of 4."""
+    width = 0
+    for ch in line:
+        if ch == " ":
+            width += 1
+        elif ch == "\t":
+            width += 4 - width % 4
+        else:
+            break
+    return width
+
+
+def _is_marker(line: str, marker: str) -> bool:
+    """True when ``line`` is ``marker`` alone, indented by at most 3 columns.
+
+    Four or more columns make an indented code block in Markdown, so such a line only shows
+    the marker as an example.
+    """
+    return line.strip() == marker and _indent_width(line) < 4
+
+
+_FENCE_RE = re.compile(r"^(`{3,}|~{3,})(.*)$")
+
+
+def _fence_open(line: str) -> str | None:
+    """Return the fence run (e.g. `````` or ``~~~``) when ``line`` opens a fenced code block."""
+    if _indent_width(line) >= 4:
+        return None
+    match = _FENCE_RE.match(line.lstrip(" \t"))
+    if match is None:
+        return None
+    run, info = match.groups()
+    if run[0] == "`" and "`" in info:
+        return None  # CommonMark: a backtick fence's info string cannot contain backticks
+    return run
+
+
+def _fence_closes(line: str, run: str) -> bool:
+    """True when ``line`` closes a fenced code block opened with ``run``."""
+    if _indent_width(line) >= 4:
+        return False
+    stripped = line.strip()
+    return len(stripped) >= len(run) and set(stripped) == {run[0]}
+
+
 def _find_span(body: str, issue_number: int | None) -> _Span | None:
+    """Locate the Forge block, ignoring markers quoted inside Markdown code blocks.
+
+    Outside the block, fenced code blocks (backticks or tildes, any length >= 3) are tracked
+    and markers inside them are ignored. Between a begin marker and its end marker, fences are
+    not tracked: the block's own ```yaml fence is checked by :func:`_extract_yaml`.
+    """
     begins: list[tuple[int, str, int]] = []
     ends: list[tuple[int, str, int]] = []
+    fence: str | None = None
+    in_block = False
     for line in _lines_with_offsets(body):
-        stripped = line[1].strip()
-        if stripped == BEGIN_MARKER:
+        content = line[1]
+        if in_block:
+            if _is_marker(content, END_MARKER):
+                ends.append(line)
+                in_block = False
+            elif _is_marker(content, BEGIN_MARKER):
+                begins.append(line)
+            continue
+        if fence is not None:
+            if _fence_closes(content, fence):
+                fence = None
+            continue
+        if _is_marker(content, BEGIN_MARKER):
             begins.append(line)
-        elif stripped == END_MARKER:
+            in_block = True
+        elif _is_marker(content, END_MARKER):
             ends.append(line)
+        else:
+            fence = _fence_open(content)
     if not begins and not ends:
         return None
     fix_one = f"keep exactly one `{BEGIN_MARKER}` … `{END_MARKER}` block in the issue body"
@@ -213,7 +289,7 @@ def split_body(body: str, *, issue_number: int | None = None) -> tuple[str, str 
 
 def _extract_yaml(block_text: str, issue_number: int | None) -> str:
     """Return the YAML inside the single fenced block of ``block_text``."""
-    lines = block_text.splitlines()
+    lines = [line for _, line, _ in _lines_with_offsets(block_text)]
     fix = "put exactly one ```yaml … ``` block between the markers, and nothing else"
     opens = [i for i, line in enumerate(lines) if _FENCE_OPEN_RE.match(line.strip())]
     if not opens:
@@ -421,12 +497,26 @@ def upsert_block(body: str, meta: TaskMetadata, *, issue_number: int | None = No
 
     Text outside the markers is preserved byte for byte. A missing block is appended after a
     blank line. The line terminator of the inserted block follows the body (``\\r\\n`` if the
-    body uses it). Raises :class:`TaskBodyError` on unbalanced or repeated markers.
+    body uses it). An existing block whose YAML is invalid is replaced, but one that holds
+    anything besides whitespace and a single ```yaml fence is not: rather than destroy human
+    notes, :class:`TaskBodyError` is raised. It is also raised on unbalanced or repeated
+    markers.
     """
     newline = "\r\n" if "\r\n" in body else "\n"
     block = _render_block(meta, newline)
     span = _find_span(body, issue_number)
     if span is not None:
+        inner = body[span.inner_start : span.inner_end]
+        if inner.strip():
+            try:
+                _extract_yaml(inner, issue_number)
+            except TaskBodyError as exc:
+                raise TaskBodyError(
+                    f"refusing to overwrite the block: {exc.reason}",
+                    issue_number=issue_number,
+                    hint="move your notes outside the forge markers; only one ```yaml block "
+                    "may sit between them",
+                ) from exc
         return body[: span.start] + block + body[span.end :]
     if not body:
         return block + newline
@@ -460,11 +550,15 @@ class Status(StrEnum):
 
     @classmethod
     def from_labels(cls, labels: Iterable[str]) -> Status | None:
-        """Return the status of the first recognised ``status:*`` label, or ``None``."""
-        by_label = {s.label: s for s in cls}
+        """Return the status of the first recognised ``status:*`` label, or ``None``.
+
+        Label names are compared case-insensitively, as on GitHub.
+        """
+        by_label = {s.label.casefold(): s for s in cls}
         for name in labels:
-            if name in by_label:
-                return by_label[name]
+            status = by_label.get(name.casefold())
+            if status is not None:
+                return status
         return None
 
 
@@ -505,8 +599,16 @@ _MIRRORED: frozenset[str] = frozenset(
     for spec in LABELS
     if spec.name.startswith(managed_label_prefixes) or spec.name == FORGE_TASK_LABEL
 )
-_STATUS_NAMES: frozenset[str] = frozenset(s.label for s in Status)
-_META_NAMES: frozenset[str] = _MIRRORED - _STATUS_NAMES - {FORGE_TASK_LABEL}
+_STATUS_NAMES: frozenset[str] = frozenset(s.label.casefold() for s in Status)
+_META_NAMES: frozenset[str] = (
+    frozenset(n.casefold() for n in _MIRRORED) - _STATUS_NAMES - {FORGE_TASK_LABEL.casefold()}
+)
+
+
+def _has_label(labels: Iterable[str], name: str) -> bool:
+    """True when ``labels`` contains ``name``, compared case-insensitively as on GitHub."""
+    wanted = name.casefold()
+    return any(label.casefold() == wanted for label in labels)
 
 
 def metadata_labels(meta: TaskMetadata) -> set[str]:
@@ -541,15 +643,22 @@ def desired_labels(
     and ``forge:task`` are touched; ``blocked:conflict`` and user labels never are. The result
     leaves at most one status label. ``status=None`` removes every status label. With
     ``meta=None`` the size/tier/type mirrors and ``forge:task`` are left alone.
+
+    Names are compared case-insensitively, as on GitHub: ``add`` uses the catalogue spelling
+    and ``remove`` the label's current spelling (e.g. ``Status:Ready``).
     """
-    have = set(current)
-    want_status = {status.label} if status is not None else set()
-    add = want_status - have
-    remove = (have & _STATUS_NAMES) - want_status
+    have = list(dict.fromkeys(current))
+    have_folded = {name.casefold() for name in have}
+    want = {status.label} if status is not None else set()
+    managed = set(_STATUS_NAMES)
     if meta is not None:
-        want_meta = metadata_labels(meta)
-        add |= want_meta - have
-        remove |= (have & _META_NAMES) - want_meta
+        want |= metadata_labels(meta)
+        managed |= _META_NAMES
+    want_folded = {name.casefold() for name in want}
+    add = {name for name in want if name.casefold() not in have_folded}
+    remove = {
+        name for name in have if name.casefold() in managed and name.casefold() not in want_folded
+    }
     return LabelDiff(add=frozenset(add), remove=frozenset(remove))
 
 
@@ -604,14 +713,20 @@ class BranchState:
         return cls(True, tip, event.event, event.author, event.agent)
 
 
-def last_event_from_trailers(commits: Sequence[Mapping[str, str]]) -> ForgeEvent | None:
+def last_event_from_trailers(
+    commits: Sequence[Mapping[str, str]], *, task_id: str | None = None
+) -> ForgeEvent | None:
     """Return the newest Forge event among ``commits`` (trailer dicts, newest first).
 
     Trailer keys are matched case-insensitively. Commits without an event trailer are
-    skipped, and so are malformed commits carrying more than one event trailer.
+    skipped, and so are malformed commits carrying more than one event trailer. When
+    ``task_id`` is given, commits whose ``Forge-Task`` value is missing or differs from it
+    (case-sensitively) are skipped too.
     """
     for trailers in commits:
         lowered = {k.strip().lower(): v.strip() for k, v in trailers.items()}
+        if task_id is not None and lowered.get(TRAILER_TASK.lower()) != task_id:
+            continue
         found = [(ev, lowered[key]) for key, ev in _EVENT_TRAILERS.items() if key in lowered]
         if len(found) != 1:
             continue
@@ -654,7 +769,7 @@ def derive_status(
     """
     if issue.state == "closed":
         return Derived(None if issue.state_reason == "not_planned" else Status.DONE)
-    if Status.PROPOSED.label in issue.labels:
+    if _has_label(issue.labels, Status.PROPOSED.label):
         return Derived(Status.PROPOSED)
     if has_open_pr:
         return Derived(Status.IN_REVIEW)

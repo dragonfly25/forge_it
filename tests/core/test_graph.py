@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import itertools
 import random
+import time
 
 import pytest
 
@@ -256,3 +258,112 @@ def test_long_cycle_is_iterative() -> None:
     assert len(cycles) == 1
     assert cycles[0][0] == "T0"
     assert len(cycles[0]) == n
+
+
+# --------------------------------------------------------------------- bounded cycles
+
+
+def _complete(n: int, prefix: str = "T") -> dict[str, list[str]]:
+    ids = [f"{prefix}{i}" for i in range(1, n + 1)]
+    return {a: [b for b in ids if b != a] for a in ids}
+
+
+def _brute_force_cycles(deps: dict[str, list[str]]) -> list[list[str]]:
+    """All elementary cycles by permutation, canonical form (small graphs only)."""
+    ids = sorted(deps, key=natural_key)
+    found: list[list[str]] = []
+    for size in range(1, len(ids) + 1):
+        for combo in itertools.combinations(ids, size):
+            first, rest = combo[0], combo[1:]
+            for perm in itertools.permutations(rest):
+                cycle = [first, *perm]
+                if all(cycle[(i + 1) % size] in deps[cycle[i]] for i in range(size)):
+                    found.append(cycle)
+    found.sort(key=lambda c: [natural_key(n) for n in c])
+    return found
+
+
+@pytest.mark.parametrize("n", [12, 30])
+def test_complete_graph_is_fast(n: int) -> None:
+    g = TaskGraph(_complete(n))
+    start = time.perf_counter()
+    assert g.has_cycle()
+    cycles = g.cycles()
+    with pytest.raises(GraphCycleError) as info:
+        g.waves()
+    with pytest.raises(GraphCycleError):
+        g.wave_of()
+    assert time.perf_counter() - start < 2.0
+    assert len(cycles) == 20
+    assert len({tuple(c) for c in cycles}) == 20
+    for cycle in cycles:
+        assert cycle[0] == min(cycle, key=natural_key)
+        assert len(set(cycle)) == len(cycle)
+        for i, node in enumerate(cycle):
+            assert cycle[(i + 1) % len(cycle)] in g.depends_on(node)
+    assert cycles == sorted(cycles, key=lambda c: [natural_key(x) for x in c])
+    assert info.value.truncated
+    assert len(info.value.cycles) == 20
+
+
+def test_cycles_respects_limit_and_is_deterministic() -> None:
+    deps = _complete(6)
+    g = TaskGraph(deps)
+    assert len(g.cycles(limit=3)) == 3
+    assert g.cycles(limit=0) == []
+    assert g.cycles(limit=5) == TaskGraph(_shuffled(deps, 1)).cycles(limit=5)
+    assert ["T1", "T2"] in g.cycles(limit=1)  # shortest cycle through the smallest id
+
+
+def test_cycles_exhaustive_matches_brute_force() -> None:
+    deps = {"A": ["B", "C"], "B": ["C", "D"], "C": ["A", "D"], "D": ["A", "D"], "E": ["A"]}
+    assert TaskGraph(deps).cycles(limit=1000) == _brute_force_cycles(deps)
+    k5 = _complete(5)
+    assert TaskGraph(k5).cycles(limit=1000) == _brute_force_cycles(k5)
+
+
+def test_one_representative_per_dense_component() -> None:
+    deps = {**_complete(8, "A"), **_complete(8, "B"), "S": ["S"], "Z": []}
+    g = TaskGraph(deps)
+    cycles = g.cycles(limit=3)
+    assert cycles == [["A1", "A2"], ["B1", "B2"], ["S"]]
+    assert g.cycle_components() == [
+        [f"A{i}" for i in range(1, 9)],
+        [f"B{i}" for i in range(1, 9)],
+        ["S"],
+    ]
+
+
+def test_self_loops_inside_component_are_represented() -> None:
+    deps = {**_complete(6), "T3": [*_complete(6)["T3"], "T3"]}
+    cycles = TaskGraph(deps).cycles(limit=2)
+    assert cycles == [["T1", "T2"], ["T3"]]
+
+
+def test_cycle_components() -> None:
+    g = TaskGraph({"A": ["B"], "B": ["A"], "C": ["C"], "D": ["A"], "E": []})
+    assert g.cycle_components() == [["A", "B"], ["C"]]
+    assert TaskGraph(DIAMOND).cycle_components() == []
+
+
+def test_cycle_error_message_is_truncated() -> None:
+    deps = {**_complete(10, "A"), **_complete(10, "B")}
+    with pytest.raises(GraphCycleError) as info:
+        TaskGraph(deps).waves()
+    err = info.value
+    assert err.truncated
+    assert len(err.cycles) == 20
+    assert err.more_components  # components that may hold further cycles
+    message = str(err)
+    assert "A1 -> A2 -> A1" in message
+    assert "B1 -> B2 -> B1" in message
+    assert "and more cycles in components {" in message
+    assert "remove one depends_on edge" in message
+
+
+def test_cycle_error_not_truncated_when_exhaustive() -> None:
+    with pytest.raises(GraphCycleError) as info:
+        TaskGraph({"A": ["B"], "B": ["A"]}).waves()
+    assert not info.value.truncated
+    assert info.value.more_components == []
+    assert "more cycles" not in str(info.value)

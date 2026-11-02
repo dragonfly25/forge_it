@@ -14,8 +14,9 @@ from forge.cli import app
 from forge.commands import _context
 from forge.commands._output import GlobalOptions
 from forge.core.config import ForgeConfig
+from forge.core.errors import PreconditionError
 from forge.core.git import Git
-from forge.core.github import GitHubClient
+from forge.core.github import GitHubClient, GitHubError
 from forge.core.github_fake import FakeGitHub
 from forge.core.tasks import (
     TRAILER_AGENT,
@@ -178,3 +179,93 @@ def test_find_repo_root_from_subdirectory(git_world: GitWorld) -> None:
     sub.mkdir(parents=True)
     root = _context.find_repo_root(GlobalOptions(repo=sub))
     assert root.resolve() == Git(clone.cwd).root().resolve()
+
+
+class FailingGitHub(FakeGitHub):
+    """FakeGitHub whose label writes fail for the issues in ``failing``."""
+
+    def __init__(self) -> None:
+        super().__init__(repo="acme/shop")
+        self.failing: set[int] = set()
+
+    def add_labels(self, number: int, labels: Sequence[str]) -> None:
+        if number in self.failing:
+            raise GitHubError(f"HTTP 502 on issue {number}", status=502)
+        super().add_labels(number, labels)
+
+
+def test_refresh_partial_apply_failure(
+    git_world: GitWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FailingGitHub()
+    fake.create_label("forge:task", "5319e7")
+    for task_id in ("M1-T01", "M1-T02", "M1-T03"):
+        fake.create_issue(f"[{task_id}]", body(task_id), labels=["forge:task"])
+    fake.failing = {2}
+    clone = git_world.clone("alice")
+    (clone.cwd / ".forge").mkdir()
+    (clone.cwd / ".forge" / "config.yml").write_text(CONFIG)
+    monkeypatch.setattr(_context, "github_factory", lambda config: fake)
+
+    result = runner.invoke(app, ["--json", "--repo", str(clone.cwd), "refresh"])
+    assert result.exit_code == 1, result.output
+    env = json.loads(result.stdout)
+    assert env["ok"] is False and env["code"] == 1
+    (failure,) = env["data"]["warnings"]
+    assert failure.startswith("issue #2 (M1-T02): label update failed") and "re-run" in failure
+    assert env["data"]["counts"]["failed"] == 1
+    assert statuses(fake) == {1: ["status:ready"], 2: [], 3: ["status:ready"]}
+    infos = [m["text"] for m in env["messages"] if m["level"] == "info"]
+    assert infos == ["refresh: 2 tasks updated, 1 failed"]
+
+    fake.failing = set()
+    env = run_json(clone.cwd)
+    assert [c["issue"] for c in env["data"]["changes"]] == [2]
+    assert env["data"]["counts"]["failed"] == 0
+    assert run_json(clone.cwd)["data"]["changes"] == []
+
+
+def test_refresh_shallow_clone_exits_5(
+    git_world: GitWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed = Git(git_world.base / "seed")
+    git_world.commit_file(seed, "more.txt", "more\n", "feat: more history")
+    git_world.push(seed, "main")
+    path = git_world.base / "ci"
+    Git(git_world.base).run(
+        "clone", "--quiet", "--depth", "1", git_world.remote.as_uri(), str(path)
+    )
+    (path / ".forge").mkdir()
+    (path / ".forge" / "config.yml").write_text(CONFIG)
+    monkeypatch.setattr(_context, "github_factory", lambda config: FakeGitHub(repo="acme/shop"))
+
+    result = runner.invoke(app, ["--json", "--repo", str(path), "refresh"])
+    assert result.exit_code == 5, result.output
+    (message,) = json.loads(result.stdout)["messages"]
+    assert "shallow" in message["text"] and "fetch-depth: 0" in message["hint"]
+
+
+def test_github_client_is_built_lazily_once(
+    git_world: GitWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clone = git_world.clone("erin")
+    (clone.cwd / ".forge").mkdir()
+    (clone.cwd / ".forge" / "config.yml").write_text(CONFIG)
+    calls: list[str] = []
+
+    def broken(config: ForgeConfig) -> GitHubClient:
+        calls.append(config.github.repo)
+        raise PreconditionError("bad github.repo", hint="fix it")
+
+    monkeypatch.setattr(_context, "github_factory", broken)
+    ctx = _context.load_context(GlobalOptions(repo=clone.cwd))
+    assert calls == []  # git-only commands never trigger the factory
+    assert ctx.git.root().resolve() == clone.cwd.resolve()
+    with pytest.raises(PreconditionError):
+        _ = ctx.github
+    assert calls == ["acme/shop"]
+
+    fake = FakeGitHub(repo="acme/shop")
+    monkeypatch.setattr(_context, "github_factory", lambda config: fake)
+    ctx = _context.load_context(GlobalOptions(repo=clone.cwd))
+    assert ctx.github is fake and ctx.github is fake

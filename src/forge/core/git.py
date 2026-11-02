@@ -313,13 +313,30 @@ class Git:
 
     # ------------------------------------------------------------------ sync
 
-    def fetch(self, remote: str = "origin", prune: bool = True) -> None:
-        """Fetch from ``remote`` (pruning deleted branches by default)."""
+    def fetch(
+        self,
+        remote: str = "origin",
+        prune: bool = True,
+        refspecs: Sequence[str] | None = None,
+    ) -> None:
+        """Fetch from ``remote`` (pruning deleted branches by default).
+
+        Without ``refspecs`` git uses the remote's configured refspec, which on a
+        ``--single-branch`` clone covers one branch only. With ``refspecs`` exactly those are
+        fetched (for example ``+refs/heads/task/*:refs/remotes/origin/task/*``); ``prune``
+        then only removes stale refs under their destinations.
+        """
         args = ["fetch", "--quiet"]
         if prune:
             args.append("--prune")
         args.append(remote)
+        if refspecs:
+            args += ["--", *refspecs]
         self.run(*args)
+
+    def is_shallow(self) -> bool:
+        """Return True when the repository is a shallow clone (missing older history)."""
+        return self._out("rev-parse", "--is-shallow-repository") == "true"
 
     # ------------------------------------------------------------------ history and diffs
 
@@ -335,10 +352,17 @@ class Git:
         """Return paths changed on ``head`` since its merge base with ``base`` (``base...head``)."""
         return _split_z(self.run("diff", "--name-only", "-z", f"{base}...{head}", "--").stdout)
 
-    def commits(self, range_: str) -> list[CommitInfo]:
-        """Return commits in ``range_`` (any ``git log`` revision range), newest first."""
+    def commits(self, range_: str, *, first_parent: bool = False) -> list[CommitInfo]:
+        """Return commits in ``range_`` (any ``git log`` revision range), newest first.
+
+        With ``first_parent`` only the first parent of each merge is followed
+        (``--first-parent``), so commits brought in by merges are skipped.
+        """
         fmt = "%x00".join(["%H", "%an", "%ae", "%cI", "%s", "%(trailers:only,unfold)"])
-        out = self.run("log", f"--format={fmt}%x1e", range_, "--").stdout
+        args = ["log", f"--format={fmt}%x1e"]
+        if first_parent:
+            args.append("--first-parent")
+        out = self.run(*args, range_, "--").stdout
         result: list[CommitInfo] = []
         for record in out.split(_RECORD_SEP):
             record = record.lstrip("\n")
