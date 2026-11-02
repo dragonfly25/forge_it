@@ -19,7 +19,7 @@ This document is the source of truth for building Forge. When something here is 
 ### Non-goals (v0)
 - No hosted service, database or web dashboard.
 - No direct LLM API calls from the CLI. The CLI is deterministic; reasoning happens in the user's agent.
-- No autonomous orchestrator running headless agents (planned for v2, see §17).
+- No autonomous orchestrator running headless agents (planned for v2, see §19).
 - No support for hosts other than GitHub.
 
 ---
@@ -76,13 +76,14 @@ GitHub: issues, milestones, labels, branches, PRs, Actions
 
 ## 5. Where things live
 
-### 5.1 Framework repository (`<ORG>/forge`)
+### 5.1 Framework repository (`dragonfly25/forge_it`)
 
 ```
-forge/
+forge_it/
 ├─ pyproject.toml
 ├─ README.md
 ├─ CLAUDE.md                       # rules for building forge itself
+├─ .claude/agents/                 # subagents used to build forge itself (ADR 0002)
 ├─ install.sh                      # bootstrap installer (macOS/Linux)
 ├─ docs/
 │  ├─ spec.md                      # this file
@@ -94,9 +95,10 @@ forge/
 ├─ src/forge/
 │  ├─ __init__.py, __main__.py, cli.py
 │  ├─ commands/                    # one module per CLI command group
-│  ├─ core/                        # config, team, zones, profile, git, github, tasks,
-│  │                               # graph, lease, claim, sync, resolvers, plan, spec, report
+│  ├─ core/                        # config, team, zones, profile, models, output, git, github,
+│  │                               # tasks, graph, lease, claim, sync, resolvers, plan, spec, report
 │  ├─ adapters/                    # claude.py, generic.py, codex.py
+│  ├─ presets/                     # tier → model presets per tool (§6.5)
 │  └─ templates/project/           # files copied by `forge init` (package data)
 ├─ tests/
 └─ CHANGELOG.md
@@ -656,10 +658,10 @@ Prerequisites (documented in README): git ≥ 2.38, GitHub CLI `gh` authenticate
 `install.sh` (bootstrap):
 1. Checks git and gh; on macOS with Homebrew offers `brew install gh`; otherwise prints instructions.
 2. Installs `uv` with the official installer if missing.
-3. `uv tool install --python 3.12 "git+https://github.com/<ORG>/forge@<version>"` (uv provisions Python itself).
+3. `uv tool install --python 3.12 "git+https://github.com/dragonfly25/forge_it@<version>"` (uv provisions Python itself).
 4. Prints next steps: `gh auth login`, `cd <project> && forge setup`.
 
-Alternative: `pipx install "git+https://github.com/<ORG>/forge@<version>"`.
+Alternative: `pipx install "git+https://github.com/dragonfly25/forge_it@<version>"`.
 
 Project adoption: the lead runs `forge init` once, edits `config.yml`, `team.yml`, `zones.yml`, commits. Each developer: install, clone, `forge setup`.
 
@@ -689,4 +691,4 @@ Language: English everywhere.
 - Exact current formats for Claude Code custom commands/skills and for Codex user-level prompts/skills (§13).
 - Which subagent fields Codex currently accepts and where its subagent files live (§12.1, §13). Claude Code is confirmed: `model` and `effort` frontmatter fields (§13).
 - Whether the target repositories' GitHub plan offers merge queue; otherwise require "branch up to date before merge".
-- GitHub org and repository name for the framework (`<ORG>/forge` placeholder until provided).
+- ~~GitHub org and repository name for the framework~~ RESOLVED: `dragonfly25/forge_it`, distribution `forge-it` (ADR 0001).

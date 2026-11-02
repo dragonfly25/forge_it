@@ -13,7 +13,7 @@ Work **one phase at a time**, in order. Do not start a phase before the previous
 - Python ≥ 3.11, packaged with `pyproject.toml` (hatchling), src layout: `src/forge/`.
 - Dependencies (keep minimal): `typer`, `pyyaml`, `rich`, `packaging`. Ask before adding others.
 - Dev tooling: `uv`, `pytest`, `ruff` (lint + format), `mypy` (strict on `src/forge/core`).
-- Entry point: `forge = "forge.cli:app"`. Distribution name `forge-cli`, import package `forge`.
+- Entry point: `forge = "forge.cli:app"`. Distribution name `forge-it`, import package `forge`.
 
 ## Commands
 ```bash
@@ -47,8 +47,8 @@ uv run mypy src/forge/core
 - For third-party formats that may have changed (Claude Code custom commands/skills, Codex prompts/skills, GitHub APIs), check the current official documentation before implementing and record what you found in an ADR.
 
 ## Placeholders
-- The framework repository is `<ORG>/forge` until the user provides the real one. When they do: `git remote add origin …` and replace the placeholder everywhere.
-- Do not push anywhere until a remote is configured by the user.
+- The framework repository is `dragonfly25/forge_it` (remote `origin` is configured). Install URL: `git+https://github.com/dragonfly25/forge_it`. See ADR 0001.
+- Push only phase branches to `origin`; never push to `main` directly.
 
 ## Don'ts
 - Don't add a server, database or web UI.

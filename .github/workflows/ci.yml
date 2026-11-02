@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    env:
+      # Overrides the local .python-version pin for every uv command (sync and run),
+      # so `uv run` does not recreate the venv with 3.12 on the 3.11 job.
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Check Python version
+        run: uv run python -c "import sys; v = '%d.%d' % sys.version_info[:2]; assert v == '${{ matrix.python-version }}', v; print('Python', v)"
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy src/forge/core
+      - run: uv run pytest -q
