@@ -8,7 +8,6 @@ from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import pytest
-from test_claim import Clock, World, claim_of, run  # shared git/GitHub world helpers
 
 from forge.core.errors import PreconditionError
 from forge.core.github import Comment, GitHubError
@@ -28,6 +27,7 @@ from forge.core.lease import (
     upsert_lease,
 )
 from forge.core.lease import heartbeat as run_heartbeat
+from support.scenarios import Clock, World, claim_of, run
 
 if TYPE_CHECKING:
     from conftest import GitWorld
