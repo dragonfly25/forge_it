@@ -5,8 +5,9 @@ forced ``C`` locale so that output can be parsed on any machine, and with termin
 optional locks disabled so that nothing blocks or interferes with the user's own git usage.
 
 A non-zero exit raises :class:`GitError`, except for operations whose failure is an expected
-outcome: pushes rejected by a lease (:class:`PushResult`), rebases that stop on conflicts
-(:class:`RebaseResult`) and ``rev_parse`` of a missing ref (``None``).
+outcome: pushes that lose a compare-and-swap or fast-forward check (:class:`PushResult`),
+rebases that stop on conflicts (:class:`RebaseResult`), ``rev_parse`` of a missing ref
+(``None``) and ``is_ancestor`` answering no (``False``).
 """
 
 from __future__ import annotations
@@ -30,18 +31,6 @@ GIT_ENV: Mapping[str, str] = {
 """Environment variables merged over ``os.environ`` for every git call."""
 
 _VERSION_RE = re.compile(r"git version (\d+)\.(\d+)(?:\.(\d+))?")
-
-# Reasons a server gives when a ref update loses a compare-and-swap race. They are reported
-# as "[remote rejected]" rather than "[rejected]" when the client-side lease check passed but
-# another push updated the ref in the meantime.
-_LOST_RACE_MARKERS = (
-    "failed to update ref",
-    "failed to lock",
-    "cannot lock ref",
-    "reference already exists",
-    "but expected",
-    "stale info",
-)
 
 _FIELD_SEP = "\x00"
 _NON_INTERACTIVE: Mapping[str, str] = {"GIT_EDITOR": "true", "GIT_SEQUENCE_EDITOR": "true"}
@@ -68,6 +57,8 @@ class Lease:
     """Expected state of a remote ref for ``--force-with-lease``.
 
     ``expected=None`` means the ref must not exist yet; a sha means the ref must point at it.
+    ``ref`` must be the full destination ref of the push it is used with (``refs/heads/...``);
+    :meth:`Git.push` rejects a lease for any other ref.
     """
 
     ref: str
@@ -80,11 +71,18 @@ class Lease:
 
 @dataclass(frozen=True)
 class PushResult:
-    """Outcome of a push. ``rejected`` is True when a lease or fast-forward check failed."""
+    """Outcome of a push.
+
+    ``rejected`` is True when the push lost a compare-and-swap or fast-forward check: a local
+    ``[rejected]`` (stale lease, non-fast-forward, fetch first) or a ``[remote rejected]``
+    verified to be a lost race. ``reason`` is a short human-readable explanation (empty on a
+    clean success).
+    """
 
     ok: bool
     rejected: bool
     stderr: str
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -237,11 +235,35 @@ class Git:
     # ------------------------------------------------------------------ refs
 
     def rev_parse(self, ref: str) -> str | None:
-        """Return the commit sha ``ref`` points to, or None when it does not exist."""
-        proc = self.run("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", check=False)
-        if proc.returncode != 0:
+        """Return the commit sha ``ref`` points to, or None when it does not name a commit.
+
+        Any other failure (for example ``cwd`` is not a git repository) raises
+        :class:`GitError`.
+        """
+        args = ("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+        proc = self.run(*args, check=False)
+        if proc.returncode == 0:
+            return proc.stdout.strip()
+        if proc.returncode == 1:
             return None
-        return proc.stdout.strip()
+        raise GitError(args, proc.returncode, proc.stderr)
+
+    def is_ancestor(self, a: str, b: str) -> bool:
+        """Return True when commit ``a`` is an ancestor of (or equal to) commit ``b``.
+
+        Raises :class:`GitError` when either commit is unknown or git fails otherwise.
+        """
+        args = ("merge-base", "--is-ancestor", a, b)
+        proc = self.run(*args, check=False)
+        if proc.returncode == 0:
+            return True
+        if proc.returncode == 1:
+            return False
+        raise GitError(args, proc.returncode, proc.stderr)
+
+    def _has_object(self, sha: str) -> bool:
+        """Return True when the object ``sha`` exists in the local object store."""
+        return self.run("cat-file", "-e", sha, check=False).returncode == 0
 
     def ls_remote(self, remote: str = "origin", pattern: str | None = None) -> dict[str, str]:
         """Return ``{ref: sha}`` for refs on ``remote``, optionally filtered by ``pattern``."""
@@ -386,15 +408,29 @@ class Git:
         """Push ``src`` (a sha or ref, empty to delete) to ``dst_ref`` on ``remote``.
 
         With a ``lease`` the push is a compare-and-swap (``--force-with-lease``); without one
-        it is a plain push. A push rejected by the lease, by a non-fast-forward check or by a
-        concurrent update returns ``PushResult(ok=False, rejected=True)``. Any other failure
-        raises :class:`GitError`.
+        it is a plain push. ``lease.ref`` must equal ``dst_ref`` (``ValueError`` otherwise).
+
+        Outcomes:
+
+        - success: ``PushResult(ok=True, rejected=False)``;
+        - local ``[rejected]`` (stale lease, non-fast-forward, fetch first, already exists):
+          ``PushResult(ok=False, rejected=True)``;
+        - ``[remote rejected]``: the server's wording does not distinguish a lost race from a
+          permanent error, so the remote ref is queried. It is a lost race (``rejected=True``)
+          only when the ref moved away from the expected value and is not the value we pushed.
+          When it already holds the value we pushed, the push landed and ``ok=True``.
+          Otherwise (hook, protected branch, ref name clash, ...) :class:`GitError` is raised.
+
+        Any other failure raises :class:`GitError`.
         """
+        if lease is not None and lease.ref != dst_ref:
+            raise ValueError(f"lease ref {lease.ref!r} does not match push destination {dst_ref!r}")
         args = ["push", "--porcelain"]
         if lease is not None:
             args.append(lease.option())
         args += [remote, f"{src}:{dst_ref}"]
         proc = self.run(*args, check=False)
+        output = proc.stderr + proc.stdout
         if proc.returncode == 0:
             return PushResult(ok=True, rejected=False, stderr=proc.stderr)
         for line in proc.stdout.splitlines():
@@ -402,12 +438,65 @@ class Git:
             if len(parts) < 3 or parts[0] != "!":
                 continue
             summary = parts[2]
-            if summary.startswith("[rejected]") or (
-                summary.startswith("[remote rejected]")
-                and any(marker in summary for marker in _LOST_RACE_MARKERS)
-            ):
-                return PushResult(ok=False, rejected=True, stderr=proc.stderr + proc.stdout)
-        raise GitError(args, proc.returncode, proc.stderr + proc.stdout)
+            if summary.startswith("[rejected]"):
+                return PushResult(ok=False, rejected=True, stderr=output, reason=summary)
+            if summary.startswith("[remote rejected]"):
+                full_ref = parts[1].rpartition(":")[2] or dst_ref
+                return self._verify_remote_rejection(
+                    args, proc.returncode, output, summary, src, full_ref, lease, remote
+                )
+        raise GitError(args, proc.returncode, output)
+
+    def _verify_remote_rejection(
+        self,
+        args: Sequence[str],
+        returncode: int,
+        output: str,
+        summary: str,
+        src: str,
+        ref: str,
+        lease: Lease | None,
+        remote: str,
+    ) -> PushResult:
+        """Classify a ``[remote rejected]`` push by looking at the remote ref's current value."""
+        try:
+            target = self._resolve_object(src) if src else None
+            current = self.ls_remote(remote, ref).get(ref)
+        except GitError as exc:
+            raise GitError(
+                args, returncode, f"{output}\nverification of the rejection failed: {exc.stderr}"
+            ) from exc
+        shown = current or "absent"
+        if current == target:
+            return PushResult(
+                ok=True,
+                rejected=False,
+                stderr=output,
+                reason=f"{summary}; remote ref already at the pushed value ({shown})",
+            )
+        if lease is not None:
+            lost = current != lease.expected
+        else:
+            # A plain push has no explicit expectation: it lost a race when the remote ref now
+            # holds a commit the pushed one does not descend from (a retry would be rejected as
+            # non-fast-forward). Deletions without a lease cannot lose a race.
+            lost = (
+                current is not None
+                and target is not None
+                and not (self._has_object(current) and self.is_ancestor(current, target))
+            )
+        if lost:
+            return PushResult(
+                ok=False,
+                rejected=True,
+                stderr=output,
+                reason=f"{summary}; remote ref changed concurrently (now {shown})",
+            )
+        raise GitError(args, returncode, output)
+
+    def _resolve_object(self, rev: str) -> str:
+        """Return the object id ``rev`` names (a tag object stays a tag object)."""
+        return self._out("rev-parse", "--verify", "--end-of-options", rev)
 
     def delete_remote_branch(
         self, branch: str, expected_sha: str, remote: str = "origin"

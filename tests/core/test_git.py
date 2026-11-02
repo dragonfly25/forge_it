@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import stat
+import subprocess
 import threading
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -59,6 +62,33 @@ def test_rev_parse(git_world: GitWorld) -> None:
     assert alice.rev_parse("origin/main") == git_world.initial_sha
     assert alice.rev_parse("refs/heads/nope") is None
     assert alice.rev_parse("0" * 40) is None
+    assert alice.rev_parse("HEAD^{tree}") is None  # exists, but is not a commit
+
+
+def test_rev_parse_outside_a_repository_raises(tmp_path: Path) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    with pytest.raises(GitError) as excinfo:
+        Git(plain).rev_parse("HEAD")
+    assert excinfo.value.returncode == 128
+    assert "not a git repository" in excinfo.value.stderr
+
+
+def test_is_ancestor(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    child = git_world.commit_file(alice, "a.txt", "a\n", "feat: a")
+    base = git_world.initial_sha
+    assert alice.is_ancestor(base, child)
+    assert alice.is_ancestor(child, child)
+    assert not alice.is_ancestor(child, base)
+    alice.checkout("side", create_from=base)
+    side = git_world.commit_file(alice, "b.txt", "b\n", "feat: b")
+    assert not alice.is_ancestor(side, child)
+    assert not alice.is_ancestor(child, side)
+    with pytest.raises(GitError):
+        alice.is_ancestor("1" * 40, child)
+    with pytest.raises(GitError):
+        alice.is_ancestor("refs/heads/nope", child)
 
 
 def test_is_dirty(git_world: GitWorld) -> None:
@@ -202,6 +232,208 @@ def test_delete_remote_branch_with_lease(git_world: GitWorld) -> None:
 
     assert alice.delete_remote_branch("task/3", sha).ok
     assert alice.remote_branch_sha("task/3") is None
+
+
+def test_lease_ref_must_match_destination(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    sha = _claim_commit(alice, "alice")
+    with pytest.raises(ValueError, match="does not match"):
+        alice.push(sha, "refs/heads/task/1", lease=Lease("refs/heads/task/2", None))
+    assert git_world.remote_git.rev_parse("refs/heads/task/1") is None
+    assert git_world.remote_git.rev_parse("refs/heads/task/2") is None
+
+
+# ---------------------------------------------------------------- server-side outcomes
+#
+# A ``pre-receive`` hook on the bare remote runs after the client-side lease check and before
+# the server locks the ref, so it can deterministically reproduce "another push won in
+# between" (it moves the ref itself) as well as permanent server-side rejections.
+
+
+def _install_pre_receive(git_world: GitWorld, body: str) -> None:
+    hook = git_world.remote / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\n" + body)
+    hook.chmod(hook.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def _hook_moves_ref(git_world: GitWorld, ref: str, new_value: str | None) -> None:
+    """Install a hook that sets ``ref`` to ``new_value`` (None deletes it) while a push runs."""
+    command = f"git update-ref {ref} {new_value}" if new_value else f"git update-ref -d {ref}"
+    _install_pre_receive(
+        git_world,
+        # Ref updates are forbidden inside the quarantine environment of a pre-receive hook.
+        "unset GIT_QUARANTINE_PATH GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES\n"
+        "while read old new ref; do\n"
+        f'  if [ "$ref" = "{ref}" ]; then {command} || exit 3; fi\n'
+        "done\n"
+        "exit 0\n",
+    )
+
+
+def _remote_commit(git_world: GitWorld, user: str, message: str) -> str:
+    """Create a commit that exists only on the remote (under ``refs/heads/<user>-scratch``)."""
+    other = git_world.clone(user)
+    sha = git_world.commit_file(other, f"{user}.txt", f"{user}\n", message)
+    assert other.push(sha, f"refs/heads/{user}-scratch").ok
+    return sha
+
+
+def test_server_side_create_race_is_rejected(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    ref = "refs/heads/task/42"
+    winner = _remote_commit(git_world, "bob", "forge: claim")
+    _hook_moves_ref(git_world, ref, winner)
+
+    result = alice.push(_claim_commit(alice, "alice"), ref, lease=Lease(ref, None))
+    assert not result.ok and result.rejected
+    assert "[remote rejected]" in result.reason
+    assert winner in result.reason
+    assert git_world.remote_git.rev_parse(ref) == winner
+
+
+def test_server_side_update_race_is_rejected(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    ref = "refs/heads/task/43"
+    first = _claim_commit(alice, "alice")
+    assert alice.push(first, ref, lease=Lease(ref, None)).ok
+    winner = _remote_commit(git_world, "bob", "forge: claim")
+    _hook_moves_ref(git_world, ref, winner)
+
+    resumed = alice.commit_tree(alice.tree_of(first), [first], "forge: claim")
+    result = alice.push(resumed, ref, lease=Lease(ref, first))
+    assert not result.ok and result.rejected
+    assert "[remote rejected]" in result.reason
+    assert git_world.remote_git.rev_parse(ref) == winner
+
+
+def test_server_side_race_on_plain_push_is_rejected(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    winner = _remote_commit(git_world, "bob", "feat: bob")
+    _hook_moves_ref(git_world, "refs/heads/main", winner)
+    git_world.commit_file(alice, "a.txt", "a\n", "feat: a")
+
+    result = alice.push("HEAD", "refs/heads/main")
+    assert not result.ok and result.rejected
+    assert "[remote rejected]" in result.reason
+    assert git_world.remote_git.rev_parse("refs/heads/main") == winner
+
+
+@pytest.mark.parametrize("use_lease", [True, False])
+def test_directory_file_ref_clash_raises(git_world: GitWorld, use_lease: bool) -> None:
+    alice = git_world.clone("alice")
+    # A stray branch named `task` makes `refs/heads/task/42` impossible to create.
+    git_world.remote_git.update_ref("refs/heads/task", git_world.initial_sha)
+    ref = "refs/heads/task/42"
+    lease = Lease(ref, None) if use_lease else None
+
+    with pytest.raises(GitError) as excinfo:
+        alice.push(_claim_commit(alice, "alice"), ref, lease=lease)
+    assert "[remote rejected]" in excinfo.value.stderr
+    assert git_world.remote_git.rev_parse(ref) is None
+    assert git_world.remote_git.rev_parse("refs/heads/task") == git_world.initial_sha
+
+
+def test_policy_hook_rejection_raises(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    _install_pre_receive(git_world, "echo 'policy: task branches are frozen' >&2\nexit 1\n")
+    ref = "refs/heads/task/44"
+
+    with pytest.raises(GitError) as excinfo:
+        alice.push(_claim_commit(alice, "alice"), ref, lease=Lease(ref, None))
+    assert "policy: task branches are frozen" in excinfo.value.stderr
+    assert "pre-receive hook declined" in excinfo.value.stderr
+    assert git_world.remote_git.rev_parse(ref) is None
+
+
+def test_policy_hook_rejection_of_update_raises(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    ref = "refs/heads/task/45"
+    first = _claim_commit(alice, "alice")
+    assert alice.push(first, ref, lease=Lease(ref, None)).ok
+    _install_pre_receive(git_world, "echo 'policy: no' >&2\nexit 1\n")
+
+    resumed = alice.commit_tree(alice.tree_of(first), [first], "forge: claim")
+    with pytest.raises(GitError):
+        alice.push(resumed, ref, lease=Lease(ref, first))
+    with pytest.raises(GitError):
+        alice.delete_remote_branch("task/45", first)
+    assert git_world.remote_git.rev_parse(ref) == first
+
+
+def test_delete_with_lease_server_side_race_is_rejected(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    ref = "refs/heads/task/46"
+    mine = _claim_commit(alice, "alice")
+    assert alice.push(mine, ref, lease=Lease(ref, None)).ok
+    winner = _remote_commit(git_world, "bob", "forge: claim")
+    _hook_moves_ref(git_world, ref, winner)
+
+    result = alice.delete_remote_branch("task/46", mine)
+    assert not result.ok and result.rejected
+    assert "[remote rejected]" in result.reason
+    assert git_world.remote_git.rev_parse(ref) == winner
+
+
+def test_delete_with_lease_already_gone_is_ok(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    ref = "refs/heads/task/47"
+    mine = _claim_commit(alice, "alice")
+    assert alice.push(mine, ref, lease=Lease(ref, None)).ok
+    _hook_moves_ref(git_world, ref, None)
+
+    # The server reports an error, but the ref is in the state the delete wanted.
+    result = alice.delete_remote_branch("task/47", mine)
+    assert result.ok and not result.rejected
+    assert "[remote rejected]" in result.reason
+    assert git_world.remote_git.rev_parse(ref) is None
+    # A re-run leaves the ref absent; the stale lease is reported as a local rejection.
+    _install_pre_receive(git_world, "exit 0\n")
+    rerun = alice.delete_remote_branch("task/47", mine)
+    assert rerun.rejected and rerun.reason.startswith("[rejected]")
+    assert git_world.remote_git.rev_parse(ref) is None
+
+
+class _ScriptedPush(Git):
+    """A :class:`Git` whose ``push`` subprocess returns a scripted porcelain rejection."""
+
+    def __init__(self, cwd: Path, summary: str):
+        super().__init__(cwd)
+        self.summary = summary
+
+    def run(
+        self,
+        *args: str,
+        check: bool = True,
+        input: str | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        if args[:1] != ("push",):
+            return super().run(*args, check=check, input=input, env=env)
+        refspec = args[-1]
+        stdout = f"To origin\n!\t{refspec}\t{self.summary}\nDone\n"
+        return subprocess.CompletedProcess(["git", *args], 1, stdout, "error: failed to push\n")
+
+
+def test_unknown_remote_wording_is_classified_by_remote_state(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    ref = "refs/heads/task/48"
+    mine = _claim_commit(alice, "alice")
+    scripted = _ScriptedPush(alice.cwd, "[remote rejected] (incorrect old value provided)")
+
+    # Ref unchanged on the remote: not a race, so the unknown wording raises.
+    with pytest.raises(GitError):
+        scripted.push(mine, ref, lease=Lease(ref, None))
+
+    # Somebody else created the ref: the same wording is a lost race.
+    winner = _remote_commit(git_world, "bob", "forge: claim")
+    git_world.remote_git.update_ref(ref, winner)
+    result = scripted.push(mine, ref, lease=Lease(ref, None))
+    assert result.rejected and not result.ok
+
+    # The ref already holds the value we pushed: the push landed.
+    git_world.remote_git.update_ref(ref, winner)
+    landed = scripted.push(winner, ref, lease=Lease(ref, None))
+    assert landed.ok and not landed.rejected
 
 
 def test_push_unknown_remote_raises(git_world: GitWorld) -> None:
