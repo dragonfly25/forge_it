@@ -39,13 +39,13 @@ Progress notes: ADR 0008 (task model, labels, derived status, branch event trail
 
 **Done when:** round-trip tests on issue bodies; cycle detection and wave tests; `forge refresh` against FakeGitHub flips blocked → ready when deps close.
 
-## [ ] Phase 3 — Claim and lease
-- [ ] `core/claim.py`: candidate selection and ordering (§8.1), claim commit with trailers, CAS push (new and resume), post-claim zone verification and rollback, tier filtering by profile.
-- [ ] `core/lease.py`: last-activity computation, stale detection, lease comment upsert.
-- [ ] Commands: `forge next`, `forge task show`, `forge heartbeat`, `forge release-claim`, `forge reclaim`.
-- [ ] Worktree creation and `.forge/local/current.json`.
+## [x] Phase 3 — Claim and lease
+- [x] `core/claim.py`: candidate selection and ordering (§8.1), claim commit with trailers, CAS push (new and resume), post-claim zone verification and rollback, tier filtering by profile.
+- [x] `core/lease.py`: last-activity computation, stale detection, lease comment upsert.
+- [x] Commands: `forge next`, `forge task show`, `forge heartbeat`, `forge release-claim`, `forge reclaim`.
+- [x] Worktree creation and `.forge/local/current.json`.
 
-Progress notes: ADR 0009 (live claim, lease comment format, safe post-claim verification, idempotent own claim, hooks, exit codes).
+Progress notes: ADR 0009 (live claim, lease comment format, safe post-claim verification, idempotent own claim, same-identity runs, hooks, exit codes). Extra core modules: `core/workspace.py` (worktree, `current.json`), `core/context.py` (task context), `core/pending.py` (pending-claim records, task lock, machine id).
 
 **Done when:** tests prove (a) two users racing for the same task → exactly one wins, the other gets the next candidate; (b) two users claiming different tasks with overlapping zones → exactly one keeps its claim; (c) stale claim can be reclaimed, fresh one cannot; (d) handoff tasks are preferred; (e) `--json` output matches the envelope.
 
