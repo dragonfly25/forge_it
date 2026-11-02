@@ -10,6 +10,7 @@ from pathlib import Path
 from forge.core.context import (
     HANDOFF_MARKER,
     build_context,
+    defined_acceptance_criteria,
     extract_acceptance_criteria,
     find_relevant_adrs,
     latest_handoff,
@@ -147,6 +148,20 @@ def test_extract_missing_and_inline_mentions_and_order() -> None:
     assert extract_acceptance_criteria(SPEC, ["AC-9", "AC-99"]) == {}
     assert extract_acceptance_criteria("see AC-1 for details\n", ["AC-1"]) == {}
     assert list(extract_acceptance_criteria(SPEC, iter(["AC-4", "AC-1"]))) == ["AC-4", "AC-1"]
+
+
+def test_defined_acceptance_criteria_lists_definitions_once_in_order() -> None:
+    assert defined_acceptance_criteria(SPEC) == [
+        "AC-1",
+        "AC-2",
+        "AC-10",
+        "AC-3",
+        "AC-4",
+        "AC-5",
+        "AC-6",
+    ]
+    assert defined_acceptance_criteria("- AC-2: a\n- AC-2: again\nsee AC-7 inline\n") == ["AC-2"]
+    assert defined_acceptance_criteria("") == []
 
 
 # -- handoff ---------------------------------------------------------------------------------

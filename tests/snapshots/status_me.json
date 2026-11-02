@@ -1,0 +1,173 @@
+{
+  "generated_at": "2026-11-02T09:00:00Z",
+  "scope": {
+    "me_only": true,
+    "milestone": null
+  },
+  "sections": [
+    "me",
+    "queue"
+  ],
+  "me": {
+    "login": "alice",
+    "login_source": "profile",
+    "agent": "claude",
+    "current": {
+      "issue": 3,
+      "id": "M1-T03",
+      "title": "[M1-T03] task",
+      "milestone": "M1",
+      "status": "in-progress",
+      "zones": [
+        "api"
+      ],
+      "url": "https://github.com/acme/shop/issues/3",
+      "source": "branch",
+      "branch": "task/3",
+      "worktree": "<tmp>/alice",
+      "claim": {
+        "owner": "alice",
+        "agent": "claude",
+        "claim": "<sha:1>",
+        "claimed_at": "2026-11-02T04:00:00Z",
+        "last_activity": "2026-11-02T08:30:00Z",
+        "stale": false,
+        "stale_at": "2026-11-03T08:30:00Z"
+      },
+      "sync": {
+        "ref": "task/3",
+        "behind": 3,
+        "unpushed": 1,
+        "pending": true
+      },
+      "drift": {
+        "total": 2,
+        "commits": [
+          {
+            "sha": "<sha:2>",
+            "date": "2026-11-02T07:00:00Z",
+            "author": "lead",
+            "subject": "feat: v2 users",
+            "zones": [
+              "api"
+            ],
+            "files": [
+              "src/api/v2/users.py"
+            ]
+          },
+          {
+            "sha": "<sha:3>",
+            "date": "2026-11-02T05:00:00Z",
+            "author": "lead",
+            "subject": "feat: api routes",
+            "zones": [
+              "api"
+            ],
+            "files": [
+              "src/api/routes.py"
+            ]
+          }
+        ]
+      },
+      "pull": null,
+      "ci": null
+    },
+    "others": [
+      {
+        "issue": 6,
+        "id": "M1-T06",
+        "title": "[M1-T06] task",
+        "milestone": "M1",
+        "status": "in-review",
+        "zones": [
+          "web"
+        ],
+        "url": "https://github.com/acme/shop/issues/6",
+        "claim": {
+          "owner": "alice",
+          "agent": "claude",
+          "claim": "<sha:4>",
+          "claimed_at": "2026-11-01T13:00:00Z",
+          "last_activity": "2026-11-01T14:00:00Z",
+          "stale": false,
+          "stale_at": "2026-11-02T14:00:00Z"
+        },
+        "pull": {
+          "number": 16,
+          "url": "https://github.com/acme/shop/pull/16",
+          "author": "alice",
+          "draft": false,
+          "head_sha": "<sha:5>"
+        },
+        "ci": {
+          "sha": "<sha:5>",
+          "state": "failure",
+          "total": 3,
+          "failing": [
+            "lint",
+            "test"
+          ],
+          "pending": []
+        }
+      }
+    ]
+  },
+  "team": null,
+  "queue": {
+    "ready": 5,
+    "agent": "claude",
+    "next": [
+      {
+        "issue": 7,
+        "id": "M1-T07",
+        "title": "[M1-T07] task",
+        "status": "handoff",
+        "milestone": "M1",
+        "wave": 0,
+        "size": "S",
+        "tier": "standard",
+        "zones": [
+          "docs"
+        ],
+        "resume": true,
+        "reclaim": false
+      },
+      {
+        "issue": 9,
+        "id": "M1-T09",
+        "title": "[M1-T09] task",
+        "status": "ready",
+        "milestone": "M1",
+        "wave": 0,
+        "size": "S",
+        "tier": "standard",
+        "zones": [
+          "db"
+        ],
+        "resume": false,
+        "reclaim": false
+      },
+      {
+        "issue": 10,
+        "id": "M1-T10",
+        "title": "[M1-T10] task",
+        "status": "ready",
+        "milestone": "M1",
+        "wave": 0,
+        "size": "M",
+        "tier": "standard",
+        "zones": [
+          "docs"
+        ],
+        "resume": false,
+        "reclaim": false
+      }
+    ]
+  },
+  "blocked": null,
+  "milestone": null,
+  "health": null,
+  "warnings": [
+    "issue #15: labelled forge:task but has no Forge block (fix: add the block or remove the label); issue skipped"
+  ]
+}
