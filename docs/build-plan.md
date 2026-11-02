@@ -30,10 +30,12 @@ Progress notes: shared `core/errors.py`, `core/tiers.py`, `core/validate.py`, `c
 
 **Done when:** loaders reject invalid files with precise messages (tests); model resolution precedence tested (task tier, min_tier_for, raise-only overrides, unsupported parameters); constraint violations detected; zone overlap cases covered; Git wrapper tested on real temp repos; FakeGitHub supports issues, labels, milestones, comments, assignees, PRs.
 
-## [ ] Phase 2 — Task model
+## [x] Phase 2 — Task model
 - [x] `core/tasks.py`: metadata block parse/render (§7.1), preserving human text outside markers; label conventions; derived state computation (§7.2).
 - [x] `core/graph.py`: dependency graph, cycle detection, waves (topological levels).
 - [x] `forge refresh` command (recompute labels, unblock dependents).
+
+Progress notes: ADR 0008 (task model, labels, derived status, branch event trailers `Forge-Claim/Handoff/Release`); shared `commands/_context.py` for all commands.
 
 **Done when:** round-trip tests on issue bodies; cycle detection and wave tests; `forge refresh` against FakeGitHub flips blocked → ready when deps close.
 
