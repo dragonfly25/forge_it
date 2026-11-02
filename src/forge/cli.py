@@ -13,6 +13,7 @@ from forge.commands import next as next_cmd
 from forge.commands import reclaim as reclaim_cmd
 from forge.commands import refresh as refresh_cmd
 from forge.commands import release_claim as release_cmd
+from forge.commands import status as status_cmd
 from forge.commands._output import GlobalOptions, run_command
 from forge.commands.task import task_app
 from forge.core.output import Result
@@ -75,3 +76,6 @@ app.add_typer(task_app, name="task")
 app.command("heartbeat", help="Refresh the lease of the current task.")(heartbeat_cmd.heartbeat)
 app.command("release-claim", help="Release the current task's claim.")(release_cmd.release_claim)
 app.command("reclaim", help="Take over a task whose claim went stale.")(reclaim_cmd.reclaim)
+app.command("status", help="Show me, team, queue, blocked, milestone and health (§11.3).")(
+    status_cmd.status
+)
