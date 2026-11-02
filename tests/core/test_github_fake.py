@@ -403,3 +403,9 @@ def test_merge_refuses_draft_and_unmergeable(gh: FakeGitHub) -> None:
         gh.fake_merge_pull(draft.number)
     gh.fake_set_mergeable(draft.number, True)
     assert gh.fake_merge_pull(draft.number).merged is True
+
+
+def test_list_pulls_does_not_compute_mergeable(gh: FakeGitHub) -> None:
+    pr = gh.create_pull("p", "", "task/1", "main")
+    assert gh.get_pull(pr.number).mergeable is True
+    assert [p.mergeable for p in gh.list_pulls()] == [None]

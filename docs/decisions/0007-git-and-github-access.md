@@ -10,7 +10,7 @@ All git access goes through `core/git.py`, and all GitHub access goes through th
 ## Decision
 
 **Git** (`core/git.py`):
-- A `Git(cwd)` class built on `subprocess.run`. Every call runs with `LC_ALL=C`, `LANG=C`, `GIT_TERMINAL_PROMPT=0` and `GIT_OPTIONAL_LOCKS=0`, so output can be parsed. A non-zero exit raises `GitError(args, returncode, stderr)`, except for operations whose failure is an expected outcome: pushes rejected by a lease, rebases with conflicts, and `rev_parse` of a missing ref. Those return result objects.
+- A `Git(cwd)` class built on `subprocess.run`. Every call runs with `LC_ALL=C`, `LANG=C`, `GIT_TERMINAL_PROMPT=0` and `GIT_OPTIONAL_LOCKS=0`, so output can be parsed. A non-zero exit raises `GitError(args, returncode, stderr)`, except for operations whose failure is an expected outcome: pushes that lost a race (a local lease rejection, or a `[remote rejected]` verified against the remote ref), rebases with conflicts, `rev_parse` of a missing ref, and `is_ancestor` returning false. Those return result objects or `None`/`False`.
 - Claim commits are created with `git commit-tree` (no checkout and no working-tree change), so a CAS can be prepared from any state.
 - Pushes take an explicit lease `(ref, expected_sha | None)`. `None` means "must not exist" and maps to `--force-with-lease=<ref>:`. A bare `--force` is never used.
 
@@ -32,7 +32,9 @@ All git access goes through `core/git.py`, and all GitHub access goes through th
   - If the ref equals what we pushed (or is absent, for a delete), the push landed: `ok=True`.
   - If it no longer equals the lease's expected value, we lost the race: `rejected=True`.
   - Anything else raises `GitError` with the full output. That covers hook or policy refusals, directory/file ref clashes such as `refs/heads/task` vs `refs/heads/task/42`, and a failed `ls-remote`.
-  A false win is impossible, because it would need our unique sha on the remote. The tests reproduce server-side races deterministically with `pre-receive` hooks.
+  A false win is impossible for create and update, because it would need our unique sha on the remote. For a delete, `ok` means "the ref is absent". A re-run that finds the ref already gone reports `rejected`, and callers treat `rejected` with the ref absent as done.
+- `update_milestone(due_on=None)` leaves the due date unchanged. Clearing a due date is not supported until a caller needs it.
+ The tests reproduce server-side races deterministically with `pre-receive` hooks.
 - `rev_parse` returns `None` only when the ref is missing. Other failures raise.
 - Open for Phase 3: if a claim push landed before an interruption, a re-run sees a stale lease and reports `rejected`. `forge next` must treat "the branch tip carries my own `Forge-Claim`/`Forge-Agent` trailers" as already claimed. If `ls-remote` reads a lagging replica, the CLI raises an error instead of reporting a false loss; the live smoke test should cover this.
 - Open, to decide in Phase 3/5: whether Forge's own wip and claim commits and pushes should bypass the user's git hooks (`--no-verify`). Claim commits made with `commit-tree` never run commit hooks.

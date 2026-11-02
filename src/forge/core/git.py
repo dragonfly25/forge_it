@@ -52,6 +52,9 @@ class GitError(ForgeError):
         super().__init__(f"git {' '.join(self.git_args)} failed (exit {returncode}): {detail}")
 
 
+_FULL_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
 @dataclass(frozen=True)
 class Lease:
     """Expected state of a remote ref for ``--force-with-lease``.
@@ -63,6 +66,10 @@ class Lease:
 
     ref: str
     expected: str | None
+
+    def __post_init__(self) -> None:
+        if self.expected is not None and not _FULL_SHA.fullmatch(self.expected):
+            raise ValueError(f"Lease.expected must be a full hex object id, got {self.expected!r}")
 
     def option(self) -> str:
         """Return the ``--force-with-lease=...`` command-line option."""
@@ -501,7 +508,12 @@ class Git:
     def delete_remote_branch(
         self, branch: str, expected_sha: str, remote: str = "origin"
     ) -> PushResult:
-        """Delete ``branch`` on ``remote`` only if it still points at ``expected_sha``."""
+        """Delete ``branch`` on ``remote`` only if it still points at ``expected_sha``.
+
+        ``ok`` means the ref is absent afterwards (deleted by us or, concurrently, by someone
+        else). On a re-run the ref may already be gone and the stale lease yields
+        ``rejected``: callers must treat ``rejected`` with an absent remote ref as done.
+        """
         ref = f"refs/heads/{branch}"
         return self.push("", ref, lease=Lease(ref, expected_sha), remote=remote)
 

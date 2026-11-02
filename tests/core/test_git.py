@@ -628,3 +628,9 @@ def test_output_is_english_under_italian_locale(
     result = bob.rebase("origin/main")
     assert result.conflicts == ["README.md"]
     bob.rebase_abort()
+
+
+@pytest.mark.parametrize("expected", ["abc123", "HEAD", "refs/heads/main", "A" * 40])
+def test_lease_requires_full_sha(expected: str) -> None:
+    with pytest.raises(ValueError):
+        Lease("refs/heads/task/1", expected)

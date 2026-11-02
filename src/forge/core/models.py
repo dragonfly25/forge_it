@@ -104,6 +104,8 @@ def resolve(
         tier = Tier(declared_tier)
 
     # 2. Project minimum for the roles or command: the highest matching minimum wins.
+    if isinstance(roles, str):
+        raise TypeError("roles must be a sequence of names, not a single string")
     if constraints is not None:
         base = tier
         raised_by: str | None = None

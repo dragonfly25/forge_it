@@ -15,7 +15,7 @@ Spec §6.5 describes model resolution, but several details are left open:
 
 **Resolution**, `resolve(...)` in `core/models.py`. All steps are pure and deterministic.
 1. Base tier: if the declared tier is `task`, use the task's tier (`standard` when no task is given). Otherwise use the declared tier.
-2. If the role or command is listed in `config.models.min_tier_for` and its minimum is higher, raise the tier to that minimum.
+2. Every role or command name passed in (`roles`, e.g. `["reviewer"]` or `["plan"]`) is looked up in `config.models.min_tier_for`. The highest matching minimum raises the tier if it is higher, and the note names the key that raised it.
 3. A manual override (`--tier`, `--effort`) is applied only if it is higher than the current value. A lower override is ignored, with a warning note.
 4. Serving: the agent serves tier T with the model mapped to the **lowest tier ≥ T present in its profile** (e.g. an agent with only `strong` serves `standard` tasks with its strong model). If no mapped tier is ≥ T, the agent **cannot serve** T. Resolution returns `served=False`, and `forge next` skips the task unless `--any-tier`, in which case the highest mapped tier is used with a warning.
 5. Effort: the abstract effort (`low|medium|high`, from the declaration, raised by any override) is mapped through the agent's `effort` table. If the tool's preset declares `supports_effort: false`, or the agent has no mapping for that level, the effort value is `None` and a note says it was ignored.

@@ -452,9 +452,13 @@ class FakeGitHub:
         head: str | None = None,
         base: str | None = None,
     ) -> list[PullRequest]:
-        """Pull requests filtered by state and head/base branch names."""
+        """Pull requests filtered by state and head/base branch names.
+
+        Like GitHub's list endpoint, ``mergeable`` is not computed here (always ``None``);
+        use :meth:`get_pull` to read it.
+        """
         return [
-            pr
+            replace(pr, mergeable=None)
             for _, pr in sorted(self._pulls.items())
             if _matches(state, pr.state)
             and (head is None or pr.head == head)

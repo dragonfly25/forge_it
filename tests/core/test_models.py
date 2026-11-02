@@ -334,3 +334,8 @@ def test_preset_drift(presets: dict[str, Preset]) -> None:
 def test_no_drift_for_unknown_tool(presets: dict[str, Preset]) -> None:
     agent = AgentProfile("g", "gemini", ("google",), {S: "x"})
     assert preset_drift(profile_of(agent), presets) == []
+
+
+def test_roles_as_single_string_is_rejected() -> None:
+    with pytest.raises(TypeError):
+        resolve(FULL, declared_tier=M, roles="reviewer", constraints=CONSTRAINTS)
