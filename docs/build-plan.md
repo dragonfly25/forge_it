@@ -18,8 +18,8 @@ Section references (§) point to `docs/spec.md`.
 Also done in Phase 0: naming (ADR 0001), build subagents in `.claude/agents/` (ADR 0002).
 
 ## [ ] Phase 1 — Core foundations
-- [ ] `core/config.py`, `core/team.py`, `core/zones.py` ✅ (landed), `core/profile.py`: dataclasses + YAML loaders with validation (§6), clear error messages. Profile agents have `providers` (list), `tiers`, `effort`; config has the `models` constraints block.
-- [ ] `core/models.py`: model resolution (§6.5 point 6) and constraint checking; `src/forge/presets/*.yml` for claude-code, codex, ollama.
+- [x] `core/config.py`, `core/team.py`, `core/zones.py`, `core/profile.py`: dataclasses + YAML loaders with validation (§6), clear error messages. Profile agents have `providers` (list), `tiers`, `effort`; config has the `models` constraints block.
+- [x] `core/models.py`: model resolution (§6.5 point 6) and constraint checking; `src/forge/presets/*.yml` for claude-code, codex, ollama.
 - [x] `core/zones.py`: path → zones matching, overlap check between zone sets (names, `conflicts`, glob intersection).
 - [x] `core/git.py`: `Git` wrapper (fetch, rev-parse, merge-base, diff names, commit, push with lease, rebase start/continue/abort, worktree add/remove, config).
 - [x] `core/github.py`: `GitHubClient` protocol, `GhCliClient` (gh subprocess), `FakeGitHub` for tests.

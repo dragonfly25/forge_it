@@ -36,3 +36,11 @@ Spec §6.5 describes model resolution, but several details are left open:
 
 - Hybrid agents (Claude orchestrator plus local executor) get a warning only if they map `strong` to a local model.
 - Preset data goes stale as models change. `updated` makes this visible, and Forge releases refresh the presets.
+
+## Implementation notes (Phase 1)
+
+- **Alias comparison** (`same_alias`): two model names are the same when they are equal, or when one is a hyphen-separated token of the other (`opus` ~ `claude-opus-5-5`). A recommendation applies to an agent's tool when that tool's preset lists the recommended model in `known_models`.
+- **`any_tier`**: `served` stays `False`, but `model` and `effective_tier` are filled with the highest mapped tier. Callers test `served or any_tier`.
+- **`presets=None`** in `resolve` means "no preset information": effort support is assumed, and only the agent's own mapping is used.
+- **`preset_drift`** compares only the tiers the agent maps. A tier left unmapped on purpose is not drift.
+- **Codex preset**: checked on 2026-11-02 against https://learn.chatgpt.com/docs/models. Mapping: strong `gpt-6-astra`, standard `gpt-6.1-sol`, light `gpt-6-luna`. Effort maps to `model_reasoning_effort`. The spec's §6.4 example (`standard: gpt-5`) therefore shows up as preset drift, which is the intended signal.

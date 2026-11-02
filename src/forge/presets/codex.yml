@@ -1,0 +1,26 @@
+# Forge preset for the OpenAI Codex CLI.
+# Verified 2026-11-02 against the official docs:
+#   https://developers.openai.com/codex/models (redirects to https://learn.chatgpt.com/docs/models)
+#   https://developers.openai.com/codex/config-reference
+#     (redirects to https://learn.chatgpt.com/docs/config-file/config-reference)
+# Models: gpt-6-astra (most capable), gpt-6.1-sol (near-Astra, lower cost),
+# gpt-6.1-terra (fast, efficient), gpt-6-luna (most efficient, replaces gpt-5.4-mini).
+# The docs name no fixed default model (Codex uses "a recommended model" when unset).
+# Effort maps to `model_reasoning_effort` (low | medium | high | xhigh | max | ultra;
+# available levels depend on the model and client).
+tool: codex
+provider: openai
+updated: 2026-11-02
+supports_effort: true
+tiers:
+  strong: gpt-6-astra
+  standard: gpt-6.1-sol
+  light: gpt-6-luna
+effort:
+  low: low
+  medium: medium
+  high: high
+known_models:
+  strong: [gpt-6-astra, gpt-6.1-sol]
+  standard: [gpt-6.1-sol, gpt-6.1-terra]
+  light: [gpt-6-luna, gpt-6.1-terra]
