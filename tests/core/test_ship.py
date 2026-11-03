@@ -102,6 +102,24 @@ def test_ship_opens_pr_with_block_label_heartbeat_and_reviewer(sw: ShipWorld) ->
     assert data["sync"]["outcome"] == "pushed"
 
 
+def test_pull_opened_concurrently_is_updated_not_duplicated(sw: ShipWorld) -> None:
+    issue = claimed(sw)
+    sw.commit("alice", "src/api/a.py", "a\n")
+    real = sw.fake.create_pull
+
+    def racing_create(title: str, body: str, head: str, base: str, *, draft: bool = False):  # type: ignore[no-untyped-def]
+        real(title, "opened by another ship", head, base, draft=draft)
+        raise GitHubError("HTTP 422: A pull request already exists", status=422)
+
+    sw.fake.create_pull = racing_create  # type: ignore[method-assign]
+    out = sw.ship()
+
+    assert out.code == ExitCode.OK and out.outcome == "updated"
+    assert len(sw.pulls(issue)) == 1
+    assert "<!-- forge:pr-begin -->" in sw.pull(issue).body
+    assert any("opened concurrently" in m.text for m in out.messages)
+
+
 def test_rerun_is_idempotent(sw: ShipWorld) -> None:
     issue = claimed(sw)
     sw.commit("alice", "src/api/a.py", "a\n")
