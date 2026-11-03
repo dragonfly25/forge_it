@@ -711,3 +711,88 @@ def test_commit_ci_error_propagates() -> None:
     with pytest.raises(GitHubError) as info:
         client(runner).commit_ci(SHA)
     assert info.value.status == 404
+
+
+# --------------------------------------------------------------------------- releases
+
+
+def release_json(**extra: Any) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "id": 7,
+        "tag_name": "v1.2.0",
+        "name": "v1.2.0 — Editor",
+        "body": "## [1.2.0]\n",
+        "draft": False,
+        "prerelease": False,
+        "target_commitish": "main",
+        "html_url": f"https://github.com/{REPO}/releases/tag/v1.2.0",
+    }
+    data.update(extra)
+    return data
+
+
+def test_get_release_by_tag() -> None:
+    runner = FakeRunner().add(release_json())
+    release = client(runner).get_release_by_tag("v1.2.0")
+    assert runner.calls[0].argv == ["gh", "api", f"repos/{REPO}/releases/tags/v1.2.0"]
+    assert release is not None
+    assert (release.id, release.tag, release.name, release.target) == (
+        7,
+        "v1.2.0",
+        "v1.2.0 — Editor",
+        "main",
+    )
+    assert release.url.endswith("/releases/tag/v1.2.0") and not release.draft
+
+
+def test_get_release_by_tag_quotes_the_tag() -> None:
+    runner = FakeRunner().add(release_json(tag_name="a/b"))
+    client(runner).get_release_by_tag("a/b")
+    assert runner.calls[0].argv[-1] == f"repos/{REPO}/releases/tags/a%2Fb"
+
+
+def test_get_release_by_tag_404_is_none() -> None:
+    runner = FakeRunner().add(None, code=1, err="gh: Not Found (HTTP 404)")
+    assert client(runner).get_release_by_tag("v9.9.9") is None
+
+
+def test_get_release_by_tag_other_errors_propagate() -> None:
+    runner = FakeRunner().add(None, code=1, err="gh: Server Error (HTTP 502)")
+    with pytest.raises(GitHubError) as exc:
+        client(runner).get_release_by_tag("v1.2.0")
+    assert exc.value.status == 502
+
+
+def test_create_release_payload() -> None:
+    runner = FakeRunner().add(release_json())
+    release = client(runner).create_release("v1.2.0", "v1.2.0 — Editor", "notes")
+    call = runner.calls[0]
+    assert call.argv == ["gh", "api", "-X", "POST", f"repos/{REPO}/releases", "--input", "-"]
+    assert call.body == {
+        "tag_name": "v1.2.0",
+        "name": "v1.2.0 — Editor",
+        "body": "notes",
+        "draft": False,
+        "prerelease": False,
+        "make_latest": "legacy",
+    }
+    assert release.tag == "v1.2.0"
+
+
+def test_create_release_with_target_and_422() -> None:
+    runner = FakeRunner().add(release_json())
+    client(runner).create_release("v1.2.0", "n", "b", target="abc123")
+    assert runner.calls[0].body["target_commitish"] == "abc123"
+    runner = FakeRunner().add(
+        None, code=1, err='gh: Validation Failed (HTTP 422)\n{"code":"already_exists"}'
+    )
+    with pytest.raises(GitHubError) as exc:
+        client(runner).create_release("v1.2.0", "n", "b")
+    assert exc.value.status == 422
+
+
+def test_pull_merge_commit_sha() -> None:
+    runner = FakeRunner().add(pull_json(5, merged=True, merge_commit_sha="m" * 40))
+    assert client(runner).get_pull(5).merge_commit_sha == "m" * 40
+    runner = FakeRunner().add(pull_json(5, merge_commit_sha=None))
+    assert client(runner).get_pull(5).merge_commit_sha is None

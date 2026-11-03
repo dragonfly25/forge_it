@@ -19,6 +19,8 @@ It mirrors the GitHub rules Forge relies on:
   ``head_sha``. The fake does not model the commits a real merge creates on the base branch
   (merge or squash commits), nor GitHub's rule that only the merged pull request is listed for
   a default-branch commit: tests link such commits explicitly with ``fake_link_commit``.
+- releases are keyed by tag (one per tag, 422 on a second); drafts are hidden from
+  ``get_release_by_tag``. Git tags are not modelled.
 
 Ordering matches ``GitHubClient``: issues, pull requests, comments and reviews oldest first,
 labels by name (case-insensitive), milestones by number. Methods prefixed ``fake_`` are test
@@ -45,6 +47,7 @@ from forge.core.github import (
     Label,
     Milestone,
     PullRequest,
+    Release,
     Review,
     ReviewEvent,
     StateFilter,
@@ -106,6 +109,8 @@ class FakeGitHub:
         self._next_milestone = 1
         self._next_comment_id = 1
         self._next_review_id = 1
+        self._releases: dict[str, Release] = {}  # key: tag name
+        self._next_release_id = 1
 
     # ------------------------------------------------------------------ helpers
 
@@ -584,7 +589,46 @@ class FakeGitHub:
         """Combined CI state of a commit; ``none`` unless set with ``fake_set_ci``."""
         return self._ci.get(sha, _NO_CI)
 
+    # ------------------------------------------------------------------ releases
+
+    def get_release_by_tag(self, tag: str) -> Release | None:
+        """The published release of ``tag``; drafts are not returned (as on GitHub)."""
+        release = self._releases.get(tag)
+        return None if release is None or release.draft else release
+
+    def create_release(
+        self, tag: str, name: str, body: str, *, target: str | None = None
+    ) -> Release:
+        """Publish a release; a tag that already has one (draft or not) fails with 422.
+
+        The fake does not model git tags: ``target`` is recorded as given (default branch
+        when omitted).
+        """
+        if not tag:
+            raise GitHubError("tag_name is required", status=422)
+        if tag in self._releases:
+            raise GitHubError(f"release for tag {tag!r} already exists", status=422)
+        release = Release(
+            id=self._next_release_id,
+            tag=tag,
+            name=name,
+            body=body,
+            draft=False,
+            prerelease=False,
+            target=target if target is not None else self.default_branch,
+            url=f"https://github.com/{self.repo}/releases/tag/{tag}",
+        )
+        self._next_release_id += 1
+        self._releases[tag] = release
+        return release
+
     # ------------------------------------------------------------------ test helpers
+
+    def fake_set_release_draft(self, tag: str, draft: bool) -> Release:
+        """Turn the release of ``tag`` into a draft (or publish it again)."""
+        release = replace(self._releases[tag], draft=draft)
+        self._releases[tag] = release
+        return release
 
     def fake_set_ci(self, sha: str, status: CiStatus) -> None:
         """Set the CI state GitHub reports for commit ``sha``."""
@@ -604,12 +648,14 @@ class FakeGitHub:
         self._pulls[number] = pr
         return pr
 
-    def fake_merge_pull(self, number: int) -> PullRequest:
+    def fake_merge_pull(self, number: int, *, merge_commit_sha: str | None = None) -> PullRequest:
         """Merge an open pull request, as GitHub's merge endpoint would.
 
         Drafts and unmergeable pull requests are refused (405). Issues named by closing
         keywords in the body are closed only when the base is ``default_branch``. The pull
-        request is linked to its ``head_sha`` for ``commit_pulls``.
+        request is linked to its ``head_sha`` for ``commit_pulls``. ``merge_commit_sha`` is
+        the commit the base branch got (tests pass the real merge, squash or rebased commit
+        they created); by default a synthetic sha derived from the pull request.
         """
         pr = self._pull(number)
         if pr.state != "open":
@@ -618,7 +664,13 @@ class FakeGitHub:
             raise GitHubError(f"pull request #{number} is a draft", status=405)
         if pr.mergeable is False:
             raise GitHubError(f"pull request #{number} is not mergeable", status=405)
-        pr = replace(pr, state="closed", merged=True, merged_at=self._clock())
+        sha = (
+            merge_commit_sha
+            or hashlib.sha1(
+                f"{self.repo}#{number}:merge".encode(), usedforsecurity=False
+            ).hexdigest()
+        )
+        pr = replace(pr, state="closed", merged=True, merged_at=self._clock(), merge_commit_sha=sha)
         self._pulls[number] = pr
         if pr.head_sha:
             self.fake_link_commit(pr.head_sha, number)
