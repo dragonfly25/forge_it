@@ -6,7 +6,7 @@ GitHub is the only coordination bus. Tasks are Issues, claims are branches, revi
 
 ## Status
 
-Forge v0 is feature complete and not yet released. The version is `0.1.0.dev0` until `v0.1.0` is tagged. The end-to-end run on a sandbox GitHub repository (Phase 10 in [docs/build-plan.md](docs/build-plan.md)) has not been done yet, so expect rough edges.
+Forge v0.1.0 is the first release. It was dogfooded end to end on a sandbox GitHub repository; see [docs/dogfooding-v0.1.0.md](docs/dogfooding-v0.1.0.md) for the checklist, the findings and what was not exercised.
 
 ## Prerequisites
 

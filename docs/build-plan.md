@@ -108,8 +108,13 @@ Progress notes: ADR 0015.
 
 **Done when:** a new developer can follow README + onboarding without other help (checked by reading them end to end); `forge docs --check` passes in CI.
 
-## [ ] Phase 10 — Dogfooding
-- Manual end-to-end checklist on a sandbox GitHub repository (provided by the user): init → plan a mini milestone with 4 tasks → two users claim in parallel → one sync with a conflict → ship → cross review → merge → dependents unblock → release.
-- Fix what breaks; record findings in `docs/decisions/` or the CHANGELOG.
+## [x] Phase 10 — Dogfooding
+- [x] Manual end-to-end checklist on a sandbox GitHub repository (provided by the user): init → plan a mini milestone with 4 tasks → two users claim in parallel → one sync with a conflict → ship → cross review → merge → dependents unblock → release.
+- [x] Fix what breaks; record findings in `docs/decisions/` or the CHANGELOG.
+
+Progress notes:
+- **Run**: on `dragonfly25/forge_sandbox`, with two simulated users under one account. Every checklist step passed; the report is `docs/dogfooding-v0.1.0.md`.
+- **Fixes**: ten findings, all fixed. The main one was GitHub's issue-list lag (ADR 0007 amendment).
+- **Version and tag**: the version is bumped to `0.1.0`. The `v0.1.0` tag is created locally on `main` once this phase's PR is merged.
 
 **Done when:** the checklist passes end to end and v0.1.0 is tagged locally.

@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-03
+
 ### Added
 
 - Project scaffold: Python package `forge-it` (import package `forge`) with the `forge` entry point and `forge --version`.
@@ -72,3 +74,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - **`forge docs [--check]`**: a deterministic command reference built from the CLI and the prompt frontmatter. `forge init` writes `docs/forge/commands.md`, and CI checks it.
   - **Docs and installer**: framework docs (`README.md`, `docs/protocol.md`, `docs/architecture.md`, `docs/adapters.md`, `docs/commands.md`); `install.sh` now installs the newest release tag, or `main` when none exists.
   - **Projects v2 mirroring (§15)**: deferred to v1.
+
+### Fixed
+
+Found while dogfooding v0.1.0 on a sandbox GitHub repository (see `docs/dogfooding-v0.1.0.md` and the ADR 0007 amendment):
+
+- **Duplicate task issues**: `forge plan apply` no longer creates them when re-run within seconds. Issue listing now covers GitHub's read-after-write lag.
+- **Superseded duplicates**: task issues closed as not planned that duplicate a live issue no longer count as dropped tasks or trigger warnings.
+- **Concurrent PR**: `forge ship` re-reads and updates a pull request opened at the same time by another ship (GitHub's 422), instead of failing.
+- **Output fixes**:
+  - `forge refresh` prints a readable summary instead of a raw dict.
+  - `forge setup` no longer repeats warnings it has just fixed.
+  - The task context no longer shows the description-region markers.
+  - `forge review` prints each acceptance criterion once.
+  - Radar comments use correct singular and plural.
+- **Project name**: `forge init` takes it from the GitHub repository name when detected.
+- **Private Forge repository**: the project workflows can install Forge from it through an optional `FORGE_INSTALL_TOKEN` secret.
