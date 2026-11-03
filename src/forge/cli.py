@@ -13,6 +13,8 @@ from forge.commands import escalate as escalate_cmd
 from forge.commands import handoff as handoff_cmd
 from forge.commands import heartbeat as heartbeat_cmd
 from forge.commands import next as next_cmd
+from forge.commands import plan as plan_cmd
+from forge.commands import plan_apply as plan_apply_cmd
 from forge.commands import propose as propose_cmd
 from forge.commands import reclaim as reclaim_cmd
 from forge.commands import refresh as refresh_cmd
@@ -22,6 +24,7 @@ from forge.commands import ship as ship_cmd
 from forge.commands import status as status_cmd
 from forge.commands import sync as sync_cmd
 from forge.commands._output import GlobalOptions, run_command
+from forge.commands.plan import plan_app
 from forge.commands.task import task_app
 from forge.core.output import Result
 
@@ -139,3 +142,8 @@ app.command("review", help="Print a pull request's review context, or submit a r
 )
 app.command("handoff", help="Hand the current task off with a note (§8.3).")(handoff_cmd.handoff)
 app.command("propose", help="Propose new work as a status:proposed issue.")(propose_cmd.propose)
+plan_app.command("validate", help="Validate a milestone plan offline (§9.4).")(plan_cmd.validate)
+plan_app.command("apply", help="Create or update the milestone's task issues (§9.5).")(
+    plan_apply_cmd.apply
+)
+app.add_typer(plan_app, name="plan")

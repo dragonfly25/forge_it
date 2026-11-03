@@ -271,6 +271,62 @@ def _not_planned_warnings(rec: TaskRecord, not_planned: Set[str]) -> list[str]:
     ]
 
 
+@dataclass(frozen=True)
+class DerivedTask:
+    """A parsed task issue and its derived status (``None`` = no status label)."""
+
+    record: TaskRecord
+    status: Status | None
+
+
+def derive_task_statuses(
+    issues: Sequence[Issue],
+    branches: Mapping[int, TaskBranch],
+    open_pr_heads: Set[str],
+    warnings: list[str],
+) -> list[DerivedTask]:
+    """Derive the status of every parseable task issue, in issue-number order (pure).
+
+    This is the decision core of :func:`plan_refresh`, shared with ``forge plan apply``.
+    Warnings (unparseable issues, duplicate ids, unknown or not-planned dependencies) are
+    appended to ``warnings``. Dependencies are resolved by task id over all parsed issues;
+    when two issues share an id, the lowest issue number wins.
+    """
+    records = parse_records(issues, warnings)
+
+    owner: dict[str, int] = {}
+    deps_closed: dict[str, bool] = {}
+    not_planned: set[str] = set()
+    for rec in records:
+        first = owner.get(rec.meta.id)
+        if first is not None:
+            warnings.append(
+                f"issue #{rec.issue.number}: duplicate task id {rec.meta.id} (also on issue "
+                f"#{first}); dependencies on {rec.meta.id} use issue #{first}"
+            )
+            continue
+        owner[rec.meta.id] = rec.issue.number
+        deps_closed[rec.meta.id] = rec.issue.state == "closed"
+        if rec.issue.state == "closed" and rec.issue.state_reason == "not_planned":
+            not_planned.add(rec.meta.id)
+
+    derived_tasks: list[DerivedTask] = []
+    for rec in records:
+        number = rec.issue.number
+        branch = branches.get(number)
+        derived = derive_status(
+            issue=rec.issue,
+            meta=rec.meta,
+            deps_closed=deps_closed,
+            branch=BranchState.absent() if branch is None else branch.state(rec.meta.id),
+            has_open_pr=TaskMetadata.branch_name(number) in open_pr_heads,
+        )
+        warnings.extend(derived.warnings)
+        warnings.extend(_not_planned_warnings(rec, not_planned))
+        derived_tasks.append(DerivedTask(rec, derived.status))
+    return derived_tasks
+
+
 def plan_refresh(
     issues: Sequence[Issue],
     branches: Mapping[int, TaskBranch],
@@ -290,48 +346,22 @@ def plan_refresh(
     Only issues whose labels actually change appear in ``changes``.
     """
     warnings = list(warnings)
-    records = parse_records(issues, warnings)
-
-    owner: dict[str, int] = {}
-    deps_closed: dict[str, bool] = {}
-    not_planned: set[str] = set()
-    for rec in records:
-        first = owner.get(rec.meta.id)
-        if first is not None:
-            warnings.append(
-                f"issue #{rec.issue.number}: duplicate task id {rec.meta.id} (also on issue "
-                f"#{first}); dependencies on {rec.meta.id} use issue #{first}"
-            )
-            continue
-        owner[rec.meta.id] = rec.issue.number
-        deps_closed[rec.meta.id] = rec.issue.state == "closed"
-        if rec.issue.state == "closed" and rec.issue.state_reason == "not_planned":
-            not_planned.add(rec.meta.id)
+    derived_tasks = derive_task_statuses(issues, branches, open_pr_heads, warnings)
 
     changes: list[RefreshChange] = []
     statuses: Counter[str] = Counter()
-    for rec in records:
-        number = rec.issue.number
-        branch = branches.get(number)
-        derived = derive_status(
-            issue=rec.issue,
-            meta=rec.meta,
-            deps_closed=deps_closed,
-            branch=BranchState.absent() if branch is None else branch.state(rec.meta.id),
-            has_open_pr=TaskMetadata.branch_name(number) in open_pr_heads,
-        )
-        warnings.extend(derived.warnings)
-        warnings.extend(_not_planned_warnings(rec, not_planned))
-        statuses["none" if derived.status is None else derived.status.value] += 1
-        diff = desired_labels(rec.issue.labels, derived.status, rec.meta)
+    for task in derived_tasks:
+        rec, status = task.record, task.status
+        statuses["none" if status is None else status.value] += 1
+        diff = desired_labels(rec.issue.labels, status, rec.meta)
         if diff.empty:
             continue
         changes.append(
             RefreshChange(
-                issue=number,
+                issue=rec.issue.number,
                 task_id=rec.meta.id,
                 from_status=Status.from_labels(rec.issue.labels),
-                to_status=derived.status,
+                to_status=status,
                 added=tuple(sorted(diff.add)),
                 removed=tuple(sorted(diff.remove)),
             )
@@ -339,8 +369,8 @@ def plan_refresh(
 
     counts: dict[str, Any] = {
         "issues": len(issues),
-        "tasks": len(records),
-        "skipped": len(issues) - len(records),
+        "tasks": len(derived_tasks),
+        "skipped": len(issues) - len(derived_tasks),
         "changed": len(changes),
         "warnings": len(warnings),
         "statuses": dict(sorted(statuses.items())),
