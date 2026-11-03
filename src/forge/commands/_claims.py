@@ -13,10 +13,12 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
 from forge import __version__
 from forge.commands._context import AppContext, load_context
 from forge.commands._output import GlobalOptions
+from forge.core import adapters
 from forge.core.claim import ClaimContext, Claimed, NextOutcome
 from forge.core.config import ForgeConfig, check_cli_version
 from forge.core.context import TaskContext, gather_task_context, render_context
@@ -263,6 +265,8 @@ def finish_claim(
         worktree=None if workspace.in_place else workspace.path,
     )
     current_file = write_current(workspace.path, current)
+    if not workspace.in_place:
+        render_subagents(workspace.path, profile, app.config, result)
     context = load_task_context(
         app, claimed.issue, zones=ctx.zones, now=ctx.now(), remote=ctx.remote
     )
@@ -271,6 +275,16 @@ def finish_claim(
     result.data["current"] = {"path": str(current_file), **current.to_data()}
     result.data["context"] = context.to_data()
     for warning in context.warnings:
+        result.warn(warning)
+
+
+def render_subagents(worktree: Path, profile: Profile, config: ForgeConfig, result: Result) -> None:
+    """Render the machine-level subagent files into a task worktree (ADR 0014), best effort.
+
+    A failure becomes a warning; the claim and the workspace stay as they are.
+    """
+    _written, warnings = adapters.write_local_best_effort(worktree, profile, config)
+    for warning in warnings:
         result.warn(warning)
 
 
