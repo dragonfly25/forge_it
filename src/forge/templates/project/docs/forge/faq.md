@@ -45,6 +45,10 @@ uv tool install --force "git+https://github.com/dragonfly25/forge_it@{{forge_ins
 
 If the lead bumped `forge_version` in a pull request, the new range is in that file. Install a version in it. If the range is too old for your needs, ask the lead to update it.
 
+## The Forge workflows fail at "Install Forge". What do I do?
+
+If the Forge repository is private, the workflows cannot install it with the default token. Create a fine-grained personal access token with read-only access to the contents of `dragonfly25/forge_it`, and add it to this project as the repository secret `FORGE_INSTALL_TOKEN` (Settings > Secrets and variables > Actions). The workflows use it when it is set and the public URL otherwise; they never print it.
+
 ## How do I add a zone?
 
 Zones are owned by the lead. Open a pull request that edits `.forge/zones.yml`:

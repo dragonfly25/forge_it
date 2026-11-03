@@ -34,10 +34,17 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v10
 
+      # Optional secret FORGE_INSTALL_TOKEN: a read-only token for a private Forge repository.
       - name: Install Forge (pinned)
+        env:
+          FORGE_INSTALL_TOKEN: ${{ secrets.FORGE_INSTALL_TOKEN }}
         run: |
           set -euo pipefail
-          uv tool install "git+https://github.com/dragonfly25/forge_it@{{forge_install_ref}}"
+          if [ -n "${FORGE_INSTALL_TOKEN:-}" ]; then
+            uv tool install "git+https://x-access-token:${FORGE_INSTALL_TOKEN}@github.com/dragonfly25/forge_it@{{forge_install_ref}}"
+          else
+            uv tool install "git+https://github.com/dragonfly25/forge_it@{{forge_install_ref}}"
+          fi
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Refresh labels and run the radar

@@ -43,6 +43,8 @@ pipx install "git+https://github.com/dragonfly25/forge_it@{{forge_install_ref}}"
 
 Check it works: `forge --version`.
 
+If the Forge repository is private, the lead also adds a repository secret for CI: create a fine-grained personal access token with read-only access to the contents of `dragonfly25/forge_it`, and add it to this project as the Actions secret `FORGE_INSTALL_TOKEN`. The Forge workflows install from the public URL when the secret is not set.
+
 ## 2. Clone and set up your machine
 
 ```bash
