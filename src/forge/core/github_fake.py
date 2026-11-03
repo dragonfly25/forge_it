@@ -92,6 +92,7 @@ class FakeGitHub:
         self.default_branch = default_branch
         self._user = user
         self._clock: Callable[[], datetime] = clock or _TickingClock()
+        self._server_skew: timedelta | None = timedelta(0)
         self._labels: dict[str, Label] = {}  # key: lower-cased name
         self._milestones: dict[int, Milestone] = {}
         self._issues: dict[int, Issue] = {}
@@ -183,6 +184,12 @@ class FakeGitHub:
     def current_user(self) -> str:
         """Login of the acting user (see ``fake_set_user``)."""
         return self._user
+
+    def server_time(self) -> datetime | None:
+        """The fake's clock plus the skew set with ``fake_set_server_skew`` (``None``: offline)."""
+        if self._server_skew is None:
+            return None
+        return self._clock() + self._server_skew
 
     # ------------------------------------------------------------------ labels
 
@@ -586,6 +593,10 @@ class FakeGitHub:
     def fake_set_user(self, login: str) -> None:
         """Change the acting user (affects authorship of new objects)."""
         self._user = login
+
+    def fake_set_server_skew(self, skew: timedelta | None) -> None:
+        """Make :meth:`server_time` run ``skew`` ahead of the clock; ``None`` makes it unknown."""
+        self._server_skew = skew
 
     def fake_close_pull(self, number: int) -> PullRequest:
         """Close an open pull request without merging it."""

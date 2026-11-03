@@ -23,6 +23,16 @@ def test_satisfies_protocol() -> None:
     assert isinstance(FakeGitHub(), GitHubClient)
 
 
+def test_server_time_follows_the_clock_and_skew() -> None:
+    start = datetime(2026, 5, 1, tzinfo=UTC)
+    gh = FakeGitHub(clock=lambda: start)
+    assert gh.server_time() == start
+    gh.fake_set_server_skew(timedelta(minutes=-7))
+    assert gh.server_time() == start - timedelta(minutes=7)
+    gh.fake_set_server_skew(None)
+    assert gh.server_time() is None
+
+
 def test_injected_clock_is_used() -> None:
     times = iter([datetime(2026, 5, 1, tzinfo=UTC) + timedelta(minutes=i) for i in range(10)])
     gh = FakeGitHub(clock=lambda: next(times))

@@ -8,6 +8,7 @@ import pytest
 from packaging.specifiers import SpecifierSet
 
 from forge.core.config import (
+    ADAPTERS,
     CONFIG_PATH,
     ClaimConfig,
     ModelsConfig,
@@ -17,6 +18,7 @@ from forge.core.config import (
     WorktreesConfig,
     check_cli_version,
     load_config,
+    normalize_adapters,
 )
 from forge.core.errors import ConfigError
 from forge.core.tiers import Tier
@@ -329,3 +331,31 @@ def test_check_cli_version(version: str, expected: bool) -> None:
 def test_check_cli_version_rejects_invalid_version() -> None:
     with pytest.raises(ValueError):
         check_cli_version(SpecifierSet(">=0.1"), "not-a-version")
+
+
+# -- adapters (ADR 0014) ------------------------------------------------------------------------
+
+
+def test_adapters_default_to_all_known(tmp_path: Path) -> None:
+    write(tmp_path, MINIMAL)
+    assert load_config(tmp_path).adapters == ADAPTERS == ("generic", "claude", "codex")
+
+
+def test_adapters_always_include_generic_in_canonical_order(tmp_path: Path) -> None:
+    write(tmp_path, MINIMAL + "adapters: [codex, claude, codex]\n")
+    assert load_config(tmp_path).adapters == ("generic", "claude", "codex")
+    write(tmp_path, MINIMAL + "adapters: []\n")
+    assert load_config(tmp_path).adapters == ("generic",)
+
+
+def test_unknown_adapter_names_file_key_and_fix(tmp_path: Path) -> None:
+    err = config_error(tmp_path, MINIMAL + "adapters: [generic, cursor]\n")
+    assert err.file.endswith("config.yml")
+    assert err.key == "adapters[1]"
+    assert "cursor" in err.problem
+    assert "generic, claude, codex" in str(err.hint)
+
+
+def test_normalize_adapters() -> None:
+    assert normalize_adapters(["claude"]) == ("generic", "claude")
+    assert normalize_adapters([]) == ("generic",)

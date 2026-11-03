@@ -209,6 +209,11 @@ def _to_data(profile: Profile) -> dict[str, Any]:
     }
 
 
+def profile_to_data(profile: Profile) -> dict[str, Any]:
+    """Return ``profile`` as plain data, with keys in spec §6.4 order (what the file holds)."""
+    return _to_data(profile)
+
+
 def dump_profile(profile: Profile) -> str:
     """Serialize ``profile`` as stable YAML, with keys in spec §6.4 order."""
     return yaml.safe_dump(
@@ -298,6 +303,7 @@ __all__ = [
     "load_profile",
     "parse_profile",
     "profile_path",
+    "profile_to_data",
     "save_profile",
     "select_agent",
 ]

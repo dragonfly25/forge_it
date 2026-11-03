@@ -481,6 +481,20 @@ def task_branch_issue(branch: str | None) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def task_worktrees(git: Git) -> list[tuple[int, Path]]:
+    """Return ``(issue, path)`` for every registered worktree checked out on ``task/<n>``.
+
+    Worktrees whose directory no longer exists are left out. The main working tree is
+    included when it is on a task branch.
+    """
+    found: list[tuple[int, Path]] = []
+    for path, branch in _worktree_branches(git):
+        issue = task_branch_issue(branch)
+        if issue is not None and path.is_dir():
+            found.append((issue, path))
+    return found
+
+
 @dataclass(frozen=True)
 class TaskLocation:
     """The task the user is working on, and how it was found.
