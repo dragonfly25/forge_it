@@ -466,3 +466,11 @@ def test_merge_links_head_sha(gh: FakeGitHub) -> None:
     assert gh.commit_pulls(head) == []  # open pull requests are linked only explicitly
     merged = gh.fake_merge_pull(pr.number)
     assert gh.commit_pulls(head) == [merged]
+
+
+def test_fake_close_pull_closes_without_merging() -> None:
+    fake = FakeGitHub()
+    pr = fake.create_pull("t", "b", "task/1", "main")
+    closed = fake.fake_close_pull(pr.number)
+    assert (closed.state, closed.merged) == ("closed", False)
+    assert fake.list_pulls(state="open") == []

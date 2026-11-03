@@ -383,9 +383,25 @@ class Git:
         ref = f"refs/heads/{branch}"
         return self.ls_remote(remote, ref).get(ref)
 
-    def update_ref(self, ref: str, sha: str) -> None:
-        """Point ``ref`` (a full ref name) at ``sha``, creating it if needed."""
-        self.run("update-ref", ref, sha)
+    def update_ref(self, ref: str, sha: str, *, old: str | None = None) -> bool:
+        """Point ``ref`` (a full ref name) at ``sha``, creating it if needed.
+
+        With ``old`` the update is a compare-and-swap (``git update-ref <ref> <sha> <old>``):
+        when ``ref`` no longer points at ``old`` nothing changes and False is returned. Any
+        other failure raises :class:`GitError`. Returns True when the ref was updated.
+        """
+        if old is None:
+            self.run("update-ref", ref, sha)
+            return True
+        args = ("update-ref", ref, sha, old)
+        proc = self.run(*args, check=False)
+        if proc.returncode == 0:
+            return True
+        if self.run("check-ref-format", ref, check=False).returncode != 0:
+            raise GitError(args, proc.returncode, proc.stderr)  # not a lost race
+        if self.rev_parse(ref) != self._resolve_object(old):
+            return False  # moved (or deleted) since ``old`` was read
+        raise GitError(args, proc.returncode, proc.stderr)
 
     def delete_ref(self, ref: str) -> None:
         """Delete the local ref ``ref``."""
@@ -441,6 +457,29 @@ class Git:
     def diff_names(self, a: str, b: str) -> list[str]:
         """Return paths that differ between the trees of ``a`` and ``b`` (two-dot diff)."""
         return _split_z(self.run("diff", "--name-only", "-z", a, b, "--").stdout)
+
+    def diff_bytes(self, a: str, b: str) -> bytes:
+        """Return the patch between the trees of ``a`` and ``b`` (two-dot diff) as raw bytes.
+
+        The output is the file contents as stored, whatever their encoding (decode it with
+        ``errors="replace"`` for display). User configuration cannot change its shape: no
+        color, no textconv filters, no external diff driver, ``a/``/``b/`` prefixes (even with
+        ``diff.noprefix`` or ``diff.mnemonicPrefix``) and paths relative to the repository
+        root (even with ``diff.relative``).
+        """
+        return self._run_bytes(
+            "-c",
+            "diff.relative=false",
+            "diff",
+            "--no-color",
+            "--no-textconv",
+            "--no-ext-diff",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            a,
+            b,
+            "--",
+        ).stdout
 
     def changed_files_since(self, base: str, head: str = "HEAD") -> list[str]:
         """Return paths changed on ``head`` since its merge base with ``base`` (``base...head``)."""
@@ -566,6 +605,54 @@ class Git:
     def tree_of(self, ref: str) -> str:
         """Return the tree sha of commit ``ref``."""
         return self._out("rev-parse", f"{ref}^{{tree}}")
+
+    def worktree_tree(self) -> str:
+        """Return the tree sha that ``git add -A`` followed by a commit would record now.
+
+        Tracked changes (staged or not, deletions included) and untracked, non-ignored files
+        are included. The real index is never touched: a copy of it is used (keeping its stat
+        cache), so this is safe to call at any time. Writes blobs to the object store.
+        """
+        index = Path(self._out("rev-parse", "--git-path", "index"))
+        if not index.is_absolute():
+            index = self.cwd / index
+        # A split index would make the scratch copy share (and write) shared index files.
+        no_split = ("-c", "core.splitIndex=false")
+        with tempfile.TemporaryDirectory(prefix="forge-index-") as tmp:
+            scratch = Path(tmp) / "index"
+            env = {"GIT_INDEX_FILE": str(scratch)}
+            if index.exists():
+                scratch.write_bytes(index.read_bytes())
+            else:
+                self.run(*no_split, "read-tree", "HEAD", env=env)
+            args = (*no_split, "add", "-A", "--", ":/")
+            add = self.run(*args, check=False, env=env)
+            if add.returncode != 0:
+                failed = GitAddFailed(args, add.returncode, add.stderr)
+                lines = add.stderr.strip().splitlines()
+                errors = [x for x in lines if x.startswith("error:")] or lines[-1:]
+                failed.message = (
+                    "cannot read the working tree to compare it (`git add -A` on a scratch "
+                    "index failed; your index was not touched): "
+                    + ("; ".join(errors) or "no error output")
+                )
+                failed.hint = (
+                    "fix what git reports (e.g. make the file readable, or ignore it in "
+                    ".gitignore), then run the command again"
+                )
+                raise failed
+            return self.run(*no_split, "write-tree", env=env).stdout.strip()
+
+    def index_matches(self, ref: str) -> bool:
+        """Return True when the index (staged content) equals the tree of commit ``ref``.
+
+        Read-only: ``git diff --cached --quiet`` never writes the index.
+        """
+        args = ("diff", "--cached", "--quiet", "--no-ext-diff", ref, "--")
+        proc = self.run(*args, check=False)
+        if proc.returncode in (0, 1):
+            return proc.returncode == 0
+        raise GitError(args, proc.returncode, proc.stderr)
 
     def commit_tree(
         self,
@@ -826,6 +913,26 @@ class Git:
             if path.exists():
                 return True
         return False
+
+    def operation_in_progress(self) -> str | None:
+        """Return the name of a merge, cherry-pick or revert in progress in this working tree
+        (``"merge"``, ``"cherry-pick"`` or ``"revert"``), or None when there is none.
+
+        Detected by ``MERGE_HEAD``, ``CHERRY_PICK_HEAD`` and ``REVERT_HEAD`` (resolved with
+        ``rev-parse --git-path``, so a linked worktree checks its own state). Rebases are
+        reported by :meth:`rebase_in_progress`.
+        """
+        for name, operation in (
+            ("MERGE_HEAD", "merge"),
+            ("CHERRY_PICK_HEAD", "cherry-pick"),
+            ("REVERT_HEAD", "revert"),
+        ):
+            path = Path(self._out("rev-parse", "--git-path", name))
+            if not path.is_absolute():
+                path = self.cwd / path
+            if path.exists():
+                return operation
+        return None
 
     def conflicted_files(self) -> list[str]:
         """Return paths with unresolved merge conflicts (unmerged index entries).

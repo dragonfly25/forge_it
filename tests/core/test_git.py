@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import stat
 import subprocess
 import threading
@@ -487,6 +488,185 @@ def test_diff_names_and_changed_files_since(git_world: GitWorld) -> None:
     assert sorted(bob.diff_names("origin/main", "HEAD")) == ["docs/a.md", "src/b.py"]
     assert bob.changed_files_since("origin/main", "HEAD") == ["src/b.py"]
     assert bob.changed_files_since("HEAD", "origin/main") == ["docs/a.md"]
+
+
+def test_diff_bytes_keeps_non_utf8_bytes_and_ignores_user_diff_config(
+    git_world: GitWorld,
+) -> None:
+    alice = git_world.clone("alice")
+    base = alice.rev_parse("HEAD")
+    assert base is not None
+    latin1 = "café\n".encode("latin-1")  # b"caf\xe9\n": not valid UTF-8
+    (alice.cwd / "src").mkdir()
+    (alice.cwd / "src" / "menu.txt").write_bytes(latin1)
+    (alice.cwd / "README.md").write_text("# changed\n")
+    alice.add(["src/menu.txt", "README.md"])
+    head = alice.commit("feat: menu")
+    # user configuration that would change the patch if it were honored
+    for key, value in (
+        ("color.diff", "always"),
+        ("color.ui", "always"),
+        ("diff.noprefix", "true"),
+        ("diff.mnemonicPrefix", "true"),
+        ("diff.relative", "true"),
+        ("diff.external", "false"),
+        ("diff.upper.textconv", "tr a-z A-Z <"),
+    ):
+        alice.config_set(key, value)
+    (alice.cwd / ".git" / "info" / "attributes").write_text("*.md diff=upper\n")
+
+    # the configuration bites a plain `git diff`
+    assert alice.run("diff", base, head, check=False).returncode != 0  # diff.external
+    plain = alice.run("diff", "--no-ext-diff", base, head, "--", "README.md").stdout
+    assert "# CHANGED" in plain and "\x1b[" in plain  # textconv, color
+    assert "diff --git README.md README.md" in plain  # noprefix
+
+    raw = alice.diff_bytes(base, head)
+
+    assert isinstance(raw, bytes)
+    assert b"+caf\xe9\n" in raw
+    assert b"diff --git a/README.md b/README.md\n" in raw
+    assert b"--- a/src/menu.txt" not in raw and b"+++ b/src/menu.txt\n" in raw
+    assert b"+# changed\n" in raw  # no textconv: not "+# CHANGED"
+    assert b"\x1b[" not in raw  # no color
+    with pytest.raises(UnicodeDecodeError):
+        raw.decode("utf-8")
+    assert "+caf\ufffd\n" in raw.decode("utf-8", errors="replace")
+
+
+def test_worktree_tree_matches_add_all_without_touching_the_index(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    assert alice.worktree_tree() == alice.tree_of("HEAD")
+    (alice.cwd / "README.md").write_text("changed\n")
+    (alice.cwd / "new.txt").write_text("new\n")
+    (alice.cwd / ".gitignore").write_text("*.log\n")
+    (alice.cwd / "debug.log").write_text("ignored\n")
+    alice.add([".gitignore"])  # partly staged
+    before = alice.run("status", "--porcelain").stdout
+    index = alice.cwd / ".git" / "index"
+    index_bytes = index.read_bytes()
+
+    tree = alice.worktree_tree()
+
+    assert index.read_bytes() == index_bytes  # the real index file is untouched, byte for byte
+    assert alice.run("status", "--porcelain").stdout == before
+    alice.commit_all("feat: everything")
+    assert tree == alice.tree_of("HEAD")
+    # a linked worktree uses its own index
+    linked = alice.cwd.parent / "alice-wt"
+    alice.worktree_add(linked, "wt", start_point="HEAD~1")
+    assert Git(linked).worktree_tree() == alice.tree_of("HEAD~1")
+
+
+def test_worktree_tree_with_a_split_index_leaves_the_shared_index_alone(
+    git_world: GitWorld,
+) -> None:
+    alice = git_world.clone("alice")
+    alice.config_set("core.splitIndex", "true")
+    alice.run("update-index", "--split-index")
+    shared = sorted(p.name for p in (alice.cwd / ".git").glob("sharedindex.*"))
+    assert shared  # the repository really uses a split index
+    (alice.cwd / "README.md").write_text("changed\n")
+    (alice.cwd / "new.txt").write_text("new\n")
+    index = alice.cwd / ".git" / "index"
+    index_bytes = index.read_bytes()
+    shared_bytes = {name: (alice.cwd / ".git" / name).read_bytes() for name in shared}
+
+    tree = alice.worktree_tree()
+
+    assert sorted(p.name for p in (alice.cwd / ".git").glob("sharedindex.*")) == shared
+    assert {n: (alice.cwd / ".git" / n).read_bytes() for n in shared} == shared_bytes
+    assert index.read_bytes() == index_bytes
+    alice.commit_all("feat: everything")
+    assert tree == alice.tree_of("HEAD")
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="root reads all")
+def test_worktree_tree_unreadable_file_is_a_clear_error(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    secret = alice.cwd / "unreadable.txt"
+    secret.write_text("secret\n")
+    secret.chmod(0)
+    index = alice.cwd / ".git" / "index"
+    index_bytes = index.read_bytes()
+    try:
+        with pytest.raises(GitAddFailed) as info:
+            alice.worktree_tree()
+    finally:
+        secret.chmod(0o644)
+    error = info.value
+    assert "unreadable.txt" in error.message
+    assert error.message.startswith("cannot read the working tree to compare it")
+    assert error.hint is not None and "make the file readable" in error.hint
+    assert index.read_bytes() == index_bytes
+
+
+def test_update_ref_compare_and_swap(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    first = alice.rev_parse("HEAD")
+    assert first is not None
+    second = git_world.commit_file(alice, "a.txt", "a\n", "feat: a")
+    ref = "refs/heads/cas"
+    assert alice.update_ref(ref, first) is True  # no expected value: plain update
+    assert alice.update_ref(ref, second, old=first) is True
+    assert alice.rev_parse(ref) == second
+    # stale expected value: nothing changes
+    assert alice.update_ref(ref, first, old=first) is False
+    assert alice.rev_parse(ref) == second
+    # deleted since it was read
+    alice.delete_ref(ref)
+    assert alice.update_ref(ref, first, old=second) is False
+    assert alice.rev_parse(ref) is None
+    # any other failure still raises
+    with pytest.raises(GitError):
+        alice.update_ref("refs/heads/bad..name", first, old=first)
+
+
+def test_index_matches(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    first = alice.rev_parse("HEAD")
+    assert first is not None
+    assert alice.index_matches("HEAD")
+    (alice.cwd / "README.md").write_text("changed\n")
+    assert alice.index_matches("HEAD")  # unstaged changes do not count
+    alice.add(["README.md"])
+    assert not alice.index_matches("HEAD")
+    second = alice.commit("feat: change")
+    assert alice.index_matches(second) and not alice.index_matches(first)
+
+
+def test_operation_in_progress(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    assert alice.operation_in_progress() is None
+    alice.checkout("side", create_from="HEAD")
+    side = git_world.commit_file(alice, "a.txt", "side\n", "feat: side")
+    alice.checkout("main")
+    git_world.commit_file(alice, "a.txt", "main\n", "feat: main")
+
+    assert alice.run("merge", "--no-edit", "side", check=False).returncode != 0
+    assert alice.operation_in_progress() == "merge"
+    alice.run("merge", "--abort")
+    assert alice.operation_in_progress() is None
+
+    assert alice.run("cherry-pick", side, check=False).returncode != 0
+    assert alice.operation_in_progress() == "cherry-pick"
+    alice.run("cherry-pick", "--abort")
+    assert alice.operation_in_progress() is None
+
+    main = alice.rev_parse("HEAD")
+    assert main is not None
+    git_world.commit_file(alice, "a.txt", "later\n", "feat: later")
+    assert alice.run("revert", "--no-edit", main, check=False).returncode != 0
+    assert alice.operation_in_progress() == "revert"
+    alice.run("revert", "--abort")
+    assert alice.operation_in_progress() is None
+
+    # a linked worktree checks its own state, not the main one's
+    alice.run("merge", "--no-edit", "side", check=False)
+    linked = alice.cwd.parent / "alice-linked"
+    alice.worktree_add(linked, "side")
+    assert Git(linked).operation_in_progress() is None
+    assert alice.operation_in_progress() == "merge"
 
 
 def test_rebase_clean(git_world: GitWorld) -> None:
