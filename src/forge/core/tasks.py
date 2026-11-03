@@ -58,7 +58,7 @@ FORGE_TASK_LABEL = "forge:task"
 _FENCE_OPEN_RE = re.compile(r"^```yaml\s*$")
 _FENCE_CLOSE_RE = re.compile(r"^```\s*$")
 
-_KEYS: tuple[str, ...] = (
+METADATA_KEYS: tuple[str, ...] = (
     "id",
     "spec",
     "covers",
@@ -430,7 +430,7 @@ def parse_body(
         )
     data = {str(k): v for k, v in loaded.items()}
     try:
-        return _parse_fields(Fields(data, _where(issue_number)), milestone)
+        return parse_metadata_fields(Fields(data, _where(issue_number)), milestone)
     except ConfigError as exc:
         reason = exc.problem if exc.key is None else f"{exc.key}: {exc.problem}"
         raise TaskBodyError(reason, issue_number=issue_number, hint=exc.hint) from exc
@@ -441,8 +441,9 @@ def _required_choice(f: Fields, key: str, values: Sequence[str]) -> str:
     return f.choice(key, values, default=values[0])
 
 
-def _parse_fields(f: Fields, milestone: str | None) -> TaskMetadata:
-    f.reject_unknown(_KEYS)
+def parse_metadata_fields(f: Fields, milestone: str | None) -> TaskMetadata:
+    """Parse the §7.1 metadata fields of ``f`` (issue block or plan task) into a TaskMetadata."""
+    f.reject_unknown(METADATA_KEYS)
 
     task_id = f.str_("id")
     if TASK_ID_RE.fullmatch(task_id) is None:
@@ -617,6 +618,131 @@ def upsert_block(body: str, meta: TaskMetadata, *, issue_number: int | None = No
     else:
         sep = newline + newline
     return body + sep + block + newline
+
+
+# --------------------------------------------------------------------------- description region
+
+DESCRIPTION_BEGIN = "<!-- forge:description-begin -->"
+DESCRIPTION_END = "<!-- forge:description-end -->"
+"""Markers of the task description region that ``forge plan apply`` owns (ADR 0013)."""
+
+_ALL_MARKERS: tuple[str, ...] = (BEGIN_MARKER, END_MARKER, DESCRIPTION_BEGIN, DESCRIPTION_END)
+
+
+def _find_description_span(body: str, issue_number: int | None) -> _Span | None:
+    """Locate the description region; ``None`` when the body has no description markers.
+
+    Markers quoted inside fenced code blocks outside the region are ignored (as for the
+    metadata block); inside the region fences are not tracked, because Forge closes every
+    fence of the text it writes there.
+    """
+    begins: list[tuple[int, str, int]] = []
+    ends: list[tuple[int, str, int]] = []
+    fence: _Fence | None = None
+    in_region = False
+    for line in _lines_with_offsets(body):
+        content = line[1]
+        if in_region:
+            if _is_marker(content, DESCRIPTION_END):
+                ends.append(line)
+                in_region = False
+            elif _is_marker(content, DESCRIPTION_BEGIN):
+                begins.append(line)
+            continue
+        if fence is not None:
+            closes = _fence_closes(content, fence)
+            if closes or _leaves_list_item(content, fence):
+                fence = None
+                if closes:
+                    continue
+            else:
+                continue
+        if _is_marker(content, DESCRIPTION_BEGIN):
+            begins.append(line)
+            in_region = True
+        elif _is_marker(content, DESCRIPTION_END):
+            ends.append(line)
+        else:
+            fence = _fence_open(content)
+    if not begins and not ends:
+        return None
+    fix = f"keep exactly one `{DESCRIPTION_BEGIN}` … `{DESCRIPTION_END}` region in the issue body"
+    if len(begins) != 1 or len(ends) != 1 or ends[0][0] < begins[0][0]:
+        raise TaskBodyError(
+            "the description region markers are unbalanced or repeated",
+            issue_number=issue_number,
+            hint=fix,
+        )
+    b_start, _, b_end = begins[0]
+    e_start, e_content, _ = ends[0]
+    return _Span(start=b_start, inner_start=b_end, inner_end=e_start, end=e_start + len(e_content))
+
+
+def description_text_problem(text: str) -> str | None:
+    """Why ``text`` cannot be written into the description region, or ``None`` when it can.
+
+    A line holding a Forge marker (metadata block or description region) would make the
+    issue body ambiguous.
+    """
+    for _, line, _ in _lines_with_offsets(text):
+        for marker in _ALL_MARKERS:
+            if _is_marker(line, marker):
+                return f"the description contains the Forge marker line `{marker}`"
+    return None
+
+
+def render_description(text: str, newline: str = "\n") -> str:
+    """The description region for ``text``: begin marker through end marker, no trailing newline.
+
+    Leading and trailing blank lines of ``text`` are dropped. When ``text`` ends inside an
+    unclosed code fence, a matching closing fence is added, so the end marker and the
+    metadata block after it are never swallowed by the fence. Raises :class:`ValueError` when
+    ``text`` holds a Forge marker line (see :func:`description_text_problem`).
+    """
+    problem = description_text_problem(text)
+    if problem is not None:
+        raise ValueError(problem)
+    lines = [line for _, line, _ in _lines_with_offsets(text.replace("\r\n", "\n"))]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    open_fence = _scan("\n".join(lines) + "\n").open_fence if lines else None
+    if open_fence is not None:
+        lines.append(open_fence.closer)
+    return newline.join([DESCRIPTION_BEGIN, *lines, DESCRIPTION_END])
+
+
+def split_description(body: str, *, issue_number: int | None = None) -> tuple[str, str | None, str]:
+    """Split ``body`` into ``(before, region_text, after)`` around the description region.
+
+    ``region_text`` is the text between the marker lines (``None`` when there is no region,
+    in which case ``before`` is the whole body). Raises :class:`TaskBodyError` on unbalanced
+    or repeated markers.
+    """
+    span = _find_description_span(body, issue_number)
+    if span is None:
+        return body, None, ""
+    return body[: span.start], body[span.inner_start : span.inner_end], body[span.end :]
+
+
+def upsert_description(body: str, text: str, *, issue_number: int | None = None) -> str:
+    """Return ``body`` with its description region set to ``text`` (ADR 0013).
+
+    Only the region (markers included) is replaced; everything else is preserved byte for
+    byte. A body without a region gets one inserted at the top, followed by a blank line.
+    The region's line terminator follows the body (``\\r\\n`` if the body uses it). Raises
+    :class:`TaskBodyError` on unbalanced or repeated markers and :class:`ValueError` when
+    ``text`` holds a Forge marker line.
+    """
+    newline = "\r\n" if "\r\n" in body else "\n"
+    region = render_description(text, newline)
+    span = _find_description_span(body, issue_number)
+    if span is not None:
+        return body[: span.start] + region + body[span.end :]
+    if not body:
+        return region + newline
+    return region + newline + newline + body
 
 
 # --------------------------------------------------------------------------- labels
