@@ -14,15 +14,18 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from forge import __version__
 from forge.commands._context import AppContext, load_context
 from forge.commands._output import GlobalOptions
 from forge.core.claim import ClaimContext, Claimed, NextOutcome
+from forge.core.config import ForgeConfig, check_cli_version
 from forge.core.context import TaskContext, gather_task_context, render_context
 from forge.core.errors import ExitCode, ForgeError, PreconditionError
 from forge.core.models import check_profile
 from forge.core.output import Level, Result
 from forge.core.presets import load_presets
 from forge.core.profile import AgentProfile, Profile, load_profile, profile_path, select_agent
+from forge.core.team import TEAM_PATH, Team, load_team
 from forge.core.workspace import (
     CurrentTask,
     TaskLocation,
@@ -127,6 +130,37 @@ def claim_context(
         clock=lambda: clock(),
         sleep=lambda seconds: sleep(seconds),
     )
+
+
+# --------------------------------------------------------------------------- project files
+
+
+def version_problem(config: ForgeConfig, cli_version: str = __version__) -> str | None:
+    """Why this CLI does not satisfy ``forge_version`` (ADR 0003), or ``None`` when it does."""
+    try:
+        ok = check_cli_version(config.forge_version, cli_version)
+    except ValueError:
+        ok = False
+    if ok:
+        return None
+    return (
+        f"forge {cli_version} does not satisfy forge_version "
+        f"{str(config.forge_version)!r} in .forge/config.yml"
+    )
+
+
+VERSION_HINT = "install a Forge version matching forge_version, or ask the lead to update it"
+
+
+def try_load_team(app: AppContext, warnings: list[str]) -> Team | None:
+    """Load ``.forge/team.yml`` when it exists; an invalid file becomes a warning."""
+    if not (app.root / TEAM_PATH).is_file():
+        return None
+    try:
+        return load_team(app.root)
+    except ForgeError as exc:
+        warnings.append(f"team.yml not used: {exc.message}")
+        return None
 
 
 # --------------------------------------------------------------------------- current task
