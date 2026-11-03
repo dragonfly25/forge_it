@@ -269,3 +269,86 @@ def test_github_client_is_built_lazily_once(
     monkeypatch.setattr(_context, "github_factory", lambda config: fake)
     ctx = _context.load_context(GlobalOptions(repo=clone.cwd))
     assert ctx.github is fake and ctx.github is fake
+
+
+# --------------------------------------------------------------------------- --radar
+
+ZONES_YML = """\
+zones:
+  api: {paths: ["src/api/**"]}
+  web: {paths: ["src/web/**"]}
+"""
+
+
+def run_radar_json(repo: Path) -> tuple[int, dict[str, Any]]:
+    result = runner.invoke(app, ["--json", "--repo", str(repo), "refresh", "--radar"])
+    envelope: dict[str, Any] = json.loads(result.stdout)
+    return result.exit_code, envelope
+
+
+def test_refresh_radar_json_envelope(setup: tuple[Path, FakeGitHub], git_world: GitWorld) -> None:
+    repo, fake = setup
+    (repo / ".forge" / "zones.yml").write_text(ZONES_YML)
+    lead = git_world.clone("lead")
+    sha = git_world.commit_file(lead, "src/api/a.py", "x\n", "feat: api change")
+    git_world.push(lead, "main")
+
+    code, env = run_radar_json(repo)
+
+    assert code == 0, env
+    assert env["ok"] is True and env["code"] == 0
+    assert set(env["data"]) == {"changes", "warnings", "counts", "radar"}
+    radar = env["data"]["radar"]
+    (task,) = radar["tasks"]
+    assert task["issue"] == 4 and task["id"] == "M1-T04" and task["in_progress"] is True
+    assert task["comment"] == "created" and task["applied"] is True
+    assert [c["sha"] for c in task["drift"]["commits"]] == [sha]
+    assert task["lease"] is None
+    assert radar["counts"]["created"] == 1 and radar["counts"]["drift"] == 1
+    texts = [m["text"] for m in env["messages"]]
+    assert any(t.startswith("radar:") for t in texts)
+    (comment,) = fake.list_comments(4)
+    assert comment.body.startswith("<!-- forge:radar -->") and sha[:7] in comment.body
+
+    code, env = run_radar_json(repo)
+    assert code == 0
+    assert env["data"]["radar"]["tasks"][0]["comment"] == "unchanged"
+    assert len(fake.list_comments(4)) == 1
+
+
+def test_refresh_radar_without_zones_warns(setup: tuple[Path, FakeGitHub]) -> None:
+    repo, fake = setup
+
+    code, env = run_radar_json(repo)
+
+    assert code == 0, env
+    assert env["data"]["radar"]["tasks"] == []
+    texts = [m["text"] for m in env["messages"] if m["level"] == "warning"]
+    assert any("zones could not be loaded" in t for t in texts)
+    assert fake.list_comments(4) == []
+
+
+def test_refresh_without_radar_has_no_radar_data(setup: tuple[Path, FakeGitHub]) -> None:
+    repo, _ = setup
+    assert "radar" not in run_json(repo)["data"]
+
+
+def test_refresh_radar_shallow_clone_exits_5(
+    git_world: GitWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed = Git(git_world.base / "seed")
+    git_world.commit_file(seed, "more.txt", "more\n", "feat: more history")
+    git_world.push(seed, "main")
+    path = git_world.base / "ci"
+    Git(git_world.base).run(
+        "clone", "--quiet", "--depth", "1", git_world.remote.as_uri(), str(path)
+    )
+    (path / ".forge").mkdir()
+    (path / ".forge" / "config.yml").write_text(CONFIG)
+    (path / ".forge" / "zones.yml").write_text(ZONES_YML)
+    monkeypatch.setattr(_context, "github_factory", lambda config: FakeGitHub(repo="acme/shop"))
+
+    code, env = run_radar_json(path)
+
+    assert code == 5, env
+    assert "shallow" in env["messages"][0]["text"]

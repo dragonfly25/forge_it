@@ -16,6 +16,7 @@ from forge.core.github import (
     GhCliClient,
     GitHubClient,
     GitHubError,
+    parse_date_header,
     parse_gh_version,
 )
 
@@ -106,6 +107,46 @@ def test_current_user() -> None:
     runner = FakeRunner().add({"login": "alice"})
     assert client(runner).current_user() == "alice"
     assert runner.calls[0].argv == ["gh", "api", "user"]
+
+
+def test_repo_less_client_serves_user_calls_only() -> None:
+    runner = FakeRunner().add({"login": "alice"})
+    gh = GhCliClient(runner=runner)
+    assert gh.repo is None
+    assert gh.current_user() == "alice"
+    with pytest.raises(GitHubError, match="needs a repository"):
+        gh.list_labels()
+    with pytest.raises(GitHubError, match="needs a repository"):
+        gh.list_pulls(head="task/1")
+    assert len(runner.calls) == 1
+
+
+META = "HTTP/2.0 200 OK\nContent-Type: application/json\nDate: Tue, 03 Nov 2026 10:00:00 GMT\n\n{}"
+
+
+def test_server_time_reads_the_date_header() -> None:
+    runner = FakeRunner(responses=[(0, META, "")])
+    assert GhCliClient(runner=runner).server_time() == datetime(2026, 11, 3, 10, tzinfo=UTC)
+    assert runner.calls[0].argv == ["gh", "api", "-i", "/meta"]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [(1, "", "offline"), (0, "HTTP/2.0 200 OK\ndate: garbage\n\n{}", ""), (0, "{}", "")],
+)
+def test_server_time_none_when_unavailable(response: tuple[int, str, str]) -> None:
+    assert client(FakeRunner(responses=[response])).server_time() is None
+
+
+def test_server_time_none_without_gh() -> None:
+    def missing(argv: list[str], stdin: str | None) -> tuple[int, str, str]:
+        raise FileNotFoundError("gh")
+
+    assert GhCliClient(runner=missing).server_time() is None
+
+
+def test_parse_date_header_stops_at_the_body() -> None:
+    assert parse_date_header("HTTP/2.0 200 OK\n\nDate: Tue, 03 Nov 2026 10:00:00 GMT") is None
 
 
 def test_list_labels_paginates_and_flattens() -> None:

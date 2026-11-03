@@ -10,6 +10,7 @@ creation order (oldest first), labels by name (case-insensitive) and milestones 
 
 from __future__ import annotations
 
+import email.utils
 import json
 import re
 import subprocess
@@ -238,6 +239,10 @@ class GitHubClient(Protocol):
 
     def current_user(self) -> str:
         """Login of the authenticated user."""
+        ...
+
+    def server_time(self) -> datetime | None:
+        """GitHub's current time (the ``Date`` header of a response), ``None`` if unavailable."""
         ...
 
     # labels
@@ -595,28 +600,53 @@ def _review_from_json(data: dict[str, Any], pr_number: int) -> Review:
     )
 
 
+def parse_date_header(text: str) -> datetime | None:
+    """Return the ``Date`` HTTP header in ``gh api -i`` output, or ``None`` if absent."""
+    for line in text.splitlines():
+        if not line.strip():
+            break  # end of the headers
+        name, sep, value = line.partition(":")
+        if sep and name.strip().lower() == "date":
+            try:
+                parsed = email.utils.parsedate_to_datetime(value.strip())
+            except (TypeError, ValueError):
+                return None
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    return None
+
+
 class GhCliClient:
     """``GitHubClient`` backed by ``gh api`` (REST).
 
-    ``repo`` is ``owner/name``. ``runner`` receives the full argv (starting with ``gh``) and
+    ``repo`` is ``owner/name``; it may be ``None`` for calls that need no repository
+    (:meth:`current_user`, :meth:`server_time`), and the repository methods then raise
+    :class:`GitHubError`. ``runner`` receives the full argv (starting with ``gh``) and
     the stdin text; it defaults to ``subprocess.run``. Lists use ``--paginate --slurp`` and
     are flattened; request bodies are JSON sent with ``--input -``. Requires gh
     >= ``MIN_GH_VERSION``.
     """
 
-    def __init__(self, repo: str, runner: Runner | None = None):
-        if repo.count("/") != 1 or not all(repo.split("/")):
+    def __init__(self, repo: str | None = None, runner: Runner | None = None):
+        if repo is not None and (repo.count("/") != 1 or not all(repo.split("/"))):
             raise GitHubError(
                 f"invalid repository {repo!r}", hint="use the form owner/name, e.g. acme/shop"
             )
-        self.repo = repo
-        self.owner = repo.split("/")[0]
+        self.repo: str | None = repo
+        self.owner: str | None = repo.split("/")[0] if repo is not None else None
         self._runner: Runner = runner or _subprocess_runner
 
     # ------------------------------------------------------------------ plumbing
 
+    def _require_repo(self) -> str:
+        if self.repo is None:
+            raise GitHubError(
+                "this GitHub call needs a repository, but the client has none",
+                hint="set `github.repo` in .forge/config.yml",
+            )
+        return self.repo
+
     def _path(self, suffix: str, query: dict[str, str] | None = None) -> str:
-        path = f"repos/{self.repo}/{suffix}"
+        path = f"repos/{self._require_repo()}/{suffix}"
         if query:
             path += "?" + urlencode(query, safe=":,/")
         return path
@@ -696,6 +726,18 @@ class GhCliClient:
         """Login of the authenticated user."""
         data = self._call("GET", "user")
         return str(data["login"])
+
+    def server_time(self) -> datetime | None:
+        """GitHub's clock: the ``Date`` header of ``gh api -i /meta``.
+
+        ``None`` when ``gh`` is missing, the call fails or the header cannot be read. Never
+        raises for those cases, because callers only use it for a best-effort skew check.
+        """
+        try:
+            code, out, _ = self._runner(["gh", "api", "-i", "/meta"], None)
+        except OSError:
+            return None
+        return parse_date_header(out) if code == 0 else None
 
     # ------------------------------------------------------------------ labels
 
@@ -905,9 +947,10 @@ class GhCliClient:
         base: str | None = None,
     ) -> list[PullRequest]:
         """Pull requests, optionally filtered by head and base branch names. Oldest first."""
+        owner = self._require_repo().split("/")[0]
         query = {"state": state, "sort": "created", "direction": "asc", "per_page": "100"}
         if head is not None:
-            query["head"] = f"{self.owner}:{head}"
+            query["head"] = f"{owner}:{head}"
         if base is not None:
             query["base"] = base
         rows = self._call("GET", self._path("pulls", query), paginate=True) or []

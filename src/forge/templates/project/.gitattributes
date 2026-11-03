@@ -1,0 +1,2 @@
+# Forge: changelog entries from parallel branches merge by keeping both sides' lines.
+CHANGELOG.md merge=union

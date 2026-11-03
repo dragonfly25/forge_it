@@ -243,6 +243,61 @@ def test_next_claims_and_creates_worktree(env: Env) -> None:
     assert env.remote_refs()[f"refs/heads/task/{n}"] == data["claimed"]["claim"]
 
 
+def commit_subagent_definitions(env: Env, gitignore: bool = True) -> None:
+    """Commit the template `.forge/agents` (and its `.gitignore`) to main."""
+    from importlib import resources
+
+    template = resources.files("forge") / "templates" / "project"
+    lead = env.git_world.clone("lead-agents")
+    for name in ("explorer", "reviewer", "test-writer"):
+        text = (template / ".forge" / "agents" / f"{name}.md").read_text("utf-8")
+        env.git_world.commit_file(lead, f".forge/agents/{name}.md", text, f"chore: {name}")
+    if gitignore:
+        text = (template / ".gitignore").read_text("utf-8")
+        env.git_world.commit_file(lead, ".gitignore", text, "chore: gitignore")
+    env.git_world.push(lead, "main")
+
+
+def test_next_renders_subagents_into_the_task_worktree(env: Env) -> None:
+    commit_subagent_definitions(env)
+    env.extra_agents = CODEX_AGENT
+    n = env.task("M1-T01")
+    repo = env.clone("alice")
+
+    code, out = env.invoke(repo, "next")
+
+    assert code == 0, out
+    worktree = env.worktree(n)
+    reviewer = worktree / ".claude" / "agents" / "forge-reviewer.md"
+    assert "model: opus" in reviewer.read_text()
+    assert (worktree / ".codex" / "agents" / "forge-explorer.toml").is_file()
+    assert not Git(worktree).is_dirty(include_untracked=True)
+    assert not (repo / ".claude").exists()  # the main clone is not touched by `next`
+
+
+def test_next_subagent_render_failure_is_a_warning(env: Env) -> None:
+    commit_subagent_definitions(env, gitignore=False)
+    n = env.task("M1-T01")
+    repo = env.clone("alice")
+
+    code, out = env.invoke(repo, "next")
+
+    assert code == 0, out
+    assert out["data"]["claimed"]["issue"] == n
+    warnings = [m["text"] for m in out["messages"] if m["level"] == "warning"]
+    assert any("machine-level adapters not rendered" in w for w in warnings)
+    assert not (env.worktree(n) / ".claude").exists()
+    assert Git(env.worktree(n)).current_branch() == f"task/{n}"
+
+
+def test_next_without_subagent_definitions_renders_nothing(env: Env) -> None:
+    n = env.task("M1-T01")
+    code, out = env.invoke(env.clone("alice"), "next")
+    assert code == 0
+    assert not (env.worktree(n) / ".claude").exists()
+    assert not any("machine-level" in m["text"] for m in out["messages"])
+
+
 def test_next_no_worktree_checks_out_in_place(env: Env) -> None:
     n = env.task("M1-T01")
     repo = env.clone("alice")

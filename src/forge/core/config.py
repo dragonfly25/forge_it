@@ -7,6 +7,7 @@ the key path and a fix. Unknown keys are rejected at every level.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
@@ -25,6 +26,9 @@ Strategy = Literal["regenerate", "union"]
 
 MERGE_METHODS: tuple[MergeMethod, ...] = ("squash", "merge", "rebase")
 STRATEGIES: tuple[Strategy, ...] = ("regenerate", "union")
+
+ADAPTERS: tuple[str, ...] = ("generic", "claude", "codex")
+"""Known adapter names, in rendering order (ADR 0014). ``generic`` is always enabled."""
 
 _LOGIN = r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}"
 _REPO_RE = re.compile(rf"{_LOGIN}/[A-Za-z0-9._-]+")
@@ -113,6 +117,7 @@ class ForgeConfig:
     resolvers: tuple[Resolver, ...] = ()
     review: ReviewConfig = field(default_factory=ReviewConfig)
     models: ModelsConfig = field(default_factory=ModelsConfig)
+    adapters: tuple[str, ...] = ADAPTERS
 
 
 _TOP_KEYS = (
@@ -127,6 +132,7 @@ _TOP_KEYS = (
     "resolvers",
     "review",
     "models",
+    "adapters",
 )
 
 
@@ -155,7 +161,17 @@ def parse_config(f: Fields) -> ForgeConfig:
         resolvers=tuple(_resolver(r) for r in f.list_of_mappings("resolvers")),
         review=_review(f.mapping("review")),
         models=_models(f.mapping("models")),
+        adapters=_adapters(f),
     )
+
+
+def normalize_adapters(names: Iterable[str]) -> tuple[str, ...]:
+    """Return ``names`` plus ``generic``, deduplicated, in the canonical :data:`ADAPTERS` order.
+
+    Names must already be known adapter names (see :data:`ADAPTERS`).
+    """
+    chosen = {"generic", *names}
+    return tuple(name for name in ADAPTERS if name in chosen)
 
 
 def check_cli_version(spec: SpecifierSet, version: str) -> bool:
@@ -326,6 +342,20 @@ def _models(f: Fields) -> ModelsConfig:
     )
 
 
+def _adapters(f: Fields) -> tuple[str, ...]:
+    if f.raw("adapters") is None:
+        return ADAPTERS
+    names = f.str_list("adapters")
+    for i, name in enumerate(names):
+        if name not in ADAPTERS:
+            raise f.fail(
+                f"adapters[{i}]",
+                f"unknown adapter {name!r}; known adapters: {', '.join(ADAPTERS)}",
+                f"remove it, or use one of: {', '.join(ADAPTERS)}",
+            )
+    return normalize_adapters(names)
+
+
 # -- helpers ----------------------------------------------------------------------------------
 
 
@@ -354,6 +384,7 @@ def _optional_int(f: Fields, key: str, *, min_: int) -> int | None:
 
 
 __all__ = [
+    "ADAPTERS",
     "CONFIG_PATH",
     "MERGE_METHODS",
     "STRATEGIES",
@@ -370,5 +401,6 @@ __all__ = [
     "WorktreesConfig",
     "check_cli_version",
     "load_config",
+    "normalize_adapters",
     "parse_config",
 ]

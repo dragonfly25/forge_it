@@ -1,0 +1,16 @@
+# Who works on this project. `github` is the identity key used for assignees,
+# claim trailers and reviews. Roles: dev, lead.
+# The lead plans the milestone, accepts proposals and decides escalations.
+members:
+  - github: "{{github_login}}"
+    name: "{{github_login}}"
+    roles: [dev, lead]
+    providers: [anthropic]         # providers the member's agents use; drives cross-provider review
+    # timezone: Europe/Rome        # optional IANA zone
+    # capacity_hours_week: 20      # optional
+
+  # Add one entry per person:
+  # - github: octocat
+  #   name: Octo Cat
+  #   roles: [dev]
+  #   providers: [openai]

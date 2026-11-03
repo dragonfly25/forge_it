@@ -1,0 +1,26 @@
+# Zones: named areas of the codebase. Two tasks overlap when they share a zone,
+# when their zones are listed under `conflicts`, or when their path globs intersect.
+# Overlapping tasks never run at the same time.
+#
+# This is an example. Replace the paths with your project's layout, then
+# commit. Names use lowercase letters, digits, `-` and `_`, with `/` between parts.
+# Paths are globs relative to the repository root:
+#   *  matches inside one path segment
+#   ** as a whole segment matches any number of segments
+zones:
+  app/src:
+    paths: ["src/**"]
+  app/tests:
+    paths: ["tests/**"]
+  docs:
+    paths: ["docs/**", "specs/**", "plans/**", "README.md"]
+  contracts/api:                   # a contract zone holds interfaces others depend on
+    paths: ["contracts/**"]
+    contract: true
+
+# Zones that must never run in parallel, even though their paths differ.
+# conflicts:
+#   - [app/src, contracts/api]
+
+# What to do when a changed file matches no zone: warn | error.
+unzoned: warn

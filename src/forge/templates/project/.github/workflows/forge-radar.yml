@@ -1,0 +1,44 @@
+name: forge-radar
+
+# Conflict radar and dependency refresh.
+# On every push to the default branch: recompute task labels, unblock dependents,
+# and comment on in-progress tasks whose zones were touched ("sync recommended").
+# Every hour: flag stale leases the same way.
+on:
+  push:
+    branches: ["{{default_branch}}"]
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: read
+
+concurrency:
+  group: forge-radar
+  cancel-in-progress: false
+
+jobs:
+  radar:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Check out (full history; Forge refuses shallow clones)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10
+
+      - name: Install Forge (pinned)
+        run: |
+          set -euo pipefail
+          uv tool install "git+https://github.com/dragonfly25/forge_it@{{forge_install_ref}}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Refresh labels and run the radar
+        run: forge refresh --radar

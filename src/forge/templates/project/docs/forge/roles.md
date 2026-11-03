@@ -1,0 +1,45 @@
+# Roles: lead and dev
+
+`.forge/team.yml` gives each person one or both roles. Every member can do the developer work. The lead has extra duties.
+
+## Dev
+
+A dev takes tasks and delivers them.
+
+- Set up the machine: `/forge-setup`.
+- Claim a task: `/forge-next`.
+- Implement it inside its zones: `/forge-dev`.
+- Keep the branch current: `/forge-sync`.
+- Open the pull request: `/forge-ship`.
+- Review other people's pull requests: `/forge-review <pr>`.
+- Hand a task off when blocked or out of tokens: `/forge-handoff`.
+- Propose work the plan missed. The agent files it as a proposal; the dev does not do it unprompted.
+- Escalate when a conflict or failing check belongs to someone else.
+
+A dev does not change the plan, the zones or the project config on their own.
+
+## Lead
+
+The lead is the person responsible for one milestone. The role rotates between milestones.
+
+- **Plan**: turn specs into a roadmap and a task plan with `/forge-plan`. Plans arrive as pull requests for the team to read.
+- **Approve the plan**: merging the plan pull request makes the `forge-plan-apply` workflow create the task issues. The lead can run `forge plan apply <milestone>` by hand if needed.
+- **Own the zones**: add or change zones in `.forge/zones.yml` when the codebase grows. Mark interface areas as contract zones.
+- **Triage proposals**: each proposal is an issue labeled `status:proposed`. The lead accepts it by adding a task with `proposal: <issue number>` to the plan, or rejects it by closing the issue with a comment.
+- **Decide escalations**: when a task is labeled `blocked:conflict`, the lead helps decide who changes what.
+- **Watch the health**: `/forge-status` shows stale claims, proposals waiting, version mismatches and profile problems.
+- **Release**: when every task of the milestone is closed, run `/forge-release <milestone>`.
+- **Own the project config**: `.forge/config.yml` (checks, resolvers, model constraints) and `.forge/team.yml`.
+
+## Who may do what
+
+| Action | Dev | Lead |
+|---|---|---|
+| Claim, build, sync, ship, review | yes | yes |
+| Propose new work | yes | yes |
+| Write and apply plans | no | yes |
+| Accept proposals | no | yes |
+| Edit zones, config and team | no | yes |
+| Release a milestone | no | yes |
+
+The table is a convention. Forge does not check the lead role for planning: `forge plan validate` and `forge plan apply` run for anyone with access, and `forge-plan-apply` runs them in CI. Only `forge release` checks the role. That command arrives in a later Forge release, and its check is soft: it warns when the person is not the lead, and the team decides what to do. Treat the warning as a stop.

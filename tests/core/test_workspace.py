@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -24,6 +25,7 @@ from forge.core.workspace import (
     prepare_workspace,
     read_current,
     task_branch_issue,
+    task_worktrees,
     worktree_path,
     write_current,
 )
@@ -398,3 +400,17 @@ def test_worktree_from_inside_a_task_worktree_is_a_sibling(git_world: GitWorld) 
     ws = prepare_workspace(inner, repo_root=first.path, issue_number=other, claim_tip=tip)
     assert ws.path == worktree_path(alice.cwd, other)
     assert ws.path.parent == first.path.parent
+
+
+def test_task_worktrees_lists_only_existing_task_branches(
+    git_world: GitWorld, tmp_path: Path
+) -> None:
+    git = git_world.clone("alice")
+    a, b, c, d = (tmp_path / name for name in ("t3", "t12", "feature", "gone"))
+    git.run("worktree", "add", "--quiet", "-b", "task/3", str(a), "HEAD")
+    git.run("worktree", "add", "--quiet", "-b", "task/12", str(b), "HEAD")
+    git.run("worktree", "add", "--quiet", "-b", "feature", str(c), "HEAD")
+    git.run("worktree", "add", "--quiet", "-b", "task/4", str(d), "HEAD")
+    shutil.rmtree(d)
+    found = {(n, os.path.realpath(p)) for n, p in task_worktrees(git)}
+    assert found == {(3, os.path.realpath(a)), (12, os.path.realpath(b))}

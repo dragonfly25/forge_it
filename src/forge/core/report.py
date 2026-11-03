@@ -1033,8 +1033,24 @@ def _drift(run: _Run, view: TaskView, task_sha: str, behind: int) -> DriftInfo |
             )
     if behind == 0 or not known:
         return DriftInfo(0, ())
+    found = zone_drift(run.ctx.git, zones, known, task_sha, run.default_sha)
+    return DriftInfo(len(found), tuple(found[:MAX_DRIFT_COMMITS]))
+
+
+def zone_drift(
+    git: Git, zones: ZonesConfig, zone_names: Iterable[str], task_sha: str, default_sha: str
+) -> list[DriftCommit]:
+    """Upstream commits that touch the given zones (the drift rule of ADR 0010), newest first.
+
+    The commits are those of ``task_sha..default_sha`` (on the default branch since its
+    merge-base with the task), merges excluded, that change a file matching a glob of one of
+    ``zone_names``. Names not defined in ``zones`` are ignored; the caller warns about them.
+    """
+    known = {name for name in zone_names if name in zones.zones}
+    if not known:
+        return []
     found: list[DriftCommit] = []
-    for item in run.ctx.git.commits_with_files(f"{task_sha}..{run.default_sha}"):
+    for item in git.commits_with_files(f"{task_sha}..{default_sha}"):
         matched_zones: set[str] = set()
         matched_files: list[str] = []
         for path in item.files:
@@ -1054,7 +1070,7 @@ def _drift(run: _Run, view: TaskView, task_sha: str, behind: int) -> DriftInfo |
                     files=tuple(sorted(matched_files)),
                 )
             )
-    return DriftInfo(len(found), tuple(found[:MAX_DRIFT_COMMITS]))
+    return found
 
 
 def _my_others(run: _Run, current: int | None) -> tuple[MyTask, ...]:

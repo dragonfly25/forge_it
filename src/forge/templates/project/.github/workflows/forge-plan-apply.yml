@@ -1,0 +1,70 @@
+name: forge-plan-apply
+
+# When a milestone plan (plans/M<n>.yml) reaches the default branch,
+# validate it and create or update the task issues.
+on:
+  push:
+    branches: ["{{default_branch}}"]
+    paths:
+      - "plans/*.yml"
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: read
+
+concurrency:
+  group: forge-plan-apply
+  cancel-in-progress: false
+
+jobs:
+  plan-apply:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BEFORE_SHA: ${{ github.event.before }}
+    steps:
+      - name: Check out (full history; Forge refuses shallow clones)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10
+
+      - name: Install Forge (pinned)
+        run: |
+          set -euo pipefail
+          uv tool install "git+https://github.com/dragonfly25/forge_it@{{forge_install_ref}}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Validate and apply each changed milestone plan
+        run: |
+          set -euo pipefail
+          zeros="0000000000000000000000000000000000000000"
+          if [ -z "$BEFORE_SHA" ] || [ "$BEFORE_SHA" = "$zeros" ] \
+              || ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            echo "No usable previous commit: considering every milestone plan."
+            changed="$(git ls-files 'plans/*.yml')"
+          else
+            changed="$(git diff --name-only --diff-filter=AM "$BEFORE_SHA" "$GITHUB_SHA" -- 'plans/*.yml')"
+          fi
+          # Only milestone plans (plans/M<n>.yml). plans/roadmap.yml is not a plan.
+          plans="$(printf '%s\n' "$changed" | grep -E '^plans/M[0-9]+\.yml$' || true)"
+          if [ -z "$plans" ]; then
+            echo "No milestone plan changed. Nothing to apply."
+            exit 0
+          fi
+          failed=0
+          while IFS= read -r file; do
+            milestone="$(basename "$file" .yml)"
+            echo "::group::${milestone}"
+            if forge plan validate "$milestone" && forge plan apply "$milestone"; then
+              echo "${milestone}: applied."
+            else
+              echo "::error::${milestone}: validate or apply failed."
+              failed=1
+            fi
+            echo "::endgroup::"
+          done <<< "$plans"
+          exit "$failed"

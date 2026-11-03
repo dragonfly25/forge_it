@@ -1,0 +1,10 @@
+# Milestones and their leads. Each milestone is a demoable vertical slice.
+# `/forge-plan roadmap <spec-file>` helps you produce this file from a project spec.
+# Milestone ids have the form M<n>. Plan milestone N+1 in detail when milestone N is about 70% done.
+milestones:
+  - id: M1
+    title: First slice
+    goal: One sentence on what this milestone achieves
+    demo: What you can show when it is done
+    lead: "{{github_login}}"
+    specs: []              # e.g. [specs/m1/feature.md]
