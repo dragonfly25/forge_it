@@ -56,3 +56,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - Roadmap and plan file models.
   - `forge plan validate <M>`: runs offline and reports every §9.4 error and warning, the waves and the AC coverage matrix. It enforces `min_tier_for.plan` unless `--force` or CI.
   - `forge plan apply <M> [--dry-run]`: idempotent. It creates and updates task issues, and limits started tasks to title, description and done-when, with a warning comment for other changes. It closes removed tasks that were never started, adopts proposals named with `proposal: <n>`, recomputes statuses, and converges when two applies run at once.
+- Init, templates, prompts, adapters and setup (Phase 8, ADR 0014):
+  - **`forge init`**: scaffolds every project file, including the rules, ten full prompts, three subagent definitions, spec and ADR templates, onboarding, roles and FAQ docs, three GitHub workflows and issue/PR templates. It refuses to overwrite files and merges `.gitignore`/`.gitattributes`.
+  - **`forge adapters generate [--check] [--local]`**:
+    - Generic: a managed region in `AGENTS.md`.
+    - Claude: `.claude/skills/forge-<cmd>/SKILL.md` plus a `CLAUDE.md` region that imports `AGENTS.md`.
+    - Codex: `.agents/skills/forge-<cmd>/SKILL.md`.
+    - Subagents rendered per machine, with concrete models from the profile: `.claude/agents/forge-*.md` and `.codex/agents/forge-*.toml`, gitignored and also written into task worktrees.
+  - **`forge setup [--check] [--yes]`**: machine checks, each with a fix; tool detection; an interactive profile with presets, project recommendations and local Ollama models; constraint warnings; rerere; machine-level adapters; project setup commands.
+  - **`forge profile show|set|edit`**.
+  - **`forge refresh --radar`**: one comment per in-progress task, for zone drift and stale leases.
+- Global options (`--json`, `--agent`, `--repo`, `--verbose`, `--yes`) now work after the subcommand too, as written in the spec.

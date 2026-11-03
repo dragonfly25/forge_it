@@ -82,12 +82,16 @@ Progress notes: ADR 0013 covers offline validation, the two extra AC errors, app
 
 **Done when:** validation test matrix (each error and warning); applying the same plan twice changes nothing; edits to in-progress tasks follow §9.5; removed tasks handled per rules.
 
-## [ ] Phase 8 — Init, templates, prompts, adapters, setup
-- `src/forge/templates/project/`: every project-level file in §5.2, including `.forge/rules.md`, the 10 prompts (§12) written in full, spec/ADR templates, workflows (§14), issue/PR templates, `docs/forge/*` (onboarding, roles, faq).
-- Adapters: `generic` (AGENTS.md), `claude` (verify current format first, ADR), `codex` (verify current mechanism first, ADR).
-- Subagents (§12.1): templates for `explorer`, `test-writer`, `reviewer` in `.forge/agents/`; prompts delegate to them when available and work without them.
-- Machine-level rendering of subagents per adapter with concrete models (verify current Claude Code / Codex subagent formats first, ADR).
-- Commands: `forge init`, `forge adapters generate [--check] [--local]`, `forge setup [--check]` (machine checks, tool detection, interactive profile with presets and project recommendations, constraint check, rerere, machine-level adapters, `setup.commands`), `forge profile show|set|edit`.
+## [x] Phase 8 — Init, templates, prompts, adapters, setup
+- [x] `src/forge/templates/project/`: every project-level file in §5.2, including `.forge/rules.md`, the 10 prompts (§12) written in full, spec/ADR templates, workflows (§14), issue/PR templates, `docs/forge/*` (onboarding, roles, faq).
+- [x] Adapters: `generic` (AGENTS.md), `claude` (verify current format first, ADR), `codex` (verify current mechanism first, ADR).
+- [x] Subagents (§12.1): templates for `explorer`, `test-writer`, `reviewer` in `.forge/agents/`; prompts delegate to them when available and work without them.
+- [x] Machine-level rendering of subagents per adapter with concrete models (verify current Claude Code / Codex subagent formats first, ADR).
+- [x] Commands: `forge init`, `forge adapters generate [--check] [--local]`, `forge setup [--check]` (machine checks, tool detection, interactive profile with presets and project recommendations, constraint check, rerere, machine-level adapters, `setup.commands`), `forge profile show|set|edit`.
+
+Progress notes:
+- **ADR 0014** covers the verified Claude Code and Codex formats, the template tree, managed regions, skills named `forge-<cmd>`, machine-level subagents for Claude and Codex, setup, profile, the radar (`forge refresh --radar`) and the workflows.
+- **ADR 0004 amendment**: global options are also accepted after the subcommand.
 
 **Done when:** `forge init` on an empty repo produces the expected tree (snapshot test); `forge setup` interactive flow tested with simulated input (accept defaults, edit a tier, local models from a stubbed `ollama list`); changing the profile re-renders `.claude/agents/forge-*.md` with the new models and they stay gitignored; `adapters generate --check` detects drift; `forge setup --check` reports each missing prerequisite with a fix; prompts reviewed against §12 (each states goal, CLI calls, exit-code handling, guardrails, final report).
 
