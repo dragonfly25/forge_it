@@ -51,3 +51,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - `forge review <pr>`: prints the review context (task, ACs, diff, zone check, CI, reviews), or submits a review with `--submit`. It refuses agents below `min_tier_for.reviewer` unless `--force`.
   - `forge handoff --note-file F`: pushes the work with a handoff event commit, posts the note, unassigns you and sets `status:handoff`.
   - `forge propose --title T --body-file F`: opens a `status:proposed` issue, or returns the existing one with the same title.
+- Planning (Phase 7, ADR 0013):
+  - Spec frontmatter, acceptance criteria and open-question checks.
+  - Roadmap and plan file models.
+  - `forge plan validate <M>`: runs offline and reports every §9.4 error and warning, the waves and the AC coverage matrix. It enforces `min_tier_for.plan` unless `--force` or CI.
+  - `forge plan apply <M> [--dry-run]`: idempotent. It creates and updates task issues, and limits started tasks to title, description and done-when, with a warning comment for other changes. It closes removed tasks that were never started, adopts proposals named with `proposal: <n>`, recomputes statuses, and converges when two applies run at once.

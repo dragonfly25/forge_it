@@ -73,10 +73,12 @@ Progress notes: ADR 0012 covers the PR body block, reviewer selection, the check
 
 **Done when:** FakeGitHub tests verify PR body sections, labels, reviewer selection rules, handoff comment + unassign + label, proposal issue shape.
 
-## [ ] Phase 7 — Planning
-- `core/spec.py`: spec frontmatter + AC extraction + open-questions check.
-- `core/plan.py`: roadmap and plan file models, `validate` (all errors/warnings in §9.4, waves, coverage matrix), `apply` (idempotent upsert rules in §9.5).
-- Commands: `forge plan validate`, `forge plan apply`.
+## [x] Phase 7 — Planning
+- [x] `core/spec.py`: spec frontmatter + AC extraction + open-questions check.
+- [x] `core/plan.py`: roadmap and plan file models, `validate` (all errors/warnings in §9.4, waves, coverage matrix), `apply` (idempotent upsert rules in §9.5).
+- [x] Commands: `forge plan validate`, `forge plan apply`.
+
+Progress notes: ADR 0013 covers offline validation, the two extra AC errors, apply's two Forge regions in the issue body, the rules for started tasks, proposal adoption (`proposal: <n>`) and convergence when two applies run at once. Apply is a separate module, `core/plan_apply.py`.
 
 **Done when:** validation test matrix (each error and warning); applying the same plan twice changes nothing; edits to in-progress tasks follow §9.5; removed tasks handled per rules.
 
