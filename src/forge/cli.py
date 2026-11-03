@@ -9,17 +9,21 @@ import typer
 from typer.core import TyperGroup
 
 from forge import __version__
+from forge.commands import adapters as adapters_cmd
 from forge.commands import escalate as escalate_cmd
 from forge.commands import handoff as handoff_cmd
 from forge.commands import heartbeat as heartbeat_cmd
+from forge.commands import init as init_cmd
 from forge.commands import next as next_cmd
 from forge.commands import plan as plan_cmd
 from forge.commands import plan_apply as plan_apply_cmd
+from forge.commands import profile as profile_cmd
 from forge.commands import propose as propose_cmd
 from forge.commands import reclaim as reclaim_cmd
 from forge.commands import refresh as refresh_cmd
 from forge.commands import release_claim as release_cmd
 from forge.commands import review as review_cmd
+from forge.commands import setup as setup_cmd
 from forge.commands import ship as ship_cmd
 from forge.commands import status as status_cmd
 from forge.commands import sync as sync_cmd
@@ -48,8 +52,127 @@ def _usage_error_class(bad_parameter: type[Exception]) -> type[Exception]:
 _UsageError: type[Exception] = _usage_error_class(typer.BadParameter)
 
 
+GLOBAL_FLAGS: frozenset[str] = frozenset({"--json", "--verbose", "-v", "--yes", "-y"})
+"""Global flags (§16) also accepted after the subcommand."""
+
+GLOBAL_VALUE_OPTIONS: frozenset[str] = frozenset({"--agent", "--repo"})
+"""Global options taking one value, also accepted after the subcommand."""
+
+
+def _option_arity(command: Any) -> dict[str, int]:
+    """Map every option name of ``command`` (plus ``--help``) to the values it consumes."""
+    arity: dict[str, int] = {"--help": 0}
+    for param in getattr(command, "params", ()):
+        if getattr(param, "param_type_name", None) != "option":
+            continue
+        takes = 0 if (param.is_flag or param.count) else max(int(param.nargs), 1)
+        for name in [*param.opts, *param.secondary_opts]:
+            arity[name] = takes
+    return arity
+
+
+def _skip_group_options(command: Any, args: list[str], i: int) -> int | None:
+    """Index of the first non-option token of a group's ``args`` from ``i``.
+
+    ``None`` when the group's options cannot be walked safely (``--``, an unknown option or a
+    missing value): the arguments are then left exactly as given.
+    """
+    arity = _option_arity(command)
+    while i < len(args):
+        token = args[i]
+        if token == "--":
+            return None
+        if not token.startswith("-") or token == "-":
+            return i
+        name, eq, _ = token.partition("=")
+        if name not in arity:
+            return None
+        i += 1
+        if not eq:
+            i += arity[name]
+    return None
+
+
+def hoist_global_options(root: Any, ctx: Any, args: list[str]) -> list[str]:
+    """Move global options written after the subcommand in front of it (spec §12, §16).
+
+    ``forge status --json`` becomes ``forge --json status``. The subcommand path is resolved
+    through nested groups (``forge task show 42 --json``). In the leaf command's arguments the
+    flags in :data:`GLOBAL_FLAGS` and the options in :data:`GLOBAL_VALUE_OPTIONS` (``--agent X``
+    or ``--agent=X``) are hoisted unless the leaf defines an option with that name itself
+    (``forge setup --yes``). Nothing after ``--`` moves, and the value of one of the leaf's own
+    value-taking options is never taken for a flag (``--title --json``), and a global option
+    whose next token is another option keeps no value (click reports it). Hoisted options are
+    inserted right after the root options, so when a global is repeated the one written after
+    the subcommand still wins (click keeps the last value). Anything that cannot be parsed
+    safely is left untouched, so click reports it as before.
+    """
+    i = _skip_group_options(root, args, 0)
+    if i is None:
+        return args
+    root_end = i  # hoisted options go here, after the root options, keeping their order
+    command: Any = root
+    while hasattr(command, "commands"):
+        if i is None or i >= len(args):
+            return args
+        sub = command.get_command(ctx, args[i])
+        if sub is None:
+            return args
+        command = sub
+        i += 1
+        if hasattr(command, "commands"):
+            i = _skip_group_options(command, args, i)
+    assert i is not None
+    own = _option_arity(command)
+    head, tail = args[:i], args[i:]
+    hoisted: list[str] = []
+    kept: list[str] = []
+    j = 0
+    while j < len(tail):
+        token = tail[j]
+        if token == "--":
+            kept += tail[j:]
+            break
+        name, eq, _ = token.partition("=")
+        if name in own:
+            take = 0 if eq else own[name]
+            kept += tail[j : j + 1 + take]
+            j += 1 + take
+            continue
+        if name in GLOBAL_FLAGS and not eq:
+            hoisted.append(token)
+            j += 1
+            continue
+        if name in GLOBAL_VALUE_OPTIONS:
+            if eq:
+                hoisted.append(token)
+                j += 1
+                continue
+            nxt = tail[j + 1].partition("=")[0] if j + 1 < len(tail) else None
+            if nxt is not None and not (
+                nxt in GLOBAL_FLAGS or nxt in GLOBAL_VALUE_OPTIONS or nxt in own
+            ):
+                hoisted += tail[j : j + 2]
+                j += 2
+                continue
+        kept.append(token)
+        j += 1
+    if not hoisted:
+        return args
+    return [*head[:root_end], *hoisted, *head[root_end:], *kept]
+
+
 class ForgeGroup(TyperGroup):
-    """Root command group: usage errors exit 1, because exit 2 means "agent action" (§16)."""
+    """Root command group.
+
+    - Usage errors exit 1, because exit 2 means "agent action" (§16).
+    - Global options are accepted before and after the subcommand
+      (:func:`hoist_global_options`).
+    """
+
+    def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
+        """Hoist trailing global options in front of the subcommand, then parse."""
+        return super().parse_args(ctx, hoist_global_options(self, ctx, list(args)))
 
     def make_context(self, *args: Any, **kwargs: Any) -> Any:
         try:
@@ -147,3 +270,21 @@ plan_app.command("apply", help="Create or update the milestone's task issues (§
     plan_apply_cmd.apply
 )
 app.add_typer(plan_app, name="plan")
+app.command("init", help="Scaffold Forge project files from templates (§5.2).")(init_cmd.init)
+adapters_cmd.adapters_app.command(
+    "generate", help="Regenerate adapter files; --check fails on drift (§13)."
+)(adapters_cmd.generate)
+app.add_typer(adapters_cmd.adapters_app, name="adapters")
+app.command("setup", help="Check this machine and create or update the profile (§6.5).")(
+    setup_cmd.setup
+)
+profile_cmd.profile_app.command("show", help="Show the profile and resolved models.")(
+    profile_cmd.show
+)
+profile_cmd.profile_app.command("set", help="Set <agent>.<tier|effort.level>=<value>.")(
+    profile_cmd.set_
+)
+profile_cmd.profile_app.command("edit", help="Edit the profile in $VISUAL or $EDITOR.")(
+    profile_cmd.edit
+)
+app.add_typer(profile_cmd.profile_app, name="profile")

@@ -193,3 +193,171 @@ def test_usage_error_base_class_is_checked_at_import() -> None:
 
     with pytest.raises(ImportError, match=r"UsageError.*SomethingElse"):
         cli._usage_error_class(BadParameter)
+
+
+# -- global options after the subcommand (spec §12, §16) --------------------------------------
+
+Captured = list[tuple[GlobalOptions, dict[str, object]]]
+
+
+@pytest.fixture
+def captured(monkeypatch: pytest.MonkeyPatch) -> Captured:
+    """Stop the real commands right after parsing and record their options and params."""
+    from forge.commands import _output
+    from forge.commands import next as next_mod
+    from forge.commands import plan as plan_mod
+    from forge.commands import propose as propose_mod
+    from forge.commands import setup as setup_mod
+    from forge.commands import status as status_mod
+    from forge.commands import task as task_mod
+
+    records: Captured = []
+
+    def record(ctx: typer.Context) -> GlobalOptions:
+        opts = _output.get_options(ctx)
+        records.append((opts, dict(ctx.params)))
+        raise typer.Exit(0)
+
+    for module in (next_mod, plan_mod, propose_mod, setup_mod, status_mod, task_mod):
+        monkeypatch.setattr(module, "get_options", record)
+    return records
+
+
+def invoke(args: list[str], captured: Captured) -> tuple[GlobalOptions, dict[str, object]]:
+    result = runner.invoke(app, args, env={"FORGE_AGENT": None})
+    assert result.exit_code == 0, result.output
+    assert len(captured) == 1
+    return captured[0]
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["status", "--json"], GlobalOptions(json=True)),
+        (["status", "--verbose"], GlobalOptions(verbose=True)),
+        (["status", "-v"], GlobalOptions(verbose=True)),
+        (["status", "--yes"], GlobalOptions(yes=True)),
+        (["status", "-y"], GlobalOptions(yes=True)),
+        (["status", "--agent", "a"], GlobalOptions(agent="a")),
+        (["status", "--repo", "/tmp/r"], GlobalOptions(repo=Path("/tmp/r"))),
+        (["next", "--agent", "a", "--json"], GlobalOptions(json=True, agent="a")),
+        (["next", "--agent=a", "--repo=/tmp/r"], GlobalOptions(agent="a", repo=Path("/tmp/r"))),
+        (["plan", "validate", "M1", "--json"], GlobalOptions(json=True)),
+        (["task", "show", "42", "--json", "-v"], GlobalOptions(json=True, verbose=True)),
+        (["task", "show", "--agent", "b", "42"], GlobalOptions(agent="b")),
+        (["--json", "status", "-v"], GlobalOptions(json=True, verbose=True)),
+    ],
+)
+def test_global_options_after_the_subcommand(
+    args: list[str], expected: GlobalOptions, captured: Captured
+) -> None:
+    opts, _ = invoke(args, captured)
+    assert opts == expected
+
+
+def test_nested_command_keeps_its_positional_argument(captured: Captured) -> None:
+    opts, params = invoke(["task", "show", "42", "--json"], captured)
+    assert opts.json and params["task"] == "42"
+    opts, params = invoke_again(["plan", "validate", "M1", "--agent=x"], captured)
+    assert opts.agent == "x" and params["milestone"] == "M1"
+
+
+def invoke_again(args: list[str], captured: Captured) -> tuple[GlobalOptions, dict[str, object]]:
+    captured.clear()
+    return invoke(args, captured)
+
+
+def test_leaf_own_option_is_not_hoisted(captured: Captured) -> None:
+    # `forge setup` defines its own --yes/-y: it stays the command's option.
+    opts, params = invoke(["setup", "--yes", "--json"], captured)
+    assert opts == GlobalOptions(json=True)
+    assert params["yes"] is True
+    opts, params = invoke_again(["setup", "-y"], captured)
+    assert opts == GlobalOptions() and params["yes"] is True
+
+
+def test_value_of_a_leaf_option_that_looks_like_a_flag(captured: Captured) -> None:
+    opts, params = invoke(["propose", "--title", "--json", "--body-file", "b.md"], captured)
+    assert opts == GlobalOptions()
+    assert params["title"] == "--json"
+    opts, params = invoke_again(["propose", "--title=--agent", "--body-file", "b.md"], captured)
+    assert opts == GlobalOptions() and params["title"] == "--agent"
+
+
+def test_nothing_after_double_dash_is_hoisted() -> None:
+    from forge.cli import hoist_global_options
+
+    group = typer.main.get_command(app)
+    ctx = group.make_context("forge", ["--version"])
+    assert hoist_global_options(group, ctx, ["task", "show", "--", "--json"]) == [
+        "task",
+        "show",
+        "--",
+        "--json",
+    ]
+    assert hoist_global_options(group, ctx, ["next", "--json", "--", "-v"]) == [
+        "--json",
+        "next",
+        "--",
+        "-v",
+    ]
+
+
+def test_double_dash_value_reaches_the_command(captured: Captured) -> None:
+    opts, params = invoke(["task", "show", "--json", "--", "--agent"], captured)
+    assert opts == GlobalOptions(json=True)
+    assert params["task"] == "--agent"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["status", "--bogus", "--json"],
+        ["task", "show", "--bogus"],
+        ["next", "--agent"],  # no value: not hoisted, click reports it
+        ["plan", "nope", "--json"],
+        ["status", "-vy"],  # clusters are not split after the subcommand
+    ],
+)
+def test_unknown_options_still_usage_error_exit_1(args: list[str], captured: Captured) -> None:
+    result = runner.invoke(app, args)
+    assert result.exit_code == ExitCode.ERROR
+    assert captured == []
+
+
+def test_before_the_subcommand_is_unchanged(captured: Captured) -> None:
+    opts, _ = invoke(["--json", "--agent", "a", "-v", "-y", "next"], captured)
+    assert opts == GlobalOptions(json=True, agent="a", verbose=True, yes=True)
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["--agent", "a", "next", "--agent", "b"], GlobalOptions(agent="b")),
+        (["--repo", "/x", "status", "--repo", "/y"], GlobalOptions(repo=Path("/y"))),
+        (["--agent", "a", "task", "show", "42", "--agent=b"], GlobalOptions(agent="b")),
+    ],
+)
+def test_a_repeated_global_written_after_the_subcommand_wins(
+    args: list[str], expected: GlobalOptions, captured: Captured
+) -> None:
+    opts, _ = invoke(args, captured)
+    assert opts == expected
+
+
+def test_global_value_option_never_takes_another_option_as_its_value() -> None:
+    from forge.cli import hoist_global_options
+
+    group = typer.main.get_command(app)
+    ctx = group.make_context("forge", ["--version"])
+    assert hoist_global_options(group, ctx, ["next", "--agent", "--json"]) == [
+        "--json",
+        "next",
+        "--agent",
+    ]
+    assert hoist_global_options(group, ctx, ["next", "--agent", "--task", "4"]) == [
+        "next",
+        "--agent",
+        "--task",
+        "4",
+    ]
