@@ -164,3 +164,32 @@ def test_emit_text_mode(capsys: pytest.CaptureFixture[str]) -> None:
     assert "version" in captured.out and "1.0" in captured.out
     assert "info: hello" in captured.err
     assert "hello" not in captured.out
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["no-such-command"], ["--no-such-option"], ["escalate"], ["task", "show", "--bogus"]],
+    ids=["unknown-command", "unknown-root-option", "missing-option", "nested-bad-option"],
+)
+def test_usage_errors_exit_1_not_the_agent_action_code(args: list[str]) -> None:
+    result = runner.invoke(app, args)
+    assert result.exit_code == ExitCode.ERROR
+
+
+def test_usage_error_base_class_is_checked_at_import() -> None:
+    """forge.cli takes click's UsageError from Typer's BadParameter MRO and fails loudly if
+    a Typer release changes that hierarchy."""
+    from forge import cli
+
+    assert cli._UsageError.__name__ == "UsageError"
+    assert issubclass(typer.BadParameter, cli._UsageError)
+    assert cli._usage_error_class(typer.BadParameter) is cli._UsageError
+
+    class SomethingElse(Exception):
+        pass
+
+    class BadParameter(SomethingElse):
+        pass
+
+    with pytest.raises(ImportError, match=r"UsageError.*SomethingElse"):
+        cli._usage_error_class(BadParameter)

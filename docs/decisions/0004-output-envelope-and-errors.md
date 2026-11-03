@@ -22,3 +22,7 @@ Spec §16 requires every command to support `--json` with `{"ok", "code", "data"
 
 - Agents can parse every command the same way. Prompts reference only `code` and `data`.
 - Later phases add their command-specific `data` schemas to `docs/forge/commands.md` (Phase 9).
+
+## Amendment (Phase 5): usage errors exit 1
+
+Command-line usage errors exited 2 through Typer and click: a missing required option, an unknown option or command, a bad value. Spec §16 reserves exit 2 for "agent action needed", so an agent could take a typo for a conflict to resolve. The root command group (`ForgeGroup` in `cli.py`) now gives every usage error exit 1. The rich error message stays as it is. Usage errors are not wrapped in the JSON envelope even with `--json`, because they happen before any command runs.

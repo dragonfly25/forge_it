@@ -50,8 +50,10 @@ from forge.core.lease import (
     format_time,
     is_stale,
     last_activity,
+    lease_names_claim,
     load_task,
     read_branch,
+    run_of,
     stale_at,
     upsert_lease,
 )
@@ -574,7 +576,7 @@ def _assess_claim(
     """Return (last activity, stale). The lease is read only when it can matter."""
     if not exact and not is_stale(claim.tip_date, lease_hours, now):
         return claim.tip_date, False
-    activity = last_activity(claim.tip_date, leases.get(claim.issue), claim.sha)
+    activity = last_activity(claim.tip_date, leases.get(claim.issue), claim.sha, claim.run)
     return activity, is_stale(activity, lease_hours, now)
 
 
@@ -974,10 +976,16 @@ def _live_conflicts(
 
 
 def _still_claimed(branch: TaskBranch | None, claim: ClaimInfo) -> bool:
+    """True when ``branch`` still carries ``claim``: the same claim commit, or the same
+    ``Forge-Run`` (ADR 0011 lease identity: a sync rebased the claim commit, new sha)."""
     if branch is None:
         return False
     current = find_claim(claim.issue, branch, claim.task_id)
-    return current is not None and current.sha == claim.sha
+    if current is None:
+        return False
+    if current.sha == claim.sha:
+        return True
+    return current.run is not None and claim.run is not None and current.run == claim.run
 
 
 def _verify(
@@ -1044,6 +1052,7 @@ class _Previous:
     agent: str | None
     sha: str
     tip_date: datetime
+    run: str | None = None
 
 
 def _previous_claim(ctx: ClaimContext, record: TaskRecord, claim_sha: str) -> _Previous | None:
@@ -1057,7 +1066,8 @@ def _previous_claim(ctx: ClaimContext, record: TaskRecord, claim_sha: str) -> _P
     event = last_event_from_trailers([older[index].trailers], task_id=record.meta.id)
     if event is None or event.event is not BranchEvent.CLAIM:
         return None
-    return _Previous(event.author, event.agent, older[index].sha, older[0].date)
+    commit = older[index]
+    return _Previous(event.author, event.agent, commit.sha, older[0].date, run_of(commit.trailers))
 
 
 def _confirm_claim(ctx: ClaimContext, record: TaskRecord, claim_sha: str) -> None:
@@ -1099,6 +1109,12 @@ def _apply_labels(github: GitHubClient, issue_number: int, diff: LabelDiff) -> N
         github.add_labels(issue_number, sorted(diff.add))
     for name in sorted(diff.remove):
         github.remove_label(issue_number, name)
+
+
+def _commit_run(git: Git, sha: str) -> str | None:
+    """The ``Forge-Run`` trailer of commit ``sha`` (``None`` when it has none)."""
+    found = git.commits(f"{sha}^!")
+    return run_of(found[0].trailers) if found else None
 
 
 def _reclaim_marker(claim_sha: str) -> str:
@@ -1166,7 +1182,7 @@ def _post_claim(
     if previous is not None:
         marker = _reclaim_marker(claim_sha)
         if not any(marker in c.body for c in comments):
-            activity = last_activity(previous.tip_date, lease, previous.sha)
+            activity = last_activity(previous.tip_date, lease, previous.sha, previous.run)
             went_stale = format_time(stale_at(activity, ctx.config.lease_hours))
             github.create_comment(
                 number,
@@ -1175,9 +1191,10 @@ def _post_claim(
                 f"claim by @{previous.owner} (agent {previous.agent or 'unknown'}, commit "
                 f"`{previous.sha[:12]}`) went stale at {went_stale}.\n",
             )
+    run = _commit_run(ctx.git, claim_sha)
     claimed_at = (
         lease.claimed_at
-        if lease is not None and lease.claim == claim_sha
+        if lease is not None and lease_names_claim(lease, claim_sha, run)
         else ctx.git.commit_date(claim_sha).astimezone(UTC)
     )
     data = LeaseData(
@@ -1187,6 +1204,7 @@ def _post_claim(
         claim=claim_sha,
         claimed_at=claimed_at,
         heartbeat_at=now,
+        run=run,
     )
     _confirm_claim(ctx, record, claim_sha)
     if recorded:
@@ -1298,7 +1316,7 @@ def claim_next(ctx: ClaimContext, options: NextOptions | None = None) -> NextOut
         lease = leases.get(view.issue)
         claim = view.claim
         assert claim is not None
-        return lease is not None and lease.claim == claim.sha and lease.released_at is None
+        return lease is not None and claim.named_by(lease) and lease.released_at is None
 
     def _incomplete(current: TaskSnapshot) -> set[int]:
         return {v.issue for v in current.views.values() if _mine(v) and not _complete(v)}
@@ -1670,7 +1688,7 @@ def release_claim(
     recovered = False
     if claim is not None and claim.is_mine(login, ctx.agent.id):
         assert branch is not None
-        activity = last_activity(claim.tip_date, lease, claim.sha)
+        activity = last_activity(claim.tip_date, lease, claim.sha, claim.run)
         if is_stale(activity, ctx.config.lease_hours, now):
             # Nobody reclaimed it (their claim would be the last event): release it anyway.
             warnings.append(
@@ -1678,6 +1696,7 @@ def release_claim(
                 f"{format_time(stale_at(activity, ctx.config.lease_hours))}; released"
             )
         claim_sha = claim.sha
+        claim_run = claim.run
         tip = branch.tip
         unpushed = _count_unpushed(ctx.git, local_ref or ref, tip)
         if unpushed:
@@ -1719,6 +1738,7 @@ def release_claim(
     elif _interrupted_release(login, ctx.agent.id, record, branch, lease):
         assert lease is not None
         claim_sha = lease.claim
+        claim_run = lease.run
         recovered = True
         deleted = branch is None
         warnings.append(f"#{issue_number}: completing an interrupted release")
@@ -1763,19 +1783,22 @@ def release_claim(
             f"{marker}\n**Forge release**: {login} (agent {ctx.agent.id}) released "
             f"`{task_id}`. Branch `{name}` {kept}. Status: {status}.\n",
         )
-    if lease is not None and lease.claim == claim_sha:
+    if lease is not None and lease_names_claim(lease, claim_sha, claim_run):
         released = LeaseData(
             lease.task,
             lease.owner,
             lease.agent,
-            lease.claim,
+            claim_sha,
             lease.claimed_at,
             lease.heartbeat_at,
             now,
+            run=claim_run,
         )
     else:
         claimed_at = claim.date if claim is not None else now
-        released = LeaseData(task_id, login, ctx.agent.id, claim_sha, claimed_at, now, now)
+        released = LeaseData(
+            task_id, login, ctx.agent.id, claim_sha, claimed_at, now, now, run=claim_run
+        )
     upsert_lease(github, issue_number, released, comments=github.list_comments(issue_number))
     # a leftover of an incomplete claim
     remove_pending(ctx.git, issue_number, claim_sha, timeout=ctx.lock_timeout)

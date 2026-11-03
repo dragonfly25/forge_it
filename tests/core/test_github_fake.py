@@ -426,3 +426,43 @@ def test_fake_set_ci(gh: FakeGitHub) -> None:
     passing = CiStatus("success", 1, (), ())
     gh.fake_set_ci("a" * 40, passing)
     assert gh.commit_ci("a" * 40) == passing
+
+
+# ---------------------------------------------------------------- commit_pulls (Phase 5)
+
+
+def test_commit_pulls_unknown_commit_is_empty(gh: FakeGitHub) -> None:
+    assert gh.commit_pulls("a" * 40) == []
+
+
+def test_fake_link_commit(gh: FakeGitHub) -> None:
+    first = gh.create_pull("one", "", "task/1", "main")
+    second = gh.create_pull("two", "", "task/2", "main")
+    sha = "c" * 40
+    gh.fake_link_commit(sha, second.number)
+    gh.fake_link_commit(sha, first.number)
+    gh.fake_link_commit(sha, second.number)  # no duplicate
+    assert [p.number for p in gh.commit_pulls(sha)] == [second.number, first.number]
+    assert gh.commit_pulls("d" * 40) == []
+    with pytest.raises(GitHubError) as exc:
+        gh.fake_link_commit(sha, 999)
+    assert exc.value.status == 404
+
+
+def test_commit_pulls_reflects_current_state(gh: FakeGitHub) -> None:
+    pr = gh.create_pull("one", "", "task/1", "main")
+    sha = "e" * 40
+    gh.fake_link_commit(sha, pr.number)
+    assert gh.commit_pulls(sha)[0].state == "open"
+    gh.fake_merge_pull(pr.number)
+    linked = gh.commit_pulls(sha)
+    assert linked[0].merged is True and linked[0].state == "closed"
+
+
+def test_merge_links_head_sha(gh: FakeGitHub) -> None:
+    pr = gh.create_pull("one", "Closes #1", "task/1", "main")
+    head = "f" * 40
+    gh.fake_set_head_sha(pr.number, head)
+    assert gh.commit_pulls(head) == []  # open pull requests are linked only explicitly
+    merged = gh.fake_merge_pull(pr.number)
+    assert gh.commit_pulls(head) == [merged]

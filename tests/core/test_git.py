@@ -13,7 +13,15 @@ from typing import TYPE_CHECKING
 import pytest
 
 from forge.core.errors import ForgeError
-from forge.core.git import CommitFiles, Git, GitError, Lease, parse_version
+from forge.core.git import (
+    CommitFiles,
+    Git,
+    GitAddFailed,
+    GitError,
+    Lease,
+    PushHookRejected,
+    parse_version,
+)
 
 if TYPE_CHECKING:
     from conftest import GitWorld
@@ -829,3 +837,375 @@ def test_commits_with_files_rename_lists_both_paths(git_world: GitWorld) -> None
     result = alice.commits_with_files("origin/main..HEAD")
     assert result[0].commit.sha == renamed
     assert sorted(result[0].files) == ["README.md", "README.txt"]
+
+
+# --------------------------------------------------------------- sync primitives (Phase 5)
+
+
+def test_rebase_keeps_empty_claim_commit_with_trailers_and_date(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    bob = git_world.clone("bob")
+    when = datetime(2026, 2, 3, 4, 5, 6, tzinfo=UTC)
+    base = git_world.initial_sha
+    claim = alice.commit_tree(
+        alice.tree_of(base),
+        [base],
+        "forge: claim T1",
+        {"Forge-Claim": "alice", "Forge-Run": "run-1"},
+        date=when,
+    )
+    alice.reset(claim, "hard")
+    work = git_world.commit_file(alice, "src/a.py", "a\n", "feat: a")
+    git_world.commit_file(bob, "docs/b.md", "b\n", "docs: b")
+    git_world.push(bob, "main")
+    alice.fetch()
+
+    result = alice.rebase(
+        "origin/main", rerere=True, keep_empty=True, committer_date_is_author_date=True
+    )
+    assert result.ok and result.conflicts == []
+    rebased = alice.commits("origin/main..HEAD")
+    assert [c.subject for c in rebased] == ["feat: a", "forge: claim T1"]
+    new_claim = rebased[1]
+    assert new_claim.sha != claim
+    assert new_claim.trailers == {"Forge-Claim": "alice", "Forge-Run": "run-1"}
+    assert new_claim.date == when
+    assert alice.commit_date(new_claim.sha) == when
+    assert alice.commits_with_files(new_claim.sha + "^!")[0].files == ()
+    assert rebased[0].sha != work
+    assert alice.rev_parse(new_claim.sha + "^") == alice.rev_parse("origin/main")
+
+
+def test_rebase_with_rerere_replays_a_recorded_resolution(git_world: GitWorld) -> None:
+    bob, before = _conflicting_setup(git_world)
+    first = bob.rebase("origin/main", rerere=True)
+    assert not first.ok and first.conflicts == ["README.md"] and first.rerere == []
+    (bob.cwd / "README.md").write_text("alice\nbob\n")
+    bob.add_paths(["README.md"])
+    assert bob.rebase_continue(rerere=True).ok
+    assert bob.config_get("rerere.enabled") is None  # per command only
+
+    bob.reset(before, "hard")
+    second = bob.rebase("origin/main", rerere=True)
+    # rerere resolved and staged the conflict: the rebase stops with nothing unmerged.
+    assert not second.ok and second.conflicts == [] and second.rerere == ["README.md"]
+    assert bob.unmerged_files() == []
+    assert (bob.cwd / "README.md").read_text() == "alice\nbob\n"
+    assert bob.rebase_continue(rerere=True).ok
+    assert not bob.rebase_in_progress()
+
+
+def test_rebase_reports_rerere_paths_only_for_resolved_conflicts(git_world: GitWorld) -> None:
+    """Two conflicted paths (one with a space and a quote), one resolution recorded: the stop
+    reports the replayed path in ``rerere`` and the other one in ``conflicts``. (The two
+    conflicts differ in content: rerere keys resolutions on the conflict text.)"""
+    odd = "docs/it's a file.txt"
+    alice = git_world.clone("alice")
+    bob = git_world.clone("bob")
+    git_world.commit_file(alice, odd, "base\n", "chore: base")
+    git_world.commit_file(alice, "b.txt", "base\n", "chore: base b")
+    git_world.push(alice, "main")
+    bob.fetch()
+    bob.reset("origin/main", "hard")
+    git_world.commit_file(bob, odd, "bob\n", "feat: bob odd")
+    before = git_world.commit_file(bob, "b.txt", "bob b\n", "feat: bob b")
+    git_world.commit_file(alice, odd, "alice\n", "feat: alice odd")
+    git_world.commit_file(alice, "b.txt", "alice b\n", "feat: alice b")
+    git_world.push(alice, "main")
+    bob.fetch()
+
+    first = bob.rebase("origin/main", rerere=True)
+    assert not first.ok and first.conflicts == [odd] and first.rerere == []
+    (bob.cwd / odd).write_text("merged\n")
+    bob.add_paths([odd])
+    second = bob.rebase_continue(rerere=True)
+    assert not second.ok and second.conflicts == ["b.txt"] and second.rerere == []
+    bob.rebase_abort()  # the resolution of the odd path stays recorded
+    assert bob.rev_parse("HEAD") == before
+
+    third = bob.rebase("origin/main", rerere=True)
+    assert not third.ok and third.conflicts == [] and third.rerere == [odd]
+    assert (bob.cwd / odd).read_text() == "merged\n"
+    fourth = bob.rebase_continue(rerere=True)
+    assert not fourth.ok and fourth.conflicts == ["b.txt"] and fourth.rerere == []
+    bob.rebase_abort()
+
+
+def test_restore_conflict_after_rerere_and_after_add(git_world: GitWorld) -> None:
+    bob, before = _conflicting_setup(git_world)
+    assert not bob.rebase("origin/main", rerere=True).ok
+    (bob.cwd / "README.md").write_text("alice\nbob\n")
+    bob.add_paths(["README.md"])
+    assert bob.restore_conflict("README.md")  # resolved by git add: back to unmerged
+    assert bob.conflicted_files() == ["README.md"]
+    assert "<<<<<<<" in (bob.cwd / "README.md").read_text()
+    (bob.cwd / "README.md").write_text("alice\nbob\n")
+    bob.add_paths(["README.md"])
+    assert bob.rebase_continue(rerere=True).ok
+    bob.reset(before, "hard")
+    replay = bob.rebase("origin/main", rerere=True)
+    assert replay.rerere == ["README.md"] and bob.conflicted_files() == []
+    assert bob.restore_conflict("README.md")  # resolved by rerere: back to unmerged
+    assert bob.conflicted_files() == ["README.md"]
+    assert bob.stage_blob(2, "README.md") == b"alice\n"
+    assert not bob.restore_conflict("missing.txt")
+    bob.rebase_abort()
+
+
+def test_commit_all_reports_a_failing_add_separately(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    tip = alice.rev_parse("HEAD")
+    (alice.cwd / "README.md").write_text("changed\n")
+    secret = alice.cwd / "unreadable.txt"
+    secret.write_text("x\n")
+    secret.chmod(0)
+    try:
+        with pytest.raises(GitAddFailed) as info:
+            alice.commit_all("forge: wip")
+        assert info.value.git_args == ("add", "-A") and "unreadable.txt" in info.value.stderr
+        assert alice.rev_parse("HEAD") == tip
+    finally:
+        secret.chmod(0o644)
+    _install_pre_commit = alice.cwd / ".git" / "hooks" / "pre-commit"
+    _install_pre_commit.write_text("#!/bin/sh\nexit 1\n")
+    _install_pre_commit.chmod(0o755)
+    with pytest.raises(GitError) as hook:
+        alice.commit_all("forge: wip")
+    assert not isinstance(hook.value, GitAddFailed)
+
+
+def test_rerere_messages_are_filtered(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    output = "\n".join(
+        [
+            "Recorded resolution for 'README.md'.",
+            "Staged 'README.md' using previous resolution.",
+            "Staged 'README.md' using previous resolution.",
+            "Resolved 'still/unmerged.txt' using previous resolution.",
+            "Staged 'not/in/index.txt' using previous resolution.",
+            "Rebasing (1/2)\rStaged 'README.md' using previous resolution.",
+        ]
+    )
+    assert alice._rerere_reused(output, ["still/unmerged.txt"]) == ["README.md"]
+
+
+def test_dirty_files(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    git_world.commit_file(alice, "gone.txt", "x\n", "chore: gone")
+    git_world.commit_file(alice, "old name.txt", "x\n", "chore: old")
+    assert alice.dirty_files() == []
+    (alice.cwd / ".gitignore").write_text("*.log\n")
+    (alice.cwd / "debug.log").write_text("ignored\n")
+    (alice.cwd / "README.md").write_text("changed\n")
+    (alice.cwd / "gone.txt").unlink()
+    alice.run("mv", "old name.txt", "new name.txt")
+    (alice.cwd / "sub").mkdir()
+    (alice.cwd / "sub/new.txt").write_text("new\n")
+    (alice.cwd / "staged.txt").write_text("staged\n")
+    alice.add(["staged.txt"])
+    expected = [
+        ".gitignore",
+        "README.md",
+        "gone.txt",
+        "new name.txt",
+        "old name.txt",
+        "staged.txt",
+        "sub/new.txt",
+    ]
+    assert alice.dirty_files() == expected
+    assert Git(alice.cwd / "sub").dirty_files() == expected  # repository-relative anywhere
+    alice.commit_all("chore: all")
+    assert sorted(alice.commits_with_files("HEAD^!")[0].files) == expected
+    assert alice.dirty_files() == []
+
+
+def test_unmerged_files_is_conflicted_files() -> None:
+    assert Git.unmerged_files is Git.conflicted_files
+
+
+def test_stage_blob_and_checkout_stage(git_world: GitWorld) -> None:
+    bob, _ = _conflicting_setup(git_world)
+    assert not bob.rebase("origin/main").ok
+    assert bob.stage_blob(1, "README.md") == b"# test repo\n"
+    assert bob.stage_blob(2, "README.md") == b"alice\n"  # upstream during a rebase
+    assert bob.stage_blob(3, "README.md") == b"bob\n"
+    with pytest.raises(ValueError):
+        bob.stage_blob(0, "README.md")
+
+    bob.checkout_stage("README.md", "theirs")
+    assert (bob.cwd / "README.md").read_text() == "bob\n"
+    assert bob.conflicted_files() == ["README.md"]
+    bob.checkout_stage("README.md", "ours")
+    assert (bob.cwd / "README.md").read_text() == "alice\n"
+    bob.add_paths(["README.md"])
+    assert bob.conflicted_files() == []
+    assert bob.stage_blob(2, "README.md") is None  # resolved: only stage 0 remains
+    assert bob.rebase_continue().ok
+
+
+def test_stage_blob_odd_path_without_base(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    bob = git_world.clone("bob")
+    name = "caffè dir/naïve [x] *.txt"
+    git_world.commit_file(alice, name, "alice\n", "feat: alice")
+    git_world.push(alice, "main")
+    git_world.commit_file(bob, name, "bob\n", "feat: bob")
+    (bob.cwd / "caffè dir" / "naïve [y] z.txt").write_text("other\n")
+    bob.add_paths(["caffè dir/naïve [y] z.txt"])
+    bob.commit("feat: other")
+    bob.fetch()
+
+    result = bob.rebase("origin/main")
+    assert not result.ok and result.conflicts == [name]
+    assert bob.stage_blob(1, name) is None  # added on both sides: no base
+    assert bob.stage_blob(2, name) == b"alice\n"
+    assert bob.stage_blob(3, name) == b"bob\n"
+    assert bob.stage_blob(2, "caffè dir/missing.txt") is None
+    bob.checkout_stage(name, "theirs")
+    bob.add_paths([name])
+    assert bob.conflicted_files() == []
+
+
+def test_merge_file_union(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    merged = alice.merge_file_union(b"a\nX\nc\n", b"a\nb\nc\n", b"a\nY\nc\n")
+    assert merged == b"a\nX\nY\nc\n"
+    added = alice.merge_file_union("- ours ✓\n".encode(), b"", b"- theirs\n")
+    assert added == "- ours ✓\n- theirs\n".encode()
+    assert alice.merge_file_union(b"same\n", b"old\n", b"same\n") == b"same\n"
+
+
+def test_add_paths_stages_deletions_and_literal_names(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    git_world.commit_file(alice, "a b.txt", "x\n", "feat: a b")
+    git_world.commit_file(alice, "*.txt", "star\n", "feat: star")
+    (alice.cwd / "a b.txt").unlink()
+    (alice.cwd / "*.txt").write_text("changed\n")
+    (alice.cwd / "keep.txt").write_text("untouched\n")
+    alice.add_paths(["a b.txt"])
+    staged = _split(alice.run("diff", "--cached", "--name-status", "-z").stdout)
+    assert staged == ["D", "a b.txt"]
+    alice.add_paths(["*.txt"])  # literal: does not stage keep.txt
+    staged = _split(alice.run("diff", "--cached", "--name-only", "-z").stdout)
+    assert sorted(staged) == ["*.txt", "a b.txt"]
+    alice.add_paths([])
+
+
+def _split(out: str) -> list[str]:
+    return [item for item in out.split("\x00") if item]
+
+
+def _install_hook(git: Git, name: str, body: str) -> None:
+    hook = git.cwd / ".git" / "hooks" / name
+    hook.write_text("#!/bin/sh\n" + body)
+    hook.chmod(hook.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def test_commit_all_stages_everything(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    git_world.commit_file(alice, "gone.txt", "x\n", "feat: gone")
+    (alice.cwd / "gone.txt").unlink()
+    (alice.cwd / "README.md").write_text("changed\n")
+    (alice.cwd / "new file ✓.txt").write_text("new\n")
+    sha = alice.commit_all("forge: wip")
+    assert sha == alice.rev_parse("HEAD")
+    assert not alice.is_dirty()
+    assert alice.commits("HEAD^!")[0].subject == "forge: wip"
+    assert sorted(alice.diff_names("HEAD^", "HEAD")) == ["README.md", "gone.txt", "new file ✓.txt"]
+    with pytest.raises(GitError):
+        alice.commit_all("forge: wip")  # nothing to commit
+
+
+def test_commit_all_hook_rejection_raises_with_output(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    before = alice.rev_parse("HEAD")
+    _install_hook(alice, "pre-commit", "echo 'lint failed on x.py'\nexit 1\n")
+    (alice.cwd / "x.py").write_text("bad\n")
+    with pytest.raises(GitError) as excinfo:
+        alice.commit_all("forge: wip")
+    assert "lint failed on x.py" in excinfo.value.stderr
+    assert alice.rev_parse("HEAD") == before
+
+    _install_hook(alice, "pre-commit", "exit 0\n")
+    _install_hook(alice, "commit-msg", 'echo seen >> "$(git rev-parse --git-dir)/seen"\n')
+    alice.commit_all("forge: wip")
+    assert (alice.cwd / ".git" / "seen").read_text() == "seen\n"
+
+
+def test_reset_modes(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    base = git_world.initial_sha
+    git_world.commit_file(alice, "a.txt", "a\n", "feat: a")
+    tip = alice.rev_parse("HEAD")
+    assert tip is not None
+
+    alice.reset(base, "soft")
+    assert alice.rev_parse("HEAD") == base
+    assert _split(alice.run("diff", "--cached", "--name-only", "-z").stdout) == ["a.txt"]
+
+    alice.reset(tip, "hard")
+    alice.reset(base, "mixed")
+    assert alice.rev_parse("HEAD") == base
+    assert _split(alice.run("diff", "--cached", "--name-only", "-z").stdout) == []
+    assert (alice.cwd / "a.txt").read_text() == "a\n"  # untracked again
+
+    alice.reset(tip, "hard")
+    alice.reset(base, "hard")
+    assert not (alice.cwd / "a.txt").exists()
+    with pytest.raises(ValueError):
+        alice.reset(base, "keep")  # type: ignore[arg-type]
+
+
+def test_push_pre_push_hook_rejection_is_distinct_from_lease(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    ref = "refs/heads/task/7"
+    first = _claim_commit(alice, "alice")
+    assert alice.push(first, ref, lease=Lease(ref, None)).ok
+    second = alice.commit_tree(alice.tree_of(first), [first], "feat: more")
+
+    # Stale lease, no hook: a rejected result, not an exception.
+    stale = Lease(ref, git_world.initial_sha)
+    result = alice.push(second, ref, lease=stale)
+    assert not result.ok and result.rejected
+
+    # Hook rejects: a distinct exception, nothing pushed.
+    _install_hook(alice, "pre-push", "echo 'tests failed' >&2\nexit 1\n")
+    with pytest.raises(PushHookRejected) as excinfo:
+        alice.push(second, ref, lease=Lease(ref, first))
+    assert isinstance(excinfo.value, GitError)
+    assert "tests failed" in excinfo.value.stderr
+    assert git_world.remote_git.rev_parse(ref) == first
+
+    # Hook rejects and the lease is stale: git runs the hook first, so the hook wins.
+    with pytest.raises(PushHookRejected):
+        alice.push(second, ref, lease=stale)
+
+    # Hook passes, stale lease: rejected result; good lease: pushed.
+    _install_hook(alice, "pre-push", "exit 0\n")
+    result = alice.push(second, ref, lease=stale)
+    assert not result.ok and result.rejected
+    assert alice.push(second, ref, lease=Lease(ref, first)).ok
+    assert git_world.remote_git.rev_parse(ref) == second
+
+
+def test_push_hook_rejection_honours_core_hooks_path(git_world: GitWorld, tmp_path: Path) -> None:
+    alice = git_world.clone("alice")
+    hooks = tmp_path / "my hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-push"
+    hook.write_text("#!/bin/sh\necho 'custom hook' >&2\nexit 1\n")
+    hook.chmod(hook.stat().st_mode | stat.S_IXUSR)
+    alice.config_set("core.hooksPath", str(hooks))
+    ref = "refs/heads/task/8"
+    sha = _claim_commit(alice, "alice")
+    with pytest.raises(PushHookRejected) as excinfo:
+        alice.push(sha, ref, lease=Lease(ref, None))
+    assert "custom hook" in excinfo.value.stderr
+
+
+def test_push_unknown_source_with_hook_is_not_a_hook_rejection(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    _install_hook(alice, "pre-push", "exit 1\n")
+    with pytest.raises(GitError) as excinfo:
+        alice.push("refs/heads/nope", "refs/heads/task/9")
+    assert not isinstance(excinfo.value, PushHookRejected)
