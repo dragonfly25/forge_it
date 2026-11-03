@@ -13,8 +13,10 @@ import pytest
 
 from forge.core.errors import ExitCode, PreconditionError
 from forge.core.github import (
+    GAP_SPAN,
     LIST_PROBE_CAP,
     MIN_GH_VERSION,
+    RECENT_WINDOW,
     CiStatus,
     GhCliClient,
     GitHubClient,
@@ -956,7 +958,7 @@ def test_list_issues_probes_holes_among_the_newest_numbers() -> None:
     rest = LaggingRest(items, indexed={1, 2, 4, 5})
     issues = GhCliClient(REPO, runner=rest).list_issues()
     assert [i.number for i in issues] == [1, 2, 3, 4, 5]  # creation order kept
-    assert rest.probes == [3, 6]
+    assert rest.probes == [6, 3]  # above the newest first, then the gap
 
 
 def test_list_issues_short_index_means_holes_start_at_one() -> None:
@@ -964,14 +966,14 @@ def test_list_issues_short_index_means_holes_start_at_one() -> None:
     items = {n: rest_issue(n) for n in range(1, 4)}
     rest = LaggingRest(items, indexed={2, 3})
     assert [i.number for i in GhCliClient(REPO, runner=rest).list_issues()] == [1, 2, 3]
-    assert rest.probes == [1, 4]
+    assert rest.probes == [4, 1]
 
 
 def test_list_issues_deleted_hole_is_skipped() -> None:
     items = {n: rest_issue(n) for n in (1, 2, 4)}
     rest = LaggingRest(items, indexed={1, 2, 4}, gone={3})
     assert [i.number for i in GhCliClient(REPO, runner=rest).list_issues()] == [1, 2, 4]
-    assert rest.probes == [3, 5]
+    assert rest.probes == [5, 3]
 
 
 def test_list_issues_newest_number_comes_from_the_unfiltered_index() -> None:
@@ -1006,24 +1008,95 @@ def test_list_issues_probe_errors_propagate() -> None:
     assert exc.value.status == 502
 
 
-def test_recover_unlisted_stops_only_above_the_newest_number() -> None:
-    """A 404 on a hole (e.g. a Discussion number) does not stop the upward probing."""
+def test_list_issues_adds_recent_rows_the_filtered_list_missed() -> None:
+    """Review HIGH: the newest-issues request sees #4, the filtered list (lagging more, or
+    read earlier) does not. #4 must be returned without an extra call."""
+    items = {n: rest_issue(n) for n in range(1, 5)}
+    rest = LaggingRest(items, indexed={1, 2, 3}, recent_indexed={1, 2, 3, 4})
+    assert [i.number for i in GhCliClient(REPO, runner=rest).list_issues()] == [1, 2, 3, 4]
+    assert rest.probes == [5]
+
+
+def test_list_issues_filters_recent_rows_like_the_list() -> None:
+    m1 = {"number": 3, "title": "M1"}
+    labelled = [{"name": "forge:task"}]
+    items = {
+        1: rest_issue(1, labels=labelled, milestone=m1),
+        2: rest_pull(2),
+        3: rest_issue(3, labels=labelled, milestone=m1, state="closed"),
+        4: rest_issue(4, labels=[], milestone=m1),
+        5: rest_issue(5, labels=labelled, milestone={"number": 4, "title": "M2"}),
+        6: rest_issue(6, labels=[{"name": "FORGE:Task"}], milestone=m1),
+    }
+    rest = LaggingRest(items, indexed={1}, recent_indexed=set(items))
+    issues = GhCliClient(REPO, runner=rest).list_issues(labels=["forge:task"], milestone="M1")
+    assert [i.number for i in issues] == [1, 6]
+    assert rest.probes == [7]
+
+
+def spread_rest(above: int) -> LaggingRest:
+    """A full recent window spread over 20-number steps (the numbers between are Discussions
+    or deleted issues: 404), newest #293, plus ``above`` unindexed issues after it."""
+    indexed = {293 - 20 * k for k in range(RECENT_WINDOW)}
+    items = {n: rest_issue(n % 60) | {"number": n} for n in indexed}
+    items |= {n: rest_issue(n % 60) | {"number": n} for n in range(294, 294 + above)}
+    return LaggingRest(items, indexed=indexed)
+
+
+def test_list_issues_probes_above_the_newest_before_gaps_and_bounds_the_gaps() -> None:
+    """Review MEDIUM: gaps no longer starve the probing above the newest number."""
+    rest = spread_rest(above=2)
+    issues = GhCliClient(REPO, runner=rest).list_issues()
+    assert {294, 295} <= {i.number for i in issues}
+    assert rest.probes[:3] == [294, 295, 296]
+    gaps = rest.probes[3:]
+    assert gaps == [n for n in range(293 - GAP_SPAN, 293) if n != 273]
+    assert len(rest.probes) == 3 + GAP_SPAN - 1
+
+
+def test_list_issues_worst_case_cost_is_bounded() -> None:
+    rest = spread_rest(above=LIST_PROBE_CAP + 10)
+    issues = GhCliClient(REPO, runner=rest).list_issues()
+    above = [n for n in rest.probes if n > 293]
+    assert above == list(range(294, 294 + LIST_PROBE_CAP))
+    assert len(rest.probes) == LIST_PROBE_CAP + GAP_SPAN - 1
+    assert len(rest.calls) <= 2 + LIST_PROBE_CAP + GAP_SPAN
+    assert max(i.number for i in issues) == 293 + LIST_PROBE_CAP
+
+
+def test_recover_unlisted_keeps_recent_matches_missing_from_the_list() -> None:
+    """The reviewer's case: recent sees #4, the list stops at #3."""
+    seen: list[int] = []
+
+    def fetch(n: int) -> str | Probe:
+        seen.append(n)
+        return Probe.MISSING
+
+    recent: dict[int, str | Probe] = {4: "#4", 3: "#3", 2: "#2", 1: "#1"}
+    assert recover_unlisted([1, 2, 3], recent, fetch) == ["#4"]
+    assert seen == [5]
+
+
+def test_recover_unlisted_gap_404_does_not_stop_anything() -> None:
+    """A 404 in a gap (e.g. a Discussion number) is skipped; gaps come after the top."""
     seen: list[int] = []
 
     def fetch(n: int) -> int | Probe:
         seen.append(n)
-        return n if n in (5, 6) else Probe.MISSING
+        return n if n in (3, 5, 6) else Probe.MISSING
 
-    assert recover_unlisted([1], [1, 2, 4], fetch) == [5, 6]
-    assert seen == [3, 5, 6, 7]
+    recent: dict[int, int | Probe] = {1: Probe.SKIP, 2: Probe.SKIP, 4: Probe.SKIP}
+    assert recover_unlisted([1], recent, fetch) == [5, 6, 3]
+    assert seen == [5, 6, 7, 3]
 
 
-def test_recover_unlisted_cap_counts_hole_probes() -> None:
+def test_recover_unlisted_budgets_are_separate() -> None:
     seen: list[int] = []
 
     def fetch(n: int) -> int | Probe:
         seen.append(n)
         return Probe.SKIP
 
-    assert recover_unlisted([], [1, 10], fetch, cap=3) == []
-    assert seen == [2, 3, 4]
+    recent: dict[int, int | Probe] = {1: Probe.SKIP, 30: Probe.SKIP}
+    assert recover_unlisted([], recent, fetch, window=2, cap=3, gap_span=5) == []
+    assert seen == [31, 32, 33, 25, 26, 27, 28, 29]

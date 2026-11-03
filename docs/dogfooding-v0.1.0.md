@@ -44,6 +44,7 @@ Every command was run against real GitHub through `gh`.
    - **Fixed**: `GhCliClient.list_issues` now fetches the issue numbers above the newest listed one, so recent creations are never missed. `FakeGitHub` can reproduce the lag (`fake_set_list_lag`). Recorded in the ADR 0007 amendment.
    - **Measured**: label changes lag about 7 s in filtered lists; comment and PR lists did not lag.
    - **Verified live after the fix**: a one-task M2 plan applied twice back to back created issue #16 once. The second run made 0 writes.
+   - **Hardened after the Phase 10 review**: the guard also keeps issues that only the newest-issues request saw, and its number fetches are bounded. Re-verified live: an M3 plan applied twice back to back created issue #17 once, with 0 writes on the second run.
 2. **Closed duplicates counted as dropped tasks and warned on every command (medium)**: fixed in `parse_records`. A task closed as not planned whose id is carried by another issue is a superseded duplicate and is ignored.
 3. **`forge ship` on a PR opened concurrently (medium, found while measuring finding 1)**: GitHub answers 422. Ship now re-reads the PR and updates it.
 4. **`forge refresh` printed a raw Python dict (low)**: it now has a proper renderer.

@@ -579,3 +579,23 @@ def test_list_lag_zero_indexes_everything(gh: FakeGitHub) -> None:
 def test_list_lag_rejects_negative_calls(gh: FakeGitHub) -> None:
     with pytest.raises(ValueError):
         gh.fake_set_list_lag(-1)
+    with pytest.raises(ValueError):
+        gh.fake_set_list_lag(1, recent_calls=-1)
+
+
+def test_list_lag_skew_newest_view_sees_what_the_filtered_list_misses(gh: FakeGitHub) -> None:
+    """The two GitHub requests lag independently: the newest-issues view already has the
+    issue while the filtered list does not (the case the review found the guard dropped)."""
+    gh.fake_set_list_lag(5, recent_calls=0, guarded=False)
+    n = gh.create_issue("t", "b", labels=["forge:task"]).number
+    assert gh.list_issues(labels=["forge:task"]) == []  # raw filtered list lags
+    gh.fake_set_list_lag(5, recent_calls=0)
+    assert [i.number for i in gh.list_issues(labels=["forge:task"])] == [n]
+    assert gh.list_issues(labels=["status:ready"]) == []  # recent rows are filtered too
+
+
+def test_list_lag_skew_filtered_list_ahead_of_the_newest_view(gh: FakeGitHub) -> None:
+    gh.fake_set_list_lag(0, recent_calls=5)
+    n = gh.create_issue("t", "b").number
+    m = gh.create_issue("u", "b").number
+    assert [i.number for i in gh.list_issues()] == [n, m]

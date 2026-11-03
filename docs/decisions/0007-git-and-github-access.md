@@ -54,3 +54,7 @@ Consequences:
 - **Label and state changes**: a change made in the last few seconds can still be missing from a filtered list. Forge's task and proposal labels are set at creation, so the creation probe covers them.
 - **`forge ship`**: it treats a 422 from creating the pull request as "opened concurrently", re-reads it and updates it.
 - **Tests**: `FakeGitHub.fake_set_list_lag` reproduces the issue-list lag.
+- **Milestones**: milestone lists were not observed to lag, so a milestone missing from the list is treated as absent.
+- **How the guard works**: the newest-issues list is filtered like the main list, so issues it sees are kept. Fetches above the newest number go first, with their own cap of 50. Gap fetches are limited to the 20 numbers below the newest.
+- **Cost per `list_issues` call**: normally 2 extra requests, the newest-issues list and one 404, plus one per deleted issue or Discussion in that 20-number span. At worst it makes 72 requests, which only happens when more than 50 issues are created within the lag window.
+- **Token in workflows**: the project workflows pass `FORGE_INSTALL_TOKEN` to git through `GIT_CONFIG_COUNT`/`KEY_0`/`VALUE_0` as an auth header, and mask its base64 form. It never appears in the install URL.

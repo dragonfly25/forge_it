@@ -718,6 +718,21 @@ def test_back_to_back_applies_under_list_lag_create_no_duplicate(world: PlanWorl
     assert world.apply(RACE_PLAN, github=guard).code == ExitCode.OK
 
 
+def test_back_to_back_applies_with_skewed_list_lag_create_no_duplicate(
+    world: PlanWorld,
+) -> None:
+    """Review HIGH: the newest-issues view already shows the first run's issues while the
+    filtered list still lags; the second run must not mistake them for seen-and-filtered."""
+    world.fake.fake_set_list_lag(LAG, recent_calls=0)
+    assert world.apply(RACE_PLAN).data["counts"]["create"] == 2
+    second = world.apply(RACE_PLAN)
+    assert second.code == ExitCode.OK
+    assert second.data["counts"]["create"] == 0
+    world.fake.fake_set_list_lag(0)
+    assert _assert_one_open_per_id(world.fake) == {"M1-T01": 1, "M1-T02": 2}
+    assert len(world.fake.list_issues(state="all")) == 2
+
+
 def test_unguarded_list_lag_reproduces_the_dogfood_duplicates(world: PlanWorld) -> None:
     """Without the read-your-writes guard the lag duplicates issues (the bug seen on GitHub);
     once the index catches up, the next run's duplicate cleanup converges."""

@@ -27,6 +27,7 @@ from forge.core.review import SUBMIT_EVENTS, ReviewContext, review_context, subm
 from forge.core.zones import ZONES_PATH
 
 MAX_DIFF_LINES = 400
+"""Diff lines printed in the human view (the JSON output carries the whole capped diff)."""
 
 _AC_LEAD_RE = re.compile(r"^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)?")
 
@@ -48,9 +49,6 @@ def _ac_summary(ac: str, text: str) -> str:
     if match is not None:
         rest = rest[match.end() :]
     return rest.strip()
-
-
-"""Diff lines printed in the human view (the JSON output carries the whole capped diff)."""
 
 
 def review(

@@ -267,10 +267,6 @@ def test_init_empty_repo_snapshot(repo: Path) -> None:
 
 def test_workflows_install_with_optional_forge_install_token(repo: Path) -> None:
     init_project(repo, VALUES, adapters=["generic"])
-    private = (
-        'uv tool install "git+https://x-access-token:${FORGE_INSTALL_TOKEN}'
-        '@github.com/dragonfly25/forge_it@v0.1.0"'
-    )
     public = 'uv tool install "git+https://github.com/dragonfly25/forge_it@v0.1.0"'
     for name in ("forge-ci", "forge-plan-apply", "forge-radar"):
         text = (repo / f".github/workflows/{name}.yml").read_text()
@@ -281,8 +277,21 @@ def test_workflows_install_with_optional_forge_install_token(repo: Path) -> None
         step = install[0]
         assert step["env"] == {"FORGE_INSTALL_TOKEN": "${{ secrets.FORGE_INSTALL_TOKEN }}"}
         run = step["run"]
-        assert 'if [ -n "${FORGE_INSTALL_TOKEN:-}" ]; then' in run
-        assert run.index(private) < run.index("else") < run.index(public) < run.index("fi")
+        # One install, always from the public URL: the token is never part of a URL or argv.
+        installs = [line.strip() for line in run.splitlines() if "uv tool install" in line]
+        assert installs == [public], name
+        assert "@github.com" not in run and "x-access-token:${" not in run
+        # With the secret set, git authenticates through env config (an extra header).
+        guard = 'if [ -n "${FORGE_INSTALL_TOKEN:-}" ]; then'
+        end = run.index("\nfi\n")
+        assert run.index(guard) < end < run.index(public)
+        block = run[run.index(guard) : end]
+        assert "printf 'x-access-token:%s' \"$FORGE_INSTALL_TOKEN\" | base64" in block
+        assert 'echo "::add-mask::${basic}"' in block
+        assert "export GIT_CONFIG_COUNT=1" in block
+        assert 'export GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"' in block
+        assert 'export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${basic}"' in block
+        assert run.count("FORGE_INSTALL_TOKEN") == 2  # the guard and the printf only
         assert 'echo "$FORGE_INSTALL_TOKEN' not in run and "set -x" not in run
         assert "secrets.FORGE_INSTALL_TOKEN" not in run
 

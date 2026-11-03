@@ -23,7 +23,7 @@ import email.utils
 import json
 import re
 import subprocess
-from collections.abc import Callable, Hashable, Iterable, Sequence
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -70,20 +70,23 @@ UNSET = Unset.UNSET
 # --------------------------------------------------------------------------- read-your-writes
 
 LIST_PROBE_CAP = 50
-"""Most ``GET /issues/{n}`` probes one ``list_issues`` call makes to close the index lag."""
+"""Most ``GET /issues/{n}`` probes above the newest known number in one ``list_issues``."""
 
 RECENT_WINDOW = 10
-"""How many of the newest issue and pull request numbers are read to find the newest number
-and the holes among the newest numbers."""
+"""How many of the newest issue and pull request rows ``list_issues`` reads (one request) to
+find the newest number, the recent issues its filtered list missed, and the gaps."""
+
+GAP_SPAN = 2 * RECENT_WINDOW
+"""Gaps are only looked for among the ``GAP_SPAN`` numbers just below the newest one."""
 
 _T = TypeVar("_T")
 
 
 class Probe(Enum):
-    """What probing one issue number found, when it is not an item to add."""
+    """What reading one issue number found, when it is not an item to add."""
 
     MISSING = "missing"
-    """The number was never allocated (HTTP 404): nothing newer exists, probing stops."""
+    """The number was never allocated (HTTP 404)."""
 
     SKIP = "skip"
     """The number exists but is not wanted (a pull request, filtered out, deleted, moved)."""
@@ -91,57 +94,61 @@ class Probe(Enum):
 
 def recover_unlisted(
     listed: Iterable[int],
-    recent: Iterable[int],
+    recent: Mapping[int, _T | Probe],
     fetch: Callable[[int], _T | Probe],
     *,
     window: int = RECENT_WINDOW,
     cap: int = LIST_PROBE_CAP,
+    gap_span: int = GAP_SPAN,
 ) -> list[_T]:
     """Items a lagging issue list may have missed: the read-your-writes guard of ``list_issues``.
 
-    ``listed`` holds the numbers the (filtered) list returned; ``recent`` the newest numbers
-    of the unfiltered issue index (issues and pull requests, at most ``window`` of them; fewer
-    means the index holds nothing older, so holes are looked for from #1). Issue and pull
-    request numbers are allocated in sequence, so a missed creation is either above the
-    newest known number or a hole among the recent numbers. ``fetch(n)`` reads
-    number ``n`` from a consistent endpoint and returns the item to add, ``Probe.SKIP`` or
-    ``Probe.MISSING``. Holes are probed first (in order), then ``newest + 1``, ``newest + 2``…
-    until ``Probe.MISSING``. At most ``cap`` probes are made in all; beyond that the result
-    may be incomplete, which only happens after more than ``cap`` creations in the few
-    seconds of index lag.
+    ``listed`` holds the numbers the filtered list returned. ``recent`` maps the newest
+    numbers of the unfiltered issue index (issues and pull requests, at most ``window`` of
+    them; fewer means the index holds nothing older) to the row when it passes the same
+    filters, else ``Probe.SKIP``. The two lists are separate requests and may lag
+    differently, so a recent match missing from ``listed`` is added without a call.
 
-    Normal cost: one probe (the 404 just above the newest number). A number that is not an
-    issue at all (a deleted issue, or a GitHub Discussion, which shares the number sequence)
-    is a permanent hole while it is among the recent numbers and costs one probe per call;
-    a Discussion created in the lag window just above the newest issue stops the upward
-    probing early (accepted: rare, and ``forge plan apply`` re-checks duplicates every run).
+    Issue and pull request numbers are allocated in sequence, so any other missed creation
+    is above the newest known number or a gap below it. ``fetch(n)`` reads number ``n``
+    from a consistent endpoint (the item to add, ``Probe.SKIP`` or ``Probe.MISSING``):
+
+    1. above: ``newest + 1``, ``newest + 2``… until ``Probe.MISSING``, at most ``cap`` reads;
+    2. gaps: numbers below the newest that neither list returned, only among the
+       ``gap_span`` numbers just below it (and not below the oldest recent number when the
+       recent window is full); a ``Probe.MISSING`` there is skipped.
+
+    Cost in reads: normally 1 (the 404 above the newest number) plus one per gap, i.e. per
+    deleted issue or GitHub Discussion (they share the number sequence) among the
+    ``gap_span`` numbers below the newest. Worst case ``cap + gap_span`` (70 by default),
+    reached only after ``cap`` creations within the few seconds of index lag; beyond that
+    the result may be incomplete. A Discussion created in the lag window just above the
+    newest issue stops step 1 early (accepted: rare, and ``forge plan apply`` re-checks
+    duplicates on every run).
     """
-    known = set(listed)
-    recent_set = set(recent)
-    known |= recent_set
+    listed_set = set(listed)
+    found: list[_T] = [
+        item
+        for number, item in sorted(recent.items())
+        if number not in listed_set and not isinstance(item, Probe)
+    ]
+    known = listed_set | recent.keys()
     newest = max(known, default=0)
-    low = min(recent_set) if len(recent_set) >= window else 1
-    holes = range(low, newest)
-    found: list[_T] = []
-    budget = cap
-    for number in holes:
-        if number in known:
-            continue
-        if budget <= 0:
-            return found
-        budget -= 1
-        item = fetch(number)
-        if not isinstance(item, Probe):
-            found.append(item)
     number = newest + 1
-    while budget > 0:
-        budget -= 1
+    for _ in range(cap):
         item = fetch(number)
         if item is Probe.MISSING:
             break
         if not isinstance(item, Probe):
             found.append(item)
         number += 1
+    low = min(recent) if len(recent) >= window else 1
+    for number in range(max(low, newest - gap_span), newest):
+        if number in known:
+            continue
+        item = fetch(number)
+        if not isinstance(item, Probe):
+            found.append(item)
     return found
 
 
@@ -964,11 +971,12 @@ class GhCliClient:
     ) -> list[Issue]:
         """Issues having all ``labels`` and, if given, the milestone with that title.
 
-        Oldest first. The paginated list lags behind writes, so the issues it missed are
-        read one by one afterwards (:func:`recover_unlisted`): the newest numbers come from
-        ``issues?state=all&sort=created&direction=desc&per_page=RECENT_WINDOW``, then
-        ``GET issues/{n}`` probes the holes and the numbers above the newest until a 404.
-        Normal cost: two extra calls (that list and one 404).
+        Oldest first. The paginated list lags behind writes, so a second request reads the
+        ``RECENT_WINDOW`` newest rows (``issues?state=all&sort=created&direction=desc``) and
+        :func:`recover_unlisted` adds what the list missed: recent rows that pass the
+        filters, then ``GET issues/{n}`` reads above the newest number (until a 404) and of
+        the gaps just below it. Cost: normally two extra calls (that list and one 404), at
+        most ``2 + LIST_PROBE_CAP + GAP_SPAN`` (72); see :func:`recover_unlisted`.
         """
         query = {"state": state, "sort": "created", "direction": "asc", "per_page": "100"}
         milestone_number: int | None = None
@@ -977,6 +985,8 @@ class GhCliClient:
         if milestone is not None:
             milestone_number = self._milestone_number(milestone)
             if milestone_number is None:
+                # No guard needed: the milestone list was not observed to lag (2026-11-03),
+                # and an issue cannot be in a milestone that does not exist.
                 return []
             query["milestone"] = str(milestone_number)
         rows: list[dict[str, Any]] = (
@@ -988,31 +998,34 @@ class GhCliClient:
             "direction": "desc",
             "per_page": str(RECENT_WINDOW),
         }
-        recent = self._call("GET", self._path("issues", recent_query)) or []
+        recent_rows = self._call("GET", self._path("issues", recent_query)) or []
         wanted = {name.lower() for name in labels}
 
-        def fetch(number: int) -> dict[str, Any] | Probe:
-            return self._probe_issue(number, state, wanted, milestone_number)
+        def keep(data: Any, number: int) -> dict[str, Any] | Probe:
+            return self._issue_row_if_wanted(data, number, state, wanted, milestone_number)
 
-        extra = recover_unlisted(
-            [int(r["number"]) for r in rows], [int(r["number"]) for r in recent], fetch
-        )
+        def fetch(number: int) -> dict[str, Any] | Probe:
+            try:
+                data = self._call("GET", self._path(f"issues/{number}"))
+            except GitHubError as exc:
+                if exc.status == 404:
+                    return Probe.MISSING
+                if exc.status == 410:  # deleted
+                    return Probe.SKIP
+                raise
+            return keep(data, number)
+
+        recent = {int(r["number"]): keep(r, int(r["number"])) for r in recent_rows}
+        extra = recover_unlisted([int(r["number"]) for r in rows], recent, fetch)
         if extra:
             rows = sorted([*rows, *extra], key=lambda r: (str(r["created_at"]), int(r["number"])))
         return [_issue_from_json(r) for r in rows if "pull_request" not in r]
 
-    def _probe_issue(
-        self, number: int, state: StateFilter, labels: set[str], milestone: int | None
+    def _issue_row_if_wanted(
+        self, data: Any, number: int, state: StateFilter, labels: set[str], milestone: int | None
     ) -> dict[str, Any] | Probe:
-        """Read issue ``number`` for :meth:`list_issues`: the row if it matches the filters."""
-        try:
-            data = self._call("GET", self._path(f"issues/{number}"))
-        except GitHubError as exc:
-            if exc.status == 404:
-                return Probe.MISSING
-            if exc.status == 410:  # deleted
-                return Probe.SKIP
-            raise
+        """``data`` (issue ``number``'s JSON) if it is an issue of this repository passing the
+        ``list_issues`` filters (labels compared case-insensitively), else ``Probe.SKIP``."""
         if not isinstance(data, dict) or "pull_request" in data:
             return Probe.SKIP
         repo_url = str(data.get("repository_url") or "")
