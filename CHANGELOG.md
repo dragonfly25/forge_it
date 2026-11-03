@@ -46,3 +46,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - `--abort` restores the exact previous state.
 - `forge escalate --reason R`: labels the task `blocked:conflict`, comments with the reason and mentions the upstream authors and the leads.
 - Usage errors now exit 1 instead of 2, which spec §16 reserves for "agent action needed".
+- Ship, review, handoff and propose (Phase 6, ADR 0012):
+  - `forge ship [--draft]`: runs sync, then the checks, which are skipped when sync already checked the same HEAD. It lists out-of-zone and unzoned files, then creates or updates the PR. Forge owns one marked block in the PR body, with the closing reference, AC and done-when checklists, out-of-zone changes, conflict resolutions and the agent's model map; human text and ticked boxes are kept. It sets `status:in-review` and requests reviewers, preferring members whose providers differ from the agent's.
+  - `forge review <pr>`: prints the review context (task, ACs, diff, zone check, CI, reviews), or submits a review with `--submit`. It refuses agents below `min_tier_for.reviewer` unless `--force`.
+  - `forge handoff --note-file F`: pushes the work with a handoff event commit, posts the note, unassigns you and sets `status:handoff`.
+  - `forge propose --title T --body-file F`: opens a `status:proposed` issue, or returns the existing one with the same title.

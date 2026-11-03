@@ -64,10 +64,12 @@ Progress notes: ADR 0011 (sync state machine, classification, resolvers, escalat
 
 **Done when:** scenario tests on temp repos: no-conflict rebase; lockfile conflict auto-resolved by `regenerate`; changelog via `union`; code conflict → exit 2 with correct report, then `--continue` after manual resolution pushes; out-of-zone conflict → exit 4 with rebase aborted; `--abort` restores the exact previous tip; failing check → exit 2.
 
-## [ ] Phase 6 — Ship, review, handoff, propose
-- `forge ship` (§11.1) with PR body from template, out-of-zone list, conflict resolutions, agent/providers/model map, cross-provider reviewer selection based on `providers` overlap.
-- `forge review` (context + `--submit`).
-- `forge handoff` (§8.3), `forge propose`.
+## [x] Phase 6 — Ship, review, handoff, propose
+- [x] `forge ship` (§11.1) with PR body from template, out-of-zone list, conflict resolutions, agent/providers/model map, cross-provider reviewer selection based on `providers` overlap.
+- [x] `forge review` (context + `--submit`).
+- [x] `forge handoff` (§8.3), `forge propose`.
+
+Progress notes: ADR 0012 covers the PR body block, reviewer selection, the check skip on an already-checked HEAD (B7), review tier enforcement, handoff steps and proposal shape. New modules: `core/ship.py`, `core/pr_body.py`, `core/reviewers.py`, `core/review.py`, `core/handoff.py`, `core/propose.py`.
 
 **Done when:** FakeGitHub tests verify PR body sections, labels, reviewer selection rules, handoff comment + unassign + label, proposal issue shape.
 

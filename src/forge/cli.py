@@ -10,11 +10,15 @@ from typer.core import TyperGroup
 
 from forge import __version__
 from forge.commands import escalate as escalate_cmd
+from forge.commands import handoff as handoff_cmd
 from forge.commands import heartbeat as heartbeat_cmd
 from forge.commands import next as next_cmd
+from forge.commands import propose as propose_cmd
 from forge.commands import reclaim as reclaim_cmd
 from forge.commands import refresh as refresh_cmd
 from forge.commands import release_claim as release_cmd
+from forge.commands import review as review_cmd
+from forge.commands import ship as ship_cmd
 from forge.commands import status as status_cmd
 from forge.commands import sync as sync_cmd
 from forge.commands._output import GlobalOptions, run_command
@@ -127,3 +131,11 @@ app.command(
 app.command(
     "escalate", help="Escalate the current task: label blocked:conflict and mention people."
 )(escalate_cmd.escalate)
+app.command("ship", help="Sync, run checks and open or update the task's pull request (§11.1).")(
+    ship_cmd.ship
+)
+app.command("review", help="Print a pull request's review context, or submit a review (§11.2).")(
+    review_cmd.review
+)
+app.command("handoff", help="Hand the current task off with a note (§8.3).")(handoff_cmd.handoff)
+app.command("propose", help="Propose new work as a status:proposed issue.")(propose_cmd.propose)

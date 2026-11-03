@@ -587,6 +587,12 @@ class FakeGitHub:
         """Change the acting user (affects authorship of new objects)."""
         self._user = login
 
+    def fake_close_pull(self, number: int) -> PullRequest:
+        """Close an open pull request without merging it."""
+        pr = replace(self._pull(number), state="closed")
+        self._pulls[number] = pr
+        return pr
+
     def fake_merge_pull(self, number: int) -> PullRequest:
         """Merge an open pull request, as GitHub's merge endpoint would.
 
