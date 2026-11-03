@@ -95,11 +95,16 @@ Progress notes:
 
 **Done when:** `forge init` on an empty repo produces the expected tree (snapshot test); `forge setup` interactive flow tested with simulated input (accept defaults, edit a tier, local models from a stubbed `ollama list`); changing the profile re-renders `.claude/agents/forge-*.md` with the new models and they stay gitignored; `adapters generate --check` detects drift; `forge setup --check` reports each missing prerequisite with a fix; prompts reviewed against §12 (each states goal, CLI calls, exit-code handling, guardrails, final report).
 
-## [ ] Phase 9 — Release, docs, polish
-- `forge release` (§11.4).
-- `forge docs [--check]` generating `docs/forge/commands.md`.
-- Framework docs: `README.md` (install, quickstart), `docs/protocol.md`, `docs/architecture.md`, `docs/adapters.md`; finalize `install.sh`.
-- Optional Projects v2 mirroring (§15) if time allows; otherwise record it as v1.
+## [x] Phase 9 — Release, docs, polish
+- [x] `forge release` (§11.4).
+- [x] `forge docs [--check]` generating `docs/forge/commands.md`.
+- [x] Framework docs: `README.md` (install, quickstart), `docs/protocol.md`, `docs/architecture.md`, `docs/adapters.md`; finalize `install.sh`.
+- [x] Optional Projects v2 mirroring (§15) if time allows; otherwise record it as v1.
+
+Progress notes: ADR 0015.
+- **Release** takes two steps: a release PR carrying the CHANGELOG section, then the tag, GitHub release and milestone close. It never pushes to the default branch.
+- **`forge docs`** builds the reference from the Click tree; the framework repo checks `docs/commands.md` in CI.
+- **Projects v2** is deferred to v1.
 
 **Done when:** a new developer can follow README + onboarding without other help (checked by reading them end to end); `forge docs --check` passes in CI.
 

@@ -67,3 +67,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - **`forge profile show|set|edit`**.
   - **`forge refresh --radar`**: one comment per in-progress task, for zone drift and stale leases.
 - Global options (`--json`, `--agent`, `--repo`, `--verbose`, `--yes`) now work after the subcommand too, as written in the spec.
+- Release, docs and polish (Phase 9, ADR 0015):
+  - **`forge release <M> --version X.Y.Z [--dry-run]`**: the first run opens a `release/vX.Y.Z` PR with a CHANGELOG section built from the milestone's merged task PRs, grouped by type. After that PR is merged, the second run tags the merge commit, creates the GitHub release and closes the milestone.
+  - **`forge docs [--check]`**: a deterministic command reference built from the CLI and the prompt frontmatter. `forge init` writes `docs/forge/commands.md`, and CI checks it.
+  - **Docs and installer**: framework docs (`README.md`, `docs/protocol.md`, `docs/architecture.md`, `docs/adapters.md`, `docs/commands.md`); `install.sh` now installs the newest release tag, or `main` when none exists.
+  - **Projects v2 mirroring (§15)**: deferred to v1.
