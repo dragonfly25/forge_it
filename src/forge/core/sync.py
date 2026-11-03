@@ -1075,7 +1075,11 @@ def _log_entry(
     }
 
 
-def _run_checks(ctx: SyncContext, root: Path) -> list[CheckRun]:
+def run_checks(ctx: SyncContext, root: Path) -> list[CheckRun]:
+    """Run ``config.checks`` in config order in ``root`` with ``ctx.run_check`` (output tails).
+
+    Shared by sync's verify step and ``forge ship`` (ADR 0012, B7).
+    """
     runs: list[CheckRun] = []
     for name, command in ctx.config.checks.items():
         result = ctx.run_check(command, root)
@@ -1166,7 +1170,7 @@ def _verify_and_push(ctx: SyncContext, root: Path, record: SyncRecord) -> SyncOu
     head = _head(git)
     if not record.rebased and head == record.remote_tip:
         return _finish(ctx, root, record, head, "up_to_date", None)
-    record.checks = _run_checks(ctx, root)
+    record.checks = run_checks(ctx, root)
     failed = [c for c in record.checks if not c.passed]
     if failed:
         record.state = SyncState.CHECKS_FAILED
