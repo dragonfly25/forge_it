@@ -315,3 +315,87 @@ def test_heartbeat_refuses_when_the_branch_moves_meanwhile(git_world: GitWorld) 
     # re-running succeeds once the read is current
     beat = run_heartbeat(world.ctx("alice", clock=Clock(T0 + timedelta(hours=1))), n)
     assert beat.heartbeat_at == T0 + timedelta(hours=1)
+
+
+# ------------------------------------------------------------------- run matching (ADR 0011)
+
+
+def test_lease_run_field_is_optional() -> None:
+    from forge.core.lease import lease_names_claim
+
+    with_run = replace(DATA, run="r1")
+    body = render_lease(with_run, branch="task/7")
+    assert json.loads(body.splitlines()[-1][22:-4])["run"] == "r1"
+    assert parse_lease(body) == with_run
+    old = render_lease(DATA, branch="task/7")  # written before ADR 0011: no run key
+    assert "run" not in json.loads(old.splitlines()[-1][22:-4])
+    parsed = parse_lease(old)
+    assert parsed is not None and parsed.run is None
+    bad = old.replace('"released_at":null', '"released_at":null,"run":""')
+    assert bad != old and parse_lease(bad) is None
+
+    assert lease_names_claim(DATA, SHA, None) and lease_names_claim(DATA, SHA, "r9")
+    assert not lease_names_claim(DATA, OTHER, "r1")  # an old lease matches by sha only
+    assert lease_names_claim(with_run, OTHER, "r1")  # a rebased claim keeps its run
+    assert not lease_names_claim(with_run, OTHER, None)
+    assert not lease_names_claim(with_run, OTHER, "r2")
+    assert not lease_names_claim(None, SHA, "r1")
+    tip = T0 + timedelta(hours=1)
+    assert last_activity(tip, with_run, OTHER, "r1") == T0 + timedelta(hours=2)
+    assert last_activity(tip, with_run, OTHER, None) == tip
+
+
+def test_rebased_claim_stays_complete_and_live(git_world: GitWorld) -> None:
+    """A claim commit rewritten by a rebase (new sha, same run) keeps its lease."""
+    from forge.core.lease import describe_lease, require_own_claim
+    from support.sync_world import rebase_remote_task
+
+    world = World(git_world)
+    n = world.task("M1-T01", ["api"])
+    claimed = run(world.ctx("alice", run_id=lambda: "feedfacefeedfacefeedfacefeedface"))
+    assert claimed.claimed is not None
+    lease = find_lease(world.fake.list_comments(n))
+    assert lease is not None and lease.data is not None
+    assert lease.data.run == "feedfacefeedfacefeedfacefeedface"  # new claims write run
+    rebase_remote_task(world, "alice", n)
+
+    late = T0 + timedelta(hours=20)
+    own = require_own_claim(world.ctx("alice", clock=Clock(late)), n)
+    assert own.claim.sha != claimed.claimed.claim and own.claim.named_by(own.lease)
+    summary = describe_lease(
+        world.git("alice"),
+        world.ctx("alice").config,
+        n,
+        "M1-T01",
+        world.fake.list_comments(n),
+        now=late,
+    )
+    assert summary is not None and summary["state"] == "live"
+    assert summary["heartbeat_at"] == "2026-11-02T09:00:00Z"  # the lease still counts
+
+    beat = run_heartbeat(world.ctx("alice", clock=Clock(late)), n)
+    assert beat.claim == own.claim.sha
+    after = find_lease(world.fake.list_comments(n))
+    assert after is not None and after.data is not None
+    assert after.data.claim == own.claim.sha and after.data.claimed_at == T0
+    assert after.data.run == "feedfacefeedfacefeedfacefeedface"
+
+
+def test_old_lease_without_run_matches_by_sha_only(git_world: GitWorld) -> None:
+    from forge.core.lease import require_own_claim
+    from support.sync_world import rebase_remote_task
+
+    world = World(git_world)
+    n = world.task("M1-T01", ["api"])
+    claimed = run(world.ctx("alice"))
+    assert claimed.claimed is not None
+    found = find_lease(world.fake.list_comments(n))
+    assert found is not None and found.data is not None
+    legacy = replace(found.data, run=None)  # as written before ADR 0011
+    world.fake.update_comment(found.comment.id, render_lease(legacy, branch=f"task/{n}"))
+    own = require_own_claim(world.ctx("alice"), n)
+    assert own.lease == legacy and own.claim.named_by(legacy)  # same sha: still matches
+
+    rebase_remote_task(world, "alice", n)
+    with pytest.raises(PreconditionError, match="incomplete"):
+        run_heartbeat(world.ctx("alice", clock=Clock(T0 + timedelta(hours=2))), n)

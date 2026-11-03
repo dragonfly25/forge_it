@@ -4,7 +4,14 @@ A task has a **live claim** when its branch exists, its last Forge event (ADR 00
 claim and the claim is not stale. The **claim commit** carries that last ``Forge-Claim``
 event. **Last activity** is the later of the branch tip's committer date and the lease
 comment's ``heartbeat_at``, the latter only when the lease comment names the same claim
-commit. A claim is **stale** when its last activity is more than ``lease_hours`` old.
+(:func:`lease_names_claim`). A claim is **stale** when its last activity is more than
+``lease_hours`` old.
+
+A lease comment **names** a claim when its ``claim`` sha is the claim commit's sha or, when
+both carry one, its ``run`` equals the claim commit's ``Forge-Run`` trailer (ADR 0011): a
+claim commit rewritten by ``forge sync``'s rebase keeps its run, so it stays complete and its
+heartbeats keep counting before the lease comment is rewritten. Lease comments written before
+ADR 0011 have no ``run`` and match by sha only.
 
 The lease comment is one comment per issue::
 
@@ -22,7 +29,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -40,6 +47,7 @@ from forge.core.refresh import (
     gather_task_branches,
 )
 from forge.core.tasks import (
+    TRAILER_RUN,
     BranchEvent,
     TaskBodyError,
     TaskMetadata,
@@ -53,6 +61,9 @@ LEASE_MARKER = "<!-- forge:lease -->"
 _DATA_PREFIX = "<!-- forge:lease-data "
 _DATA_RE = re.compile(r"^<!-- forge:lease-data (\{.*\}) -->[ \t]*$", re.MULTILINE)
 _DATA_KEYS = ("task", "owner", "agent", "claim", "claimed_at", "heartbeat_at", "released_at")
+_RUN_KEY = "run"
+"""Optional key (ADR 0011): the claim commit's ``Forge-Run`` trailer. Written only when set,
+so lease comments of claims without a run stay readable by earlier Forge versions."""
 
 
 # --------------------------------------------------------------------------- timestamps
@@ -87,10 +98,14 @@ class LeaseData:
     claimed_at: datetime
     heartbeat_at: datetime
     released_at: datetime | None = None
+    run: str | None = None
 
     def to_json(self) -> dict[str, Any]:
-        """Return the JSON object stored on the ``forge:lease-data`` line."""
-        return {
+        """Return the JSON object stored on the ``forge:lease-data`` line.
+
+        ``run`` is present only when set (ADR 0011).
+        """
+        data: dict[str, Any] = {
             "task": self.task,
             "owner": self.owner,
             "agent": self.agent,
@@ -99,6 +114,9 @@ class LeaseData:
             "heartbeat_at": format_time(self.heartbeat_at),
             "released_at": None if self.released_at is None else format_time(self.released_at),
         }
+        if self.run is not None:
+            data[_RUN_KEY] = self.run
+        return data
 
 
 @dataclass(frozen=True)
@@ -138,7 +156,8 @@ def parse_lease(body: str) -> LeaseData | None:
     """Return the data of a lease comment, or ``None`` when it is not one or is unreadable.
 
     The last ``forge:lease-data`` line counts. Missing keys, wrong types or bad timestamps
-    make the data unreadable (``None``); the comment still counts as a lease comment.
+    make the data unreadable (``None``); the comment still counts as a lease comment. The
+    ``run`` key is optional (ADR 0011); when present it must be a non-empty string.
     """
     if not is_lease_comment(body):
         return None
@@ -149,12 +168,15 @@ def parse_lease(body: str) -> LeaseData | None:
         raw = json.loads(matches[-1])
     except json.JSONDecodeError:
         return None
-    if not isinstance(raw, dict) or set(raw) != set(_DATA_KEYS):
+    if not isinstance(raw, dict) or set(raw) - {_RUN_KEY} != set(_DATA_KEYS):
         return None
     try:
         task, owner, claim = raw["task"], raw["owner"], raw["claim"]
         agent, released = raw["agent"], raw["released_at"]
+        run = raw.get(_RUN_KEY)
         if not all(isinstance(v, str) and v for v in (task, owner, claim)):
+            return None
+        if _RUN_KEY in raw and not (isinstance(run, str) and run):
             return None
         if agent is not None and not isinstance(agent, str):
             return None
@@ -168,6 +190,7 @@ def parse_lease(body: str) -> LeaseData | None:
             claimed_at=parse_time(str(raw["claimed_at"])),
             heartbeat_at=parse_time(str(raw["heartbeat_at"])),
             released_at=None if released is None else parse_time(released),
+            run=run,
         )
     except (TypeError, ValueError):
         return None
@@ -212,12 +235,36 @@ def upsert_lease(
 # --------------------------------------------------------------------------- activity
 
 
-def last_activity(tip_date: datetime, lease: LeaseData | None, claim_sha: str) -> datetime:
-    """Return the later of ``tip_date`` and the lease heartbeat for the same claim commit.
+def lease_names_claim(lease: LeaseData | None, claim_sha: str, claim_run: str | None) -> bool:
+    """True when ``lease`` names the claim ``claim_sha`` whose ``Forge-Run`` is ``claim_run``.
 
-    A heartbeat left over from another claim (``lease.claim != claim_sha``) never counts.
+    ADR 0011 matching rule: ``lease.claim == claim_sha``, or both runs are set and equal (a
+    claim commit rewritten by a rebase keeps its run). A lease without ``run`` (written
+    before ADR 0011) matches by sha only.
     """
-    if lease is not None and lease.claim == claim_sha and lease.heartbeat_at > tip_date:
+    if lease is None:
+        return False
+    if lease.claim == claim_sha:
+        return True
+    return lease.run is not None and claim_run is not None and lease.run == claim_run
+
+
+def last_activity(
+    tip_date: datetime,
+    lease: LeaseData | None,
+    claim_sha: str,
+    claim_run: str | None = None,
+) -> datetime:
+    """Return the later of ``tip_date`` and the lease heartbeat for the same claim.
+
+    A heartbeat left over from another claim (one the lease does not name, see
+    :func:`lease_names_claim`) never counts.
+    """
+    if (
+        lease is not None
+        and lease_names_claim(lease, claim_sha, claim_run)
+        and lease.heartbeat_at > tip_date
+    ):
         return lease.heartbeat_at
     return tip_date
 
@@ -251,6 +298,7 @@ class ClaimInfo:
     owner: str
     agent: str | None
     index: int  # position of the claim commit in the branch's first-parent commits
+    run: str | None = None  # the claim commit's Forge-Run trailer (ADR 0011)
 
     @property
     def order_key(self) -> tuple[datetime, int]:
@@ -260,6 +308,19 @@ class ClaimInfo:
     def is_mine(self, login: str, agent_id: str) -> bool:
         """True when the claim names ``login`` (case-insensitively) and ``agent_id``."""
         return self.owner.casefold() == login.casefold() and self.agent == agent_id
+
+    def named_by(self, lease: LeaseData | None) -> bool:
+        """True when ``lease`` names this claim (:func:`lease_names_claim`)."""
+        return lease_names_claim(lease, self.sha, self.run)
+
+
+def run_of(trailers: Mapping[str, str]) -> str | None:
+    """The ``Forge-Run`` trailer among ``trailers`` (key case-insensitive), or ``None``."""
+    wanted = TRAILER_RUN.lower()
+    for key, value in trailers.items():
+        if key.strip().lower() == wanted and value.strip():
+            return value.strip()
+    return None
 
 
 def event_commit_index(commits: Sequence[CommitInfo], task_id: str) -> int | None:
@@ -292,6 +353,7 @@ def find_claim(issue_number: int, branch: TaskBranch, task_id: str) -> ClaimInfo
         owner=event.author,
         agent=event.agent,
         index=index,
+        run=run_of(commit.trailers),
     )
 
 
@@ -419,7 +481,7 @@ def require_own_claim(ctx: LeaseContext, issue_number: int) -> OwnClaim:
     comments = tuple(ctx.github.list_comments(issue_number))
     found = find_lease(comments)
     lease = None if found is None else found.data
-    activity = last_activity(claim.tip_date, lease, claim.sha)
+    activity = last_activity(claim.tip_date, lease, claim.sha, claim.run)
     stale_since = None
     if is_stale(activity, ctx.config.lease_hours, ctx.now()):
         stale_since = stale_at(activity, ctx.config.lease_hours)
@@ -457,8 +519,9 @@ def heartbeat(ctx: LeaseContext, issue_number: int) -> HeartbeatOutcome:
     - the branch's last event is not a claim of mine;
     - my claim is **stale**: while stale it held no zones, so it is renewed only through the
       CAS push and verification of ``forge reclaim <n>``;
-    - the claim is **incomplete** (the lease comment does not name its sha): a heartbeat
-      would mark it complete without verification; ``forge next --task <n>`` completes it;
+    - the claim is **incomplete** (the lease comment does not name it, by sha or run): a
+      heartbeat would mark it complete without verification; ``forge next --task <n>``
+      completes it;
     - the remote branch moved since it was read (re-run to retry).
     """
     own = require_own_claim(ctx, issue_number)
@@ -472,7 +535,7 @@ def heartbeat(ctx: LeaseContext, issue_number: int) -> HeartbeatOutcome:
             "cannot renew it",
             hint=f"renew it through a verified claim: `forge reclaim {issue_number}`",
         )
-    if lease is None or lease.claim != claim.sha:
+    if lease is None or not claim.named_by(lease):
         raise PreconditionError(
             f"your claim on #{issue_number} ({task_id}) is incomplete: the lease comment "
             f"does not name its claim commit {claim.sha[:12]}",
@@ -495,9 +558,10 @@ def heartbeat(ctx: LeaseContext, issue_number: int) -> HeartbeatOutcome:
         claim=claim.sha,
         claimed_at=lease.claimed_at,
         heartbeat_at=now,
+        run=claim.run,
     )
     upsert_lease(ctx.github, issue_number, data, comments=own.comments)
-    activity = last_activity(claim.tip_date, data, claim.sha)
+    activity = last_activity(claim.tip_date, data, claim.sha, claim.run)
     return HeartbeatOutcome(
         issue=issue_number,
         task_id=task_id,
@@ -522,7 +586,8 @@ def lease_summary(
     ``claim`` is the branch's claim when its last Forge event is a claim, else ``None``.
     ``state`` is ``live`` or ``stale`` for a claim, otherwise ``released`` (the lease comment
     says so) or ``ended`` (the branch moved on, e.g. a handoff, or is gone). The lease
-    comment's timestamps count only when it names the branch's claim commit.
+    comment's timestamps count only when it names the branch's claim
+    (:func:`lease_names_claim`).
     """
     if claim is None:
         if lease is None:
@@ -538,8 +603,8 @@ def lease_summary(
             "last_activity": None,
             "stale_at": None,
         }
-    same = lease is not None and lease.claim == claim.sha
-    activity = last_activity(claim.tip_date, lease, claim.sha)
+    same = claim.named_by(lease)
+    activity = last_activity(claim.tip_date, lease, claim.sha, claim.run)
     return {
         "state": "stale" if is_stale(activity, lease_hours, now) else "live",
         "owner": claim.owner,

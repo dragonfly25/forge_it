@@ -548,6 +548,47 @@ def test_overlap_earlier_pusher_kept_later_pusher_first_in_order_waits_then_yiel
     assert world.claimed_issues() == {t2, t3}
 
 
+def test_overlapping_claim_rebased_during_my_poll_is_still_claimed(world: World) -> None:
+    """ADR 0011 lease identity in the post-claim verification: while bob polls, alice's
+    overlapping claim is rebased by a sync (new sha, same Forge-Run). It is still the same
+    claim, so bob keeps waiting and yields; he must not take the rebase for a release."""
+    from support.sync_world import rebase_remote_task
+
+    t1 = world.task("M1-T01", ["api"])  # bob's pick: first in order (lower issue)
+    t2 = world.task("M1-T02", ["api"])  # alice targets it
+    t3 = world.task("M1-T03", ["web"], size=Size.M)  # bob's fallback
+    alice = world.ctx("alice")
+    rebased: list[str] = []
+
+    def alice_syncs() -> None:
+        if not rebased:
+            rebased.append(rebase_remote_task(world, "alice", t2))
+
+    sleeper = Sleeper(alice_syncs)
+    bob = world.ctx("bob", sleep=sleeper)
+    results: dict[str, NextOutcome] = {}
+
+    def alice_runs_completely(src: str, dst: str) -> None:
+        world.git("bob").before_push = None
+        results["alice"] = run(alice, task="M1-T02")
+
+    world.git("bob").before_push = alice_runs_completely
+    results["bob"] = run(bob)
+
+    claimed = results["alice"].claimed
+    assert claimed is not None and claimed.issue == t2
+    assert rebased and world.remote_tip(t2) == rebased[0]
+    history = world.git("alice").run("log", "--format=%H", rebased[0]).stdout.split()
+    assert claimed.claim not in history  # the claim commit was rewritten (new sha)
+    assert sleeper.calls == [2.0] * 5  # the rebased claim never went away
+    bob_out = results["bob"]
+    assert bob_out.claimed is not None and bob_out.claimed.issue == t3
+    assert {e.issue: e.reason for e in bob_out.exclusions}[t1] is Reason.YIELDED
+    assert any(f"yielded to #{t2}" in w for w in bob_out.warnings)
+    assert world.remote_tip(t1) is None
+    assert world.claimed_issues() == {t2, t3}
+
+
 @pytest.mark.parametrize("resume", [False, True])
 def test_overlap_earlier_pusher_first_in_order_later_yields_at_once(
     world: World, resume: bool
@@ -1650,3 +1691,22 @@ def test_stalled_run_whose_claim_was_taken_over_stops_before_the_lease(world: Wo
     assert "took over the claim" in info.value.message
     assert find_lease(world.fake.list_comments(n)) is None
     assert read_pending(git, n) == taken["record"]  # the other run's record is kept
+
+
+def test_rebased_own_claim_is_still_complete_for_next(git_world: GitWorld) -> None:
+    """ADR 0011: after a sync rebased my claim commit (new sha, same Forge-Run), `forge next`
+    still sees a complete claim of mine ("you already hold"), not an incomplete one."""
+    from support.sync_world import rebase_remote_task
+
+    world = World(git_world)
+    n = world.task("M1-T01", ["api"])
+    first = run(world.ctx("alice"))
+    assert first.claimed is not None
+    rebase_remote_task(world, "alice", n)
+    comments = len(world.fake.list_comments(n))
+
+    again = run(world.ctx("alice", clock=Clock(T0 + timedelta(hours=2))))
+
+    assert again.claimed is None
+    assert any(f"you already hold #{n}" in text for text in again.info)
+    assert len(world.fake.list_comments(n)) == comments  # no post-claim steps re-run
