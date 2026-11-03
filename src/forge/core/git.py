@@ -7,7 +7,9 @@ optional locks disabled so that nothing blocks or interferes with the user's own
 A non-zero exit raises :class:`GitError`, except for operations whose failure is an expected
 outcome: pushes that lose a compare-and-swap or fast-forward check (:class:`PushResult`),
 rebases that stop on conflicts (:class:`RebaseResult`), ``rev_parse`` of a missing ref
-(``None``) and ``is_ancestor`` answering no (``False``).
+(``None``) and ``is_ancestor`` answering no (``False``). A push refused by the user's
+``pre-push`` hook raises :class:`PushHookRejected`, a :class:`GitError` subclass, so that callers
+can tell it apart from a lost lease (:attr:`PushResult.rejected`).
 """
 
 from __future__ import annotations
@@ -15,10 +17,12 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from forge.core.errors import ForgeError
 
@@ -35,6 +39,13 @@ _VERSION_RE = re.compile(r"git version (\d+)\.(\d+)(?:\.(\d+))?")
 _FIELD_SEP = "\x00"
 _NON_INTERACTIVE: Mapping[str, str] = {"GIT_EDITOR": "true", "GIT_SEQUENCE_EDITOR": "true"}
 _RECORD_SEP = "\x1e"
+_RERERE: tuple[str, ...] = ("-c", "rerere.enabled=true", "-c", "rerere.autoupdate=true")
+# rerere.c prints one of these (to stderr) for each path it resolved from a recorded
+# resolution: "Staged" with rerere.autoupdate, "Resolved" without. The C locale is forced.
+_RERERE_REUSED = re.compile(r"^(?:Staged|Resolved) '(.+)' using previous resolution\.$")
+
+ResetMode = Literal["hard", "mixed", "soft"]
+"""``git reset`` modes accepted by :meth:`Git.reset`."""
 
 
 class GitError(ForgeError):
@@ -50,6 +61,20 @@ class GitError(ForgeError):
         self.stderr = stderr
         detail = stderr.strip().splitlines()[-1] if stderr.strip() else "no error output"
         super().__init__(f"git {' '.join(self.git_args)} failed (exit {returncode}): {detail}")
+
+
+class PushHookRejected(GitError):
+    """The user's ``pre-push`` hook refused a push; nothing was sent to the remote.
+
+    ``stderr`` holds the hook's output (and git's). Raised only by :meth:`Git.push` without
+    ``no_verify``. Git runs the hook even when a ref is about to be rejected for a stale lease,
+    so a hook rejection takes precedence: the lease is not evaluated by the remote.
+    """
+
+
+class GitAddFailed(GitError):
+    """``git add -A`` failed in :meth:`Git.commit_all` (e.g. an unreadable file); no commit
+    was attempted, so no commit hook ran."""
 
 
 _FULL_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -94,10 +119,16 @@ class PushResult:
 
 @dataclass(frozen=True)
 class RebaseResult:
-    """Outcome of a rebase step. When ``ok`` is False the rebase is left in progress."""
+    """Outcome of a rebase step. When ``ok`` is False the rebase is left in progress.
+
+    ``conflicts`` are the paths still unmerged at the stop. ``rerere`` are the paths that
+    conflicted at the stop but that rerere resolved with a recorded resolution (staged with
+    ``rerere.autoupdate``): they are no longer unmerged, so they appear only here.
+    """
 
     ok: bool
     conflicts: list[str] = field(default_factory=list)
+    rerere: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -151,6 +182,15 @@ def _parse_trailers(text: str) -> dict[str, str]:
         if sep and key.strip():
             trailers[key.strip()] = value.strip()
     return trailers
+
+
+def _has_ref_status(porcelain_stdout: str) -> bool:
+    """Return True when ``git push --porcelain`` output reports the status of at least one ref."""
+    for line in porcelain_stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3 and len(parts[0]) == 1:
+            return True
+    return False
 
 
 def _split_z(output: str) -> list[str]:
@@ -255,6 +295,29 @@ class Git:
         """Return True when the working tree or index has changes."""
         untracked = "--untracked-files=normal" if include_untracked else "--untracked-files=no"
         return bool(self._out("status", "--porcelain", untracked))
+
+    def dirty_files(self) -> list[str]:
+        """Paths a ``git add -A`` + commit would change: tracked changes versus HEAD (staged or
+        not, deletions included, renames as both paths) and untracked, non-ignored files.
+
+        Repository-relative, sorted, without duplicates.
+        """
+        tracked = _split_z(
+            self.run(
+                "-c",
+                "diff.relative=false",
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                "HEAD",
+                "--",
+            ).stdout
+        )
+        untracked = _split_z(
+            self.run("ls-files", "--others", "--exclude-standard", "--full-name", "-z", ":/").stdout
+        )
+        return sorted({*tracked, *untracked})
 
     def config_get(self, key: str) -> str | None:
         """Return the value of a git config key, or None when it is not set."""
@@ -483,6 +546,23 @@ class Git:
         self.run(*args, input=format_message(message, trailers))
         return self._out("rev-parse", "HEAD")
 
+    def commit_all(self, message: str) -> str:
+        """Stage every change (``git add -A``) and commit it with ``message``; return the sha.
+
+        The user's commit hooks (``pre-commit``, ``commit-msg``, ...) run. When git fails, for
+        example because a hook rejects the commit or there is nothing to commit,
+        :class:`GitError` is raised with git's and the hooks' output in ``stderr``. When the
+        staging itself fails, :class:`GitAddFailed` is raised instead (nothing is committed).
+        """
+        add = self.run("add", "-A", check=False)
+        if add.returncode != 0:
+            raise GitAddFailed(("add", "-A"), add.returncode, add.stderr)
+        args = ("commit", "--quiet", "-m", message)
+        proc = self.run(*args, check=False)
+        if proc.returncode != 0:
+            raise GitError(args, proc.returncode, proc.stderr + proc.stdout)
+        return self._out("rev-parse", "HEAD")
+
     def tree_of(self, ref: str) -> str:
         """Return the tree sha of commit ``ref``."""
         return self._out("rev-parse", f"{ref}^{{tree}}")
@@ -543,6 +623,10 @@ class Git:
           When it already holds the value we pushed, the push landed and ``ok=True``.
           Otherwise (hook, protected branch, ref name clash, ...) :class:`GitError` is raised.
 
+        - the user's ``pre-push`` hook refused the push (without ``no_verify``): git reports
+          no per-ref status and :class:`PushHookRejected` is raised. It takes precedence over
+          a stale lease, because git runs the hook before the remote checks the lease.
+
         Any other failure raises :class:`GitError`.
         """
         if lease is not None and lease.ref != dst_ref:
@@ -557,6 +641,15 @@ class Git:
         output = proc.stderr + proc.stdout
         if proc.returncode == 0:
             return PushResult(ok=True, rejected=False, stderr=proc.stderr)
+        # The pre-push hook runs before anything is sent; when it fails git prints no per-ref
+        # status at all. An unknown source fails the same way, before the hook runs.
+        if (
+            not no_verify
+            and not _has_ref_status(proc.stdout)
+            and self._has_pre_push_hook()
+            and (not src or self.rev_parse(src) is not None)
+        ):
+            raise PushHookRejected(args, proc.returncode, output)
         for line in proc.stdout.splitlines():
             parts = line.split("\t")
             if len(parts) < 3 or parts[0] != "!":
@@ -618,6 +711,13 @@ class Git:
             )
         raise GitError(args, returncode, output)
 
+    def _has_pre_push_hook(self) -> bool:
+        """Return True when an executable ``pre-push`` hook exists (honours core.hooksPath)."""
+        path = Path(self._out("rev-parse", "--git-path", "hooks/pre-push"))
+        if not path.is_absolute():
+            path = self.cwd / path
+        return path.is_file() and os.access(path, os.X_OK)
+
     def _resolve_object(self, rev: str) -> str:
         """Return the object id ``rev`` names (a tag object stays a tag object)."""
         return self._out("rev-parse", "--verify", "--end-of-options", rev)
@@ -644,24 +744,74 @@ class Git:
 
     # ------------------------------------------------------------------ rebase
 
-    def rebase(self, onto: str) -> RebaseResult:
+    def rebase(
+        self,
+        onto: str,
+        *,
+        rerere: bool = False,
+        keep_empty: bool = False,
+        committer_date_is_author_date: bool = False,
+    ) -> RebaseResult:
         """Rebase the current branch onto ``onto``.
 
-        On conflicts the rebase is left in progress and the conflicted paths are returned.
+        ``rerere`` enables recorded resolutions for this command only
+        (``-c rerere.enabled=true -c rerere.autoupdate=true``); ``keep_empty`` keeps commits
+        that start empty (``--keep-empty``); ``committer_date_is_author_date`` sets each
+        rewritten commit's committer date to its author date. On conflicts the rebase is left
+        in progress and the conflicted paths are returned. With ``rerere`` a stop may report
+        no conflicts at all: rerere already resolved and staged them, and the caller only has
+        to continue.
         """
-        return self._rebase_step(("rebase", onto))
+        args: list[str] = [*_RERERE] if rerere else []
+        args.append("rebase")
+        if keep_empty:
+            args.append("--keep-empty")
+        if committer_date_is_author_date:
+            args.append("--committer-date-is-author-date")
+        args.append(onto)
+        return self._rebase_step(tuple(args))
 
-    def rebase_continue(self) -> RebaseResult:
-        """Continue an in-progress rebase without opening an editor."""
-        return self._rebase_step(("rebase", "--continue"))
+    def rebase_continue(self, *, rerere: bool = False) -> RebaseResult:
+        """Continue an in-progress rebase without opening an editor.
+
+        ``rerere`` passes the same per-command options as :meth:`rebase`, so the resolutions
+        of this stop are recorded and later stops can reuse them. Options given to
+        :meth:`rebase` (``--keep-empty``, dates) are kept by git in the rebase state.
+        """
+        args: list[str] = [*_RERERE] if rerere else []
+        return self._rebase_step((*args, "rebase", "--continue"))
 
     def _rebase_step(self, args: tuple[str, ...]) -> RebaseResult:
         proc = self.run(*args, check=False, env=_NON_INTERACTIVE)
         if proc.returncode == 0:
             return RebaseResult(ok=True)
         if self.rebase_in_progress():
-            return RebaseResult(ok=False, conflicts=self.conflicted_files())
+            unmerged = self.conflicted_files()
+            return RebaseResult(
+                ok=False,
+                conflicts=unmerged,
+                rerere=self._rerere_reused(proc.stderr + "\n" + proc.stdout, unmerged),
+            )
         raise GitError(args, proc.returncode, proc.stderr)
+
+    def _rerere_reused(self, output: str, unmerged: Sequence[str]) -> list[str]:
+        """Paths of this stop that rerere resolved from a recorded resolution.
+
+        A step runs until the next stop, and the sequencer stops at every commit that
+        conflicted (even when rerere resolved everything), so the messages in ``output``
+        belong to the current stop. Paths still unmerged (rerere's result left conflicts, or
+        ``rerere.autoupdate`` was off) and paths unknown to the index are left out.
+        """
+        found: list[str] = []
+        for line in output.splitlines():
+            match = _RERERE_REUSED.match(line.strip("\r"))
+            if match is None:
+                continue
+            path = match.group(1)
+            if path in found or path in unmerged or not self._index_stages(path):
+                continue
+            found.append(path)
+        return found
 
     def rebase_abort(self) -> None:
         """Abort the in-progress rebase and restore the original branch."""
@@ -678,8 +828,109 @@ class Git:
         return False
 
     def conflicted_files(self) -> list[str]:
-        """Return paths with unresolved merge conflicts."""
+        """Return paths with unresolved merge conflicts (unmerged index entries).
+
+        Paths are relative to the repository root. This is also the list of unmerged files
+        while a rebase is stopped.
+        """
         return _split_z(self.run("diff", "--name-only", "-z", "--diff-filter=U").stdout)
+
+    unmerged_files = conflicted_files
+
+    # ------------------------------------------------------------------ conflict resolution
+
+    def _run_bytes(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
+        """Run ``git <args>`` like :meth:`run` but with binary stdout (stderr is decoded)."""
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=self.cwd,
+            env=self.env(),
+            capture_output=True,
+            check=False,
+        )
+        if check and proc.returncode != 0:
+            raise GitError(args, proc.returncode, proc.stderr.decode("utf-8", "replace"))
+        return proc
+
+    def _index_stages(self, path: str) -> dict[int, str]:
+        """Return ``{stage: blob sha}`` of the index entries for exactly ``path``."""
+        out = self.run("--literal-pathspecs", "ls-files", "--stage", "-z", "--", path).stdout
+        stages: dict[int, str] = {}
+        for entry in _split_z(out):
+            meta, _, name = entry.partition("\t")
+            if name != path:
+                continue
+            _mode, sha, stage = meta.split(" ")
+            stages[int(stage)] = sha
+        return stages
+
+    def stage_blob(self, stage: int, path: str) -> bytes | None:
+        """Return the content of index stage ``stage`` (1 base, 2 ours, 3 theirs) of ``path``.
+
+        ``path`` is relative to the repository root, as :meth:`conflicted_files` returns it.
+        Returns None when that stage does not exist (e.g. no base for a file added on both
+        sides, no ``theirs`` for a file deleted there). During a rebase stage 2 is the branch
+        being rebased onto (upstream) and stage 3 the commit being replayed. The content is
+        returned as stored, without text conversion.
+        """
+        if stage not in (1, 2, 3):
+            raise ValueError(f"stage must be 1, 2 or 3, got {stage}")
+        sha = self._index_stages(path).get(stage)
+        if sha is None:
+            return None
+        return self._run_bytes("cat-file", "blob", sha).stdout
+
+    def checkout_stage(self, path: str, stage: Literal["ours", "theirs"]) -> None:
+        """Write the ``ours`` or ``theirs`` side of conflicted ``path`` to the working tree.
+
+        Runs ``git checkout --ours|--theirs -- path`` (the path is taken literally). The path
+        stays unmerged in the index until it is staged with :meth:`add_paths`. During a rebase
+        ``ours`` is the upstream side.
+        """
+        if stage not in ("ours", "theirs"):
+            raise ValueError(f"stage must be 'ours' or 'theirs', got {stage!r}")
+        self.run("--literal-pathspecs", "checkout", f"--{stage}", "--", path)
+
+    def restore_conflict(self, path: str) -> bool:
+        """Re-create the conflict of a resolved ``path`` (``git checkout -m``).
+
+        Uses the index's resolve-undo record, so it works for a path resolved during the
+        current merge or rebase stop (by ``git add`` or by rerere). The path is unmerged again,
+        with its stages and conflict markers. Returns False (nothing changed) when git has no
+        record to re-create the conflict from.
+        """
+        proc = self.run("--literal-pathspecs", "checkout", "-m", "--", path, check=False)
+        return proc.returncode == 0 and path in self.conflicted_files()
+
+    def merge_file_union(self, ours: bytes, base: bytes, theirs: bytes) -> bytes:
+        """Return the union merge of three file versions (``git merge-file --union -p``).
+
+        Conflicting hunks keep the lines of both sides (ours first) without markers. The
+        inputs are written to a temporary directory that is removed afterwards.
+        """
+        with tempfile.TemporaryDirectory(prefix="forge-merge-") as tmp:
+            files = []
+            for name, content in (("ours", ours), ("base", base), ("theirs", theirs)):
+                target = Path(tmp) / name
+                target.write_bytes(content)
+                files.append(str(target))
+            proc = self._run_bytes("merge-file", "--union", "-p", *files, check=False)
+        # merge-file exits with the number of conflicts (0 with --union), negative on error.
+        if proc.returncode != 0:
+            raise GitError(
+                ("merge-file", "--union", "-p"),
+                proc.returncode,
+                proc.stderr.decode("utf-8", "replace"),
+            )
+        return proc.stdout
+
+    def add_paths(self, paths: Sequence[str]) -> None:
+        """Stage exactly ``paths`` (taken literally), including deletions (``git add -A``).
+
+        Staging a conflicted path marks it resolved. An empty sequence does nothing.
+        """
+        if paths:
+            self.run("--literal-pathspecs", "add", "-A", "--", *paths)
 
     # ------------------------------------------------------------------ worktrees
 
@@ -720,6 +971,12 @@ class Git:
         else:
             self.run("switch", "--quiet", branch)
 
+    def reset(self, ref: str, mode: ResetMode) -> None:
+        """Reset HEAD to ``ref``: ``hard`` (index and tree too), ``mixed`` (index) or ``soft``."""
+        if mode not in ("hard", "mixed", "soft"):
+            raise ValueError(f"reset mode must be hard, mixed or soft, got {mode!r}")
+        self.run("reset", "--quiet", f"--{mode}", ref, "--")
+
     def reset_hard(self, ref: str) -> None:
         """Reset HEAD, index and working tree to ``ref``."""
-        self.run("reset", "--quiet", "--hard", ref)
+        self.reset(ref, "hard")

@@ -398,6 +398,39 @@ def test_reviews_and_files() -> None:
     assert runner.calls[2].argv[-1] == "repos/acme/shop/pulls/9/files?per_page=100"
 
 
+def test_commit_pulls_paginates_and_maps_simple_pulls() -> None:
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    merged = pull_json(4, state="closed", merged_at=TS, head={"ref": "task/2", "sha": "d" * 40})
+    merged.pop("merged", None)  # "pull request simple" objects carry merged_at only
+    runner = FakeRunner().add([[merged], [pull_json(5)]])
+    pulls = client(runner).commit_pulls(sha)
+    assert runner.calls[0].argv == [
+        "gh",
+        "api",
+        "--paginate",
+        "--slurp",
+        f"repos/acme/shop/commits/{sha}/pulls?per_page=100",
+    ]
+    assert [p.number for p in pulls] == [4, 5]
+    assert pulls[0].merged is True and pulls[0].state == "closed"
+    assert pulls[0].head == "task/2" and pulls[0].author == "alice"
+    assert pulls[0].body == "Closes #1"
+    assert pulls[1].merged is False and pulls[1].mergeable is None
+
+
+def test_commit_pulls_empty_and_quoted() -> None:
+    runner = FakeRunner().add([[]])
+    assert client(runner).commit_pulls("a/b") == []
+    assert runner.calls[0].argv[-1] == "repos/acme/shop/commits/a%2Fb/pulls?per_page=100"
+
+
+def test_commit_pulls_error_propagates() -> None:
+    runner = FakeRunner().add(None, code=1, err="gh: No commit found for SHA: x (HTTP 422)")
+    with pytest.raises(GitHubError) as exc:
+        client(runner).commit_pulls("x")
+    assert exc.value.status == 422
+
+
 def test_get_pull_merged_flag() -> None:
     runner = FakeRunner().add(pull_json(9, merged=True, merged_at=TS))
     assert client(runner).get_pull(9).merged is True

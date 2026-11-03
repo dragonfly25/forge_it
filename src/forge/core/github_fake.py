@@ -13,7 +13,12 @@ It mirrors the GitHub rules Forge relies on:
 - only one open pull request may exist for a given head/base pair;
 - labels, assignees and comments work on pull request numbers too;
 - merging refuses drafts and unmergeable pull requests (405), and closes the issues named by
-  closing keywords only when the base is the repository's default branch.
+  closing keywords only when the base is the repository's default branch;
+- ``commit_pulls`` returns the pull requests linked to a commit. Links come from
+  ``fake_link_commit`` and from ``fake_merge_pull``, which links the merged pull request to its
+  ``head_sha``. The fake does not model the commits a real merge creates on the base branch
+  (merge or squash commits), nor GitHub's rule that only the merged pull request is listed for
+  a default-branch commit: tests link such commits explicitly with ``fake_link_commit``.
 
 Ordering matches ``GitHubClient``: issues, pull requests, comments and reviews oldest first,
 labels by name (case-insensitive), milestones by number. Methods prefixed ``fake_`` are test
@@ -95,6 +100,7 @@ class FakeGitHub:
         self._comments: dict[int, Comment] = {}
         self._reviews: dict[int, Review] = {}
         self._ci: dict[str, CiStatus] = {}  # key: commit sha
+        self._commit_links: dict[str, list[int]] = {}  # key: commit sha, value: PR numbers
         self._next_number = 1  # shared by issues and pull requests
         self._next_milestone = 1
         self._next_comment_id = 1
@@ -557,6 +563,14 @@ class FakeGitHub:
         self._pull(number)
         return list(self._pull_files.get(number, []))
 
+    def commit_pulls(self, sha: str) -> list[PullRequest]:
+        """Pull requests linked to ``sha`` (``fake_link_commit``, ``fake_merge_pull``).
+
+        Returned in the order they were linked, each at most once, with their current state.
+        An unknown commit has no pull requests.
+        """
+        return [self._pulls[n] for n in self._commit_links.get(sha, [])]
+
     # ------------------------------------------------------------------ CI
 
     def commit_ci(self, sha: str) -> CiStatus:
@@ -577,7 +591,8 @@ class FakeGitHub:
         """Merge an open pull request, as GitHub's merge endpoint would.
 
         Drafts and unmergeable pull requests are refused (405). Issues named by closing
-        keywords in the body are closed only when the base is ``default_branch``.
+        keywords in the body are closed only when the base is ``default_branch``. The pull
+        request is linked to its ``head_sha`` for ``commit_pulls``.
         """
         pr = self._pull(number)
         if pr.state != "open":
@@ -588,6 +603,8 @@ class FakeGitHub:
             raise GitHubError(f"pull request #{number} is not mergeable", status=405)
         pr = replace(pr, state="closed", merged=True, merged_at=self._clock())
         self._pulls[number] = pr
+        if pr.head_sha:
+            self.fake_link_commit(pr.head_sha, number)
         if pr.base != self.default_branch:
             return pr
         for match in _CLOSING_RE.finditer(pr.body):
@@ -614,6 +631,16 @@ class FakeGitHub:
         pr = replace(self._pull(number), draft=draft)
         self._pulls[number] = pr
         return pr
+
+    def fake_link_commit(self, sha: str, pr_number: int) -> None:
+        """Associate commit ``sha`` with pull request ``pr_number`` for ``commit_pulls``.
+
+        Linking the same pair twice is a no-op; an unknown pull request raises (404).
+        """
+        self._pull(pr_number)
+        links = self._commit_links.setdefault(sha, [])
+        if pr_number not in links:
+            links.append(pr_number)
 
     def fake_add_pull_files(self, number: int, files: Sequence[str]) -> None:
         """Record paths changed by a pull request."""

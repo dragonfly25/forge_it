@@ -408,6 +408,15 @@ class GitHubClient(Protocol):
         """Paths changed by a pull request."""
         ...
 
+    def commit_pulls(self, sha: str) -> list[PullRequest]:
+        """Pull requests associated with commit ``sha``.
+
+        For a commit on the default branch, GitHub returns the merged pull request that
+        introduced it; otherwise open and merged pull requests containing it. Order as
+        returned by GitHub. List endpoints never include ``mergeable``.
+        """
+        ...
+
     # CI
     def commit_ci(self, sha: str) -> CiStatus:
         """Combined CI state of a commit (check runs and commit statuses)."""
@@ -946,6 +955,17 @@ class GhCliClient:
         """Paths changed by a pull request."""
         path = self._path(f"pulls/{number}/files", {"per_page": "100"})
         return [str(r["filename"]) for r in self._call("GET", path, paginate=True) or []]
+
+    def commit_pulls(self, sha: str) -> list[PullRequest]:
+        """Pull requests associated with commit ``sha``.
+
+        ``GET /repos/{owner}/{repo}/commits/{commit_sha}/pulls``, paginated. For a commit on
+        the default branch GitHub returns the merged pull request that introduced it;
+        otherwise open and merged pull requests containing it. The items are "pull request
+        simple" objects: ``merged`` comes from ``merged_at`` and ``mergeable`` is ``None``.
+        """
+        path = self._path(f"commits/{quote(sha, safe='')}/pulls", {"per_page": "100"})
+        return [_pull_from_json(r) for r in self._call("GET", path, paginate=True) or []]
 
     # ------------------------------------------------------------------ CI
 
