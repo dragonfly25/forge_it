@@ -1028,8 +1028,7 @@ def run_setup(
         io_.print(f"{mark} {c.name}: {c.message}")
         if not c.ok and c.fix:
             io_.print(f"     Fix: {c.fix}")
-    project = project_checks(target, None, env)
-    _add_check_messages(result, machine.checks + project)
+    _add_check_messages(result, machine.checks)
     # 2. Tools.
     tools = detect_tools(env.run)
     names = ", ".join(t.tool for t in tools) or "none"
@@ -1073,6 +1072,10 @@ def run_setup(
         io_.print(f"Rendered {len(rendered)} machine-level adapter file(s)")
     else:
         result.info("not inside a Forge project: machine-level adapters not rendered")
+    # Project checks are evaluated after steps 7-8, so problems setup itself just fixed
+    # (rerere off) are not reported as warnings.
+    project = project_checks(target, None, env)
+    _add_check_messages(result, project)
     # 9. Setup commands.
     runs: list[CommandRun] = []
     if target.config is not None and target.repo_root is not None:

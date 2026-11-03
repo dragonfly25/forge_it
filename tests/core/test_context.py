@@ -18,7 +18,15 @@ from forge.core.context import (
     render_context,
 )
 from forge.core.github import Comment, Issue
-from forge.core.tasks import Size, TaskMetadata, TaskType, upsert_block
+from forge.core.tasks import (
+    DESCRIPTION_BEGIN,
+    DESCRIPTION_END,
+    Size,
+    TaskMetadata,
+    TaskType,
+    upsert_block,
+    upsert_description,
+)
 from forge.core.tiers import Tier
 from forge.core.zones import ZonesConfig, parse_zones
 
@@ -342,3 +350,27 @@ def test_closed_dependency_without_label_is_done_or_dropped(tmp_path: Path) -> N
         ("M1-T02", "dropped"),
     ]
     assert not any("status label" in w for w in ctx.warnings)
+
+
+def test_render_context_strips_description_region_markers(tmp_path: Path) -> None:
+    setup_repo(tmp_path)
+    m = meta()
+    body = upsert_description("Intro note.\n", "Build the save API.\n\nKeep it small.")
+    body = upsert_block(body, m) + "\nTrailing notes.\n"
+    assert DESCRIPTION_BEGIN in body and DESCRIPTION_END in body
+    the = issue(42, "[M1-T07] Save/load", body=body, labels=("forge:task", "status:in-progress"))
+    ctx = build_context(the, m, comments=[], tasks={}, repo_root=tmp_path, zones=zones())
+    assert ctx.body == "Build the save API.\n\nKeep it small.\n\nIntro note.\n\nTrailing notes."
+    text = render_context(ctx)
+    assert "## Description\nBuild the save API.\n\nKeep it small.\n\nIntro note." in text
+    assert "forge:description" not in text
+    assert "forge:metadata" not in text and "forge-metadata" not in text
+
+
+def test_render_context_unbalanced_description_markers_keeps_text(tmp_path: Path) -> None:
+    setup_repo(tmp_path)
+    m = meta()
+    body = upsert_block(f"{DESCRIPTION_BEGIN}\nHalf a region.\n", m)
+    the = issue(42, "[M1-T07] Save/load", body=body, labels=("forge:task", "status:in-progress"))
+    ctx = build_context(the, m, comments=[], tasks={}, repo_root=tmp_path, zones=zones())
+    assert ctx.body == f"{DESCRIPTION_BEGIN}\nHalf a region."

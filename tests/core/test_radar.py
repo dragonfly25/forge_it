@@ -19,6 +19,7 @@ from forge.core.radar import (
     StaleLease,
     code_span,
     is_radar_comment,
+    render_radar,
     run_radar,
     run_refresh_radar,
 )
@@ -303,3 +304,29 @@ def test_write_failure_is_reported_and_others_proceed(radar: Radar) -> None:
     assert entry(result.data["radar"], first)["applied"] is False
     assert entry(result.data["radar"], second)["comment"] == "created"
     assert len(radar.radar_comments(second)) == 1
+
+
+def _drift(n: int) -> tuple[DriftCommit, ...]:
+    return tuple(
+        DriftCommit(
+            sha=f"{i:040x}",
+            date=T0,
+            author="carol",
+            subject=f"change {i}",
+            zones=("api",),
+            files=("src/api/x.py",),
+        )
+        for i in range(n)
+    )
+
+
+def test_render_radar_singular_commit_touches() -> None:
+    body = render_radar(RadarFinding(7, "M1-T01", "main", drift=_drift(1)))
+    assert "**Sync recommended:** 1 commit on `main` touches this task's zones (`api`)." in body
+    assert "touch this" not in body
+
+
+def test_render_radar_plural_commits_touch() -> None:
+    body = render_radar(RadarFinding(7, "M1-T01", "main", drift=_drift(2)))
+    assert "**Sync recommended:** 2 commits on `main` touch this task's zones (`api`)." in body
+    assert "touches" not in body

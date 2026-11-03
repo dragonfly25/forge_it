@@ -352,3 +352,38 @@ def test_refresh_radar_shallow_clone_exits_5(
 
     assert code == 5, env
     assert "shallow" in env["messages"][0]["text"]
+
+
+def test_refresh_human_output_is_rendered(setup: tuple[Path, FakeGitHub]) -> None:
+    repo, fake = setup
+    fake.create_issue("no block", "just text", labels=["forge:task"])
+    result = runner.invoke(app, ["--repo", str(repo), "refresh"])
+    assert result.exit_code == 0, result.output
+    out = result.stdout
+    assert "{" not in out and "'changes'" not in out and "'counts'" not in out
+    assert "#1 M1-T01: (none) -> ready" in out
+    assert "#4 M1-T04: (none) -> in-progress" in out
+    assert "Refresh: 4 tasks checked, 4 updated, 1 warning" in out
+    assert "Radar" not in out
+    assert "warning: issue #5:" in result.stderr
+
+    result = runner.invoke(app, ["--repo", str(repo), "refresh"])
+    assert result.exit_code == 0, result.output
+    assert "Status changes" not in result.stdout
+    assert "4 tasks checked, 0 updated" in result.stdout
+
+
+def test_refresh_radar_human_output(setup: tuple[Path, FakeGitHub], git_world: GitWorld) -> None:
+    repo, _ = setup
+    (repo / ".forge" / "zones.yml").write_text(ZONES_YML)
+    lead = git_world.clone("lead")
+    git_world.commit_file(lead, "src/api/a.py", "x\n", "feat: api change")
+    git_world.push(lead, "main")
+
+    result = runner.invoke(app, ["--repo", str(repo), "refresh", "--radar"])
+
+    assert result.exit_code == 0, result.output
+    out = result.stdout
+    assert "{" not in out and "'radar'" not in out
+    assert "#4 M1-T04: 1 commit upstream touches its zones (comment created)" in out
+    assert "Radar: 1 task in progress, 1 with drift, 0 stale" in out

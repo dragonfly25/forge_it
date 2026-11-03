@@ -704,6 +704,19 @@ def test_run_setup_yes_writes_profile_and_runs_everything(tmp_path: Path) -> Non
     assert result.data["violations"] == []
 
 
+def test_run_setup_does_not_report_what_it_fixed(tmp_path: Path) -> None:
+    """rerere is off before setup and enabled by it: no stale rerere warning remains."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    target = project_target(repo, FakeAdapters())
+    assert target.git is not None and target.git.config_get("rerere.enabled") is None
+    result = run_setup(DefaultsIO(), make_env(), target, tmp_path / "p.yml", PRESETS)
+    assert result.code == ExitCode.OK, result.messages
+    assert not any("rerere" in m.text for m in result.messages), result.messages
+    rerere = [c for c in result.data["checks"] if c["name"] == "rerere"]
+    assert rerere and rerere[0]["ok"] is True
+
+
 def test_run_setup_failing_command_exits_1(tmp_path: Path) -> None:
     (tmp_path / "r").mkdir()
     target = project_target(tmp_path / "r", FakeAdapters())
