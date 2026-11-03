@@ -230,6 +230,8 @@ class World:
         tier: Tier = Tier.STANDARD,
         milestone: str | None = None,
         labels: Sequence[str] = (),
+        type: TaskType = TaskType.IMPL,
+        allow_contract_change: bool = False,
     ) -> int:
         meta = TaskMetadata(
             id=task_id,
@@ -239,8 +241,9 @@ class World:
             zones=tuple(zones),
             size=size,
             tier=tier,
-            type=TaskType.IMPL,
+            type=type,
             done_when=("tests pass",),
+            allow_contract_change=allow_contract_change,
         )
         if milestone is not None and not any(
             m.title == milestone for m in self.fake.list_milestones()
