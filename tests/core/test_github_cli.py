@@ -3,21 +3,26 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from forge.core.errors import ExitCode, PreconditionError
 from forge.core.github import (
+    LIST_PROBE_CAP,
     MIN_GH_VERSION,
     CiStatus,
     GhCliClient,
     GitHubClient,
     GitHubError,
+    Probe,
     parse_date_header,
     parse_gh_version,
+    recover_unlisted,
 )
 
 REPO = "acme/shop"
@@ -235,7 +240,8 @@ def test_update_milestone_rejects_naive_due_on() -> None:
 
 def test_list_issues_filters_out_pulls_and_maps_fields() -> None:
     rows = [issue_json(1), {**issue_json(2), "pull_request": {"url": "x"}}]
-    runner = FakeRunner().add([rows])
+    runner = FakeRunner().add([rows]).add([{"number": 2}, {"number": 1}])
+    runner.add(None, code=1, err="gh: Not Found (HTTP 404)")
     issues = client(runner).list_issues(labels=["forge:task", "status:ready"])
     assert [i.number for i in issues] == [1]
     issue = issues[0]
@@ -253,12 +259,20 @@ def test_list_issues_filters_out_pulls_and_maps_fields() -> None:
         "repos/acme/shop/issues?state=open&sort=created&direction=asc&per_page=100"
         "&labels=forge:task,status:ready",
     ]
+    # The read-your-writes guard: the newest numbers, then a probe just above them.
+    assert runner.calls[1].argv == [
+        "gh",
+        "api",
+        "repos/acme/shop/issues?state=all&sort=created&direction=desc&per_page=10",
+    ]
+    assert runner.calls[2].argv == ["gh", "api", "repos/acme/shop/issues/3"]
+    assert len(runner.calls) == 3
 
 
 def test_list_issues_resolves_milestone_title_to_number() -> None:
     runner = FakeRunner()
     runner.add([[{"number": 2, "title": "M0", "state": "closed"}, {"number": 3, "title": "M1"}]])
-    runner.add([[issue_json(1)]])
+    runner.add([[issue_json(1)]]).add([]).add(None, code=1, err="gh: Not Found (HTTP 404)")
     client(runner).list_issues(state="all", milestone="M1")
     assert runner.calls[0].argv[-1] == "repos/acme/shop/milestones?state=all&per_page=100"
     assert runner.calls[1].argv[-1] == (
@@ -796,3 +810,220 @@ def test_pull_merge_commit_sha() -> None:
     assert client(runner).get_pull(5).merge_commit_sha == "m" * 40
     runner = FakeRunner().add(pull_json(5, merge_commit_sha=None))
     assert client(runner).get_pull(5).merge_commit_sha is None
+
+
+# --------------------------------------------------------------------------- list lag guard
+
+
+@dataclass
+class LaggingRest:
+    """Routes ``gh api`` calls like GitHub with a lagging issue list index.
+
+    ``items`` is the consistent store (``GET issues/{n}``) by number, pull requests carrying
+    ``pull_request``. ``indexed`` holds the numbers the ascending list sees and
+    ``recent_indexed`` those the ``direction=desc`` list sees (default: ``indexed``).
+    ``gone`` numbers answer 410, ``broken`` ones 502. Lists apply state, labels and
+    milestone filters as GitHub does.
+    """
+
+    items: dict[int, dict[str, Any]]
+    indexed: set[int]
+    recent_indexed: set[int] | None = None
+    gone: set[int] = field(default_factory=set)
+    broken: set[int] = field(default_factory=set)
+    calls: list[str] = field(default_factory=list)
+
+    @property
+    def probes(self) -> list[int]:
+        return [int(c.rsplit("/", 1)[1]) for c in self.calls if re.search(r"/issues/\d+$", c)]
+
+    def _filtered(self, numbers: set[int], query: dict[str, list[str]]) -> list[dict[str, Any]]:
+        state = query.get("state", ["open"])[0]
+        labels = {x.lower() for x in query.get("labels", [""])[0].split(",") if x}
+        milestone = query.get("milestone", [None])[0]
+        rows = []
+        for n in sorted(numbers):
+            row = self.items[n]
+            if state != "all" and row["state"] != state:
+                continue
+            if not labels <= {lb["name"].lower() for lb in row["labels"]}:
+                continue
+            if milestone is not None and (row.get("milestone") or {}).get("number") != int(
+                milestone
+            ):
+                continue
+            rows.append(row)
+        return rows
+
+    def __call__(self, argv: list[str], stdin: str | None) -> tuple[int, str, str]:
+        path = argv[-1]
+        self.calls.append(path)
+        url = urlsplit(path)
+        query = parse_qs(url.query)
+        if url.path.endswith("/milestones"):
+            return 0, json.dumps([[{"number": 3, "title": "M1"}, {"number": 4, "title": "M2"}]]), ""
+        if url.path.endswith("/issues") and query.get("direction") == ["asc"]:
+            return 0, json.dumps([self._filtered(self.indexed, query)]), ""
+        if url.path.endswith("/issues") and query.get("direction") == ["desc"]:
+            recent = self.indexed if self.recent_indexed is None else self.recent_indexed
+            newest = sorted(recent, reverse=True)[: int(query["per_page"][0])]
+            return 0, json.dumps([self.items[n] for n in newest]), ""
+        match = re.search(r"/issues/(\d+)$", url.path)
+        assert match is not None, f"unexpected call {path}"
+        number = int(match.group(1))
+        if number in self.gone:
+            return 1, "", "gh: Gone (HTTP 410)"
+        if number in self.broken:
+            return 1, "", "gh: Bad Gateway (HTTP 502)"
+        if number not in self.items:
+            return 1, "", "gh: Not Found (HTTP 404)"
+        return 0, json.dumps(self.items[number]), ""
+
+
+def rest_issue(number: int, **extra: Any) -> dict[str, Any]:
+    data = issue_json(number, repository_url=f"https://api.github.com/repos/{REPO}")
+    data["created_at"] = f"2026-03-01T10:00:{number:02d}Z"
+    data.update(extra)
+    return data
+
+
+def rest_pull(number: int) -> dict[str, Any]:
+    return rest_issue(number, pull_request={"url": "x"})
+
+
+def test_list_issues_recovers_creations_the_index_has_not_seen() -> None:
+    rest = LaggingRest({n: rest_issue(n) for n in range(1, 6)}, indexed={1, 2, 3})
+    issues = GhCliClient(REPO, runner=rest).list_issues(state="all")
+    assert [i.number for i in issues] == [1, 2, 3, 4, 5]
+    assert rest.probes == [4, 5, 6]  # stops at the first 404
+
+
+def test_list_issues_guard_costs_one_list_and_one_404_when_nothing_lags() -> None:
+    rest = LaggingRest({n: rest_issue(n) for n in range(1, 4)}, indexed={1, 2, 3})
+    assert [i.number for i in GhCliClient(REPO, runner=rest).list_issues()] == [1, 2, 3]
+    assert len(rest.calls) == 3
+    assert rest.probes == [4]
+
+
+def test_list_issues_on_an_empty_repository_probes_number_one() -> None:
+    rest = LaggingRest({}, indexed=set())
+    assert GhCliClient(REPO, runner=rest).list_issues() == []
+    assert rest.probes == [1]
+
+
+def test_list_issues_probe_skips_pull_requests_and_keeps_going() -> None:
+    items = {1: rest_issue(1), 2: rest_pull(2), 3: rest_issue(3), 4: rest_pull(4)}
+    rest = LaggingRest(items, indexed={1})
+    issues = GhCliClient(REPO, runner=rest).list_issues()
+    assert [i.number for i in issues] == [1, 3]
+    assert rest.probes == [2, 3, 4, 5]
+
+
+def test_list_issues_probe_applies_state_labels_and_milestone() -> None:
+    m1 = {"number": 3, "title": "M1"}
+    m2 = {"number": 4, "title": "M2"}
+    labelled = [{"name": "forge:task"}, {"name": "status:proposed"}]
+    items = {
+        1: rest_issue(1, labels=labelled, milestone=m1),
+        2: rest_issue(2, labels=labelled, milestone=m1),  # lagging, matches
+        3: rest_issue(3, labels=[{"name": "forge:task"}], milestone=m1),  # label missing
+        4: rest_issue(4, labels=labelled, milestone=m1, state="closed"),  # wrong state
+        5: rest_issue(5, labels=labelled, milestone=m2),  # wrong milestone
+        6: rest_issue(6, labels=labelled, milestone=None),  # no milestone
+        7: rest_issue(
+            7, labels=[{"name": "Status:Proposed"}, {"name": "FORGE:task"}], milestone=m1
+        ),
+    }
+    rest = LaggingRest(items, indexed={1})
+    issues = GhCliClient(REPO, runner=rest).list_issues(
+        state="open", labels=["forge:task", "status:proposed"], milestone="M1"
+    )
+    assert [i.number for i in issues] == [1, 2, 7]
+    assert rest.probes == [2, 3, 4, 5, 6, 7, 8]
+
+
+def test_list_issues_probe_is_capped() -> None:
+    total = LIST_PROBE_CAP + 30
+    rest = LaggingRest({n: rest_issue(n) for n in range(1, total + 1)}, indexed={1})
+    issues = GhCliClient(REPO, runner=rest).list_issues()
+    assert len(rest.probes) == LIST_PROBE_CAP
+    assert [i.number for i in issues] == list(range(1, LIST_PROBE_CAP + 2))
+
+
+def test_list_issues_probes_holes_among_the_newest_numbers() -> None:
+    """Indexing out of order: #3 is still missing while #4 and #5 are already listed."""
+    items = {n: rest_issue(n) for n in range(1, 6)}
+    rest = LaggingRest(items, indexed={1, 2, 4, 5})
+    issues = GhCliClient(REPO, runner=rest).list_issues()
+    assert [i.number for i in issues] == [1, 2, 3, 4, 5]  # creation order kept
+    assert rest.probes == [3, 6]
+
+
+def test_list_issues_short_index_means_holes_start_at_one() -> None:
+    """Fewer recent numbers than the window: the index is complete, so #1 is a hole."""
+    items = {n: rest_issue(n) for n in range(1, 4)}
+    rest = LaggingRest(items, indexed={2, 3})
+    assert [i.number for i in GhCliClient(REPO, runner=rest).list_issues()] == [1, 2, 3]
+    assert rest.probes == [1, 4]
+
+
+def test_list_issues_deleted_hole_is_skipped() -> None:
+    items = {n: rest_issue(n) for n in (1, 2, 4)}
+    rest = LaggingRest(items, indexed={1, 2, 4}, gone={3})
+    assert [i.number for i in GhCliClient(REPO, runner=rest).list_issues()] == [1, 2, 4]
+    assert rest.probes == [3, 5]
+
+
+def test_list_issues_newest_number_comes_from_the_unfiltered_index() -> None:
+    """The filtered list ends at #1, but #2 (a PR) and #3 exist: probing starts at #4."""
+    items = {1: rest_issue(1), 2: rest_pull(2), 3: rest_issue(3, state="closed"), 4: rest_issue(4)}
+    rest = LaggingRest(items, indexed={1, 2, 3})
+    issues = GhCliClient(REPO, runner=rest).list_issues(state="open")
+    assert [i.number for i in issues] == [1, 4]
+    assert rest.probes == [4, 5]
+
+
+def test_list_issues_desc_index_lagging_more_than_the_list() -> None:
+    items = {n: rest_issue(n) for n in range(1, 5)}
+    rest = LaggingRest(items, indexed={1, 2, 3, 4}, recent_indexed={1, 2})
+    assert [i.number for i in GhCliClient(REPO, runner=rest).list_issues()] == [1, 2, 3, 4]
+    assert rest.probes == [5]
+
+
+def test_list_issues_probe_skips_transferred_issues() -> None:
+    moved = rest_issue(2, repository_url="https://api.github.com/repos/acme/other")
+    renumbered = rest_issue(9)  # a redirect answered with another number
+    items = {1: rest_issue(1), 2: moved, 3: renumbered}
+    rest = LaggingRest(items, indexed={1})
+    assert [i.number for i in GhCliClient(REPO, runner=rest).list_issues()] == [1]
+    assert rest.probes == [2, 3, 4]
+
+
+def test_list_issues_probe_errors_propagate() -> None:
+    rest = LaggingRest({1: rest_issue(1)}, indexed={1}, broken={2})
+    with pytest.raises(GitHubError) as exc:
+        GhCliClient(REPO, runner=rest).list_issues()
+    assert exc.value.status == 502
+
+
+def test_recover_unlisted_stops_only_above_the_newest_number() -> None:
+    """A 404 on a hole (e.g. a Discussion number) does not stop the upward probing."""
+    seen: list[int] = []
+
+    def fetch(n: int) -> int | Probe:
+        seen.append(n)
+        return n if n in (5, 6) else Probe.MISSING
+
+    assert recover_unlisted([1], [1, 2, 4], fetch) == [5, 6]
+    assert seen == [3, 5, 6, 7]
+
+
+def test_recover_unlisted_cap_counts_hole_probes() -> None:
+    seen: list[int] = []
+
+    def fetch(n: int) -> int | Probe:
+        seen.append(n)
+        return Probe.SKIP
+
+    assert recover_unlisted([], [1, 10], fetch, cap=3) == []
+    assert seen == [2, 3, 4]

@@ -697,6 +697,61 @@ def test_race_crash_before_relisting_is_cleaned_by_the_next_run(world: PlanWorld
     _assert_one_open_per_id(world.fake)
 
 
+LAG = 50
+"""List calls a new issue stays out of the fake's issue index: longer than any run here."""
+
+
+def test_back_to_back_applies_under_list_lag_create_no_duplicate(world: PlanWorld) -> None:
+    """Dogfood regression: the second run's listing must see the issues the first created."""
+    world.fake.fake_set_list_lag(LAG)
+    first = world.apply(RACE_PLAN)
+    assert first.code == ExitCode.OK
+    assert first.data["counts"]["create"] == 2
+    second = world.apply(RACE_PLAN)
+    assert second.code == ExitCode.OK
+    assert second.data["counts"]["create"] == 0
+    assert second.data["counts"]["duplicates"] == 0
+    world.fake.fake_set_list_lag(0)
+    assert _assert_one_open_per_id(world.fake) == {"M1-T01": 1, "M1-T02": 2}
+    assert len(world.fake.list_issues(state="all")) == 2
+    guard = RecordingGitHub(world.fake, read_only=True)
+    assert world.apply(RACE_PLAN, github=guard).code == ExitCode.OK
+
+
+def test_unguarded_list_lag_reproduces_the_dogfood_duplicates(world: PlanWorld) -> None:
+    """Without the read-your-writes guard the lag duplicates issues (the bug seen on GitHub);
+    once the index catches up, the next run's duplicate cleanup converges."""
+    world.fake.fake_set_list_lag(LAG, guarded=False)
+    world.apply(RACE_PLAN)
+    world.apply(RACE_PLAN)
+    world.fake.fake_set_list_lag(0)
+    assert len(world.fake.list_issues(state="open")) == 4
+    world.apply(RACE_PLAN)
+    assert _assert_one_open_per_id(world.fake) == {"M1-T01": 1, "M1-T02": 2}
+
+
+def test_race_interleaved_creates_under_list_lag_converge(world: PlanWorld) -> None:
+    """Two leads race while neither run's creations are indexed yet: as without lag, A
+    creates T01, B runs to the end, A creates T02; both re-listings see every issue."""
+    world.fake.fake_set_list_lag(LAG)
+    gh_a, gh_b = RecordingGitHub(world.fake), RecordingGitHub(world.fake)
+    plan_a, state_a = _prepare(world, gh_a, RACE_PLAN)
+    plan_b, state_b = _prepare(world, gh_b, RACE_PLAN)
+    reports: list[Any] = []
+    gh_a.after["create_issue"] = lambda: reports.append(
+        execute_apply_plan(world.ctx(gh_b), plan_b, state_b)
+    )
+    report_a = execute_apply_plan(world.ctx(gh_a), plan_a, state_a)
+    [report_b] = reports
+    assert report_a.failures == [] and report_b.failures == []
+    assert [d.issue for d in report_b.duplicates] == [2]
+    assert [d.issue for d in report_a.duplicates] == [4]
+    world.fake.fake_set_list_lag(0)
+    assert _assert_one_open_per_id(world.fake) == {"M1-T01": 1, "M1-T02": 3}
+    guard = RecordingGitHub(world.fake, read_only=True)
+    assert world.apply(RACE_PLAN, github=guard).code == ExitCode.OK
+
+
 def test_started_duplicate_is_kept_with_a_warning(world: PlanWorld) -> None:
     fake = world.fake
     first = seed(fake, meta("M1-T01"))

@@ -21,6 +21,11 @@ It mirrors the GitHub rules Forge relies on:
   a default-branch commit: tests link such commits explicitly with ``fake_link_commit``.
 - releases are keyed by tag (one per tag, 422 on a second); drafts are hidden from
   ``get_release_by_tag``. Git tags are not modelled.
+- GitHub's issue list index lags behind writes (see ``forge.core.github``). It is off by
+  default; ``fake_set_list_lag`` turns it on: new issues and pull requests then stay out of
+  the index for some ``list_issues`` calls, while ``get_issue`` sees them at once. Like
+  ``GhCliClient``, ``list_issues`` closes that gap with ``recover_unlisted`` unless the lag
+  is set ``guarded=False``, which reproduces an unguarded client.
 
 Ordering matches ``GitHubClient``: issues, pull requests, comments and reviews oldest first,
 labels by name (case-insensitive), milestones by number. Methods prefixed ``fake_`` are test
@@ -37,6 +42,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from forge.core.github import (
+    RECENT_WINDOW,
     STATE_REASONS,
     UNSET,
     CiStatus,
@@ -46,12 +52,14 @@ from forge.core.github import (
     IssueState,
     Label,
     Milestone,
+    Probe,
     PullRequest,
     Release,
     Review,
     ReviewEvent,
     StateFilter,
     Unset,
+    recover_unlisted,
 )
 
 _EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
@@ -111,6 +119,9 @@ class FakeGitHub:
         self._next_review_id = 1
         self._releases: dict[str, Release] = {}  # key: tag name
         self._next_release_id = 1
+        self._list_lag = 0  # list_issues calls a new issue or pull request stays unindexed
+        self._list_guarded = True
+        self._unindexed: dict[int, int] = {}  # number -> list_issues calls left unindexed
 
     # ------------------------------------------------------------------ helpers
 
@@ -309,19 +320,52 @@ class FakeGitHub:
         labels: Sequence[str] = (),
         milestone: str | None = None,
     ) -> list[Issue]:
-        """Issues (never pull requests) having all ``labels`` and the given milestone title."""
+        """Issues (never pull requests) having all ``labels`` and the given milestone title.
+
+        Under ``fake_set_list_lag`` the raw index misses recent creations; the guarded
+        default recovers them like ``GhCliClient`` does.
+        """
         wanted = {name.lower() for name in labels}
-        result: list[Issue] = []
-        for number in sorted(self._issues):
-            issue = self._issues[number]
-            if not _matches(state, issue.state):
-                continue
-            if not wanted <= {x.lower() for x in issue.labels}:
-                continue
-            if milestone is not None and issue.milestone != milestone:
-                continue
-            result.append(issue)
+
+        def keep(issue: Issue) -> bool:
+            return (
+                _matches(state, issue.state)
+                and wanted <= {x.lower() for x in issue.labels}
+                and (milestone is None or issue.milestone == milestone)
+            )
+
+        hidden = set(self._unindexed)
+        result = [
+            self._issues[n]
+            for n in sorted(self._issues)
+            if n not in hidden and keep(self._issues[n])
+        ]
+        if self._list_guarded:
+            indexed = sorted((*self._issues, *self._pulls))
+            recent = [n for n in indexed if n not in hidden][-RECENT_WINDOW:]
+
+            def fetch(number: int) -> Issue | Probe:
+                if number >= self._next_number:
+                    return Probe.MISSING
+                issue = self._issues.get(number)
+                return issue if issue is not None and keep(issue) else Probe.SKIP
+
+            extra = recover_unlisted([i.number for i in result], recent, fetch)
+            result = sorted([*result, *extra], key=lambda i: i.number)
+        self._age_index()
         return result
+
+    def _age_index(self) -> None:
+        """One more list call has passed: index what has waited long enough."""
+        for number, left in list(self._unindexed.items()):
+            if left <= 1:
+                del self._unindexed[number]
+            else:
+                self._unindexed[number] = left - 1
+
+    def _unindex(self, number: int) -> None:
+        if self._list_lag > 0:
+            self._unindexed[number] = self._list_lag
 
     def get_issue(self, number: int) -> Issue:
         """One issue. Raises ``GitHubError`` if missing or a pull request."""
@@ -358,6 +402,7 @@ class FakeGitHub:
             closed_at=None,
         )
         self._issues[number] = issue
+        self._unindex(number)
         return issue
 
     def update_issue(
@@ -520,6 +565,7 @@ class FakeGitHub:
             url=self._url("pull", number),
         )
         self._pulls[number] = pr
+        self._unindex(number)
         return pr
 
     def update_pull(
@@ -641,6 +687,23 @@ class FakeGitHub:
     def fake_set_server_skew(self, skew: timedelta | None) -> None:
         """Make :meth:`server_time` run ``skew`` ahead of the clock; ``None`` makes it unknown."""
         self._server_skew = skew
+
+    def fake_set_list_lag(self, calls: int, *, guarded: bool = True) -> None:
+        """Model the lag of GitHub's issue list index (off by default).
+
+        From now on, a new issue or pull request stays out of the index for the next
+        ``calls`` ``list_issues`` calls; ``get_issue``, ``get_pull`` and ``list_pulls`` see it
+        at once (GitHub's pull request list measured consistent). With ``guarded`` (the
+        default) ``list_issues`` recovers the missing issues like ``GhCliClient``;
+        ``guarded=False`` returns the raw index, as an unguarded client would. ``calls=0``
+        turns the lag off and indexes everything at once.
+        """
+        if calls < 0:
+            raise ValueError("calls must be >= 0")
+        self._list_lag = calls
+        self._list_guarded = guarded
+        if calls == 0:
+            self._unindexed.clear()
 
     def fake_close_pull(self, number: int) -> PullRequest:
         """Close an open pull request without merging it."""

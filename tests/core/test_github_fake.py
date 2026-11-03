@@ -521,3 +521,61 @@ def test_merge_sets_merge_commit_sha(gh: FakeGitHub) -> None:
     second = gh.create_pull("b", "", "task/2", "main")
     assert gh.fake_merge_pull(second.number, merge_commit_sha="c" * 40).merge_commit_sha == "c" * 40
     assert gh.get_pull(second.number).merge_commit_sha == "c" * 40
+
+
+# --------------------------------------------------------------------------- list lag
+
+
+def test_list_lag_is_off_by_default(gh: FakeGitHub) -> None:
+    issue = gh.create_issue("t", "b")
+    assert [i.number for i in gh.list_issues()] == [issue.number]
+
+
+def test_unguarded_list_lag_hides_new_issues_from_lists_only(gh: FakeGitHub) -> None:
+    old = gh.create_issue("old", "b").number
+    gh.fake_set_list_lag(2, guarded=False)
+    new = gh.create_issue("new", "b").number
+    assert gh.get_issue(new).title == "new"  # consistent read
+    assert [i.number for i in gh.list_issues()] == [old]  # 1st list call
+    assert [i.number for i in gh.list_issues(state="all")] == [old]  # 2nd
+    assert [i.number for i in gh.list_issues()] == [old, new]  # indexed now
+
+
+def test_guarded_list_lag_recovers_new_issues_with_filters(gh: FakeGitHub) -> None:
+    gh.create_issue("old", "b", labels=["forge:task"], milestone="M1")
+    gh.fake_set_list_lag(5)
+    a = gh.create_issue("a", "b", labels=["forge:task"], milestone="M1").number
+    gh.create_issue("no label", "b", milestone="M1")
+    pr = gh.create_pull("p", "", "task/1", "main").number
+    c = gh.create_issue("c", "b", labels=["FORGE:TASK"], milestone="M1").number
+    closed = gh.create_issue("closed", "b", labels=["forge:task"], milestone="M1").number
+    gh.update_issue(closed, state="closed")
+    found = gh.list_issues(labels=["forge:task"], milestone="M1")
+    assert [i.title for i in found] == ["old", "a", "c"]
+    assert [i.number for i in found][1:] == [a, c]
+    assert [p.number for p in gh.list_pulls()] == [pr]  # pull lists do not lag
+
+
+def test_list_lag_hole_below_an_indexed_issue_is_recovered(gh: FakeGitHub) -> None:
+    """Out-of-order indexing: the older issue is still unindexed when the newer one shows."""
+    gh.fake_set_list_lag(3)
+    first = gh.create_issue("first", "b").number
+    gh.fake_set_list_lag(1)
+    second = gh.create_issue("second", "b").number
+    gh.list_issues()  # indexes `second` only
+    assert [i.number for i in gh.list_issues()] == [first, second]
+    gh.fake_set_list_lag(1, guarded=False)
+    assert [i.number for i in gh.list_issues()] == [second]  # the raw index still lacks it
+
+
+def test_list_lag_zero_indexes_everything(gh: FakeGitHub) -> None:
+    gh.fake_set_list_lag(10, guarded=False)
+    n = gh.create_issue("t", "b").number
+    assert gh.list_issues() == []
+    gh.fake_set_list_lag(0)
+    assert [i.number for i in gh.list_issues()] == [n]
+
+
+def test_list_lag_rejects_negative_calls(gh: FakeGitHub) -> None:
+    with pytest.raises(ValueError):
+        gh.fake_set_list_lag(-1)

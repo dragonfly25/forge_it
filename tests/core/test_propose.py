@@ -96,6 +96,27 @@ def test_idempotent_on_same_open_title() -> None:
     assert fake.get_issue(first.data["issue"]["number"]).body.startswith("one")
 
 
+def test_idempotent_under_list_lag() -> None:
+    """Dogfood regression: GitHub's issue list lags a few seconds behind a creation."""
+    fake = FakeGitHub(user="alice")
+    fake.fake_set_list_lag(50)
+    first = propose(ProposeContext(github=fake, login="alice"), "Add Cache", "one")
+    again = propose(ProposeContext(github=fake, login="alice"), "add cache", "two")
+    assert again.data["created"] is False
+    assert again.data["issue"]["number"] == first.data["issue"]["number"]
+    fake.fake_set_list_lag(0)
+    assert [i.title for i in fake.list_issues(state="all")] == ["Add Cache"]
+
+
+def test_unguarded_list_lag_would_duplicate_the_proposal() -> None:
+    """The hazard the guard closes: a raw lagging list misses the first proposal."""
+    fake = FakeGitHub(user="alice")
+    fake.fake_set_list_lag(50, guarded=False)
+    propose(ProposeContext(github=fake, login="alice"), "Add Cache", "one")
+    again = propose(ProposeContext(github=fake, login="alice"), "Add Cache", "two")
+    assert again.data["created"] is True
+
+
 def test_closed_proposal_does_not_block_a_new_one() -> None:
     fake = FakeGitHub(user="alice")
     first = propose(ProposeContext(github=fake, login="alice"), "Idea", "one")
