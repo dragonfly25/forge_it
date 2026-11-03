@@ -11,8 +11,7 @@ from __future__ import annotations
 import sys
 import threading
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -21,11 +20,9 @@ import pytest
 from forge.core.claim import (
     Candidate,
     ClaimContext,
-    NextOptions,
     NextOutcome,
     Reason,
     TaskView,
-    claim_next,
     order_key,
     reclaim_task,
     release_claim,
@@ -33,11 +30,9 @@ from forge.core.claim import (
     select_candidates,
     zones_overlap,
 )
-from forge.core.config import ForgeConfig, parse_config
 from forge.core.errors import ExitCode, ForgeError, PreconditionError
-from forge.core.git import Git, Lease, PushResult
+from forge.core.git import Git, PushResult
 from forge.core.github import GitHubError, Issue
-from forge.core.github_fake import FakeGitHub
 from forge.core.lease import LEASE_MARKER, find_claim, find_lease, format_time, heartbeat
 from forge.core.pending import (
     MAX_RUN_AGE,
@@ -48,12 +43,9 @@ from forge.core.pending import (
     task_lock,
     write_pending,
 )
-from forge.core.profile import AgentProfile
-from forge.core.refresh import TaskRecord, ensure_labels, gather_task_branches
+from forge.core.refresh import TaskRecord, gather_task_branches
 from forge.core.tasks import (
     BLOCKED_CONFLICT,
-    TRAILER_AGENT,
-    TRAILER_CLAIM,
     TRAILER_HANDOFF,
     TRAILER_RELEASE,
     TRAILER_RUN,
@@ -62,294 +54,32 @@ from forge.core.tasks import (
     Status,
     TaskMetadata,
     TaskType,
-    upsert_block,
 )
 from forge.core.tiers import Tier
-from forge.core.validate import Fields
-from forge.core.zones import Zone, ZonesConfig
+from support.scenarios import (
+    AGENT,
+    HOST,
+    LIGHT_AGENT,
+    RUN_ID,
+    T0,
+    WAIT,
+    ZONES,
+    Clock,
+    HookedGit,
+    Sleeper,
+    World,
+    claim_of,
+    make_config,
+    run,
+)
 
 if TYPE_CHECKING:
     from conftest import GitWorld
-
-T0 = datetime(2026, 11, 2, 9, 0, tzinfo=UTC)
-HOST = "test-host"
-PID = 4242  # default pid of a simulated run; runs are dead once they return (World.alive)
-WAIT = 20.0  # seconds a test thread waits for its peer before failing (never reached when green)
-
-ZONES = ZonesConfig(
-    zones={
-        "api": Zone("api", ("src/api/**",)),
-        "api-v2": Zone("api-v2", ("src/api/v2/**",)),
-        "web": Zone("web", ("src/web/**",)),
-        "db": Zone("db", ("src/db/**",)),
-        "docs": Zone("docs", ("docs/**",)),
-    }
-)
-
-AGENT = AgentProfile(
-    id="claude",
-    tool="claude-code",
-    providers=("anthropic",),
-    tiers={Tier.STRONG: "opus", Tier.STANDARD: "sonnet", Tier.LIGHT: "haiku"},
-)
-LIGHT_AGENT = AgentProfile(id="local", tool="ollama", providers=("local",), tiers={Tier.LIGHT: "x"})
-
-
-def make_config(*, max_attempts: int = 5, lease_hours: int = 24, version: str = ">=0.1,<0.2"):
-    data = {
-        "forge_version": version,
-        "project": {"name": "shop", "default_branch": "main"},
-        "github": {"repo": "acme/shop"},
-        "lease_hours": lease_hours,
-        "claim": {"max_attempts": max_attempts},
-    }
-    return parse_config(Fields(data, "config.yml"))
-
-
-# --------------------------------------------------------------------------- fixtures
-
-
-class Clock:
-    """A settable clock."""
-
-    def __init__(self, now: datetime = T0) -> None:
-        self.now = now
-
-    def __call__(self) -> datetime:
-        return self.now
-
-
-class Sleeper:
-    """Injected ``sleep``: records calls and runs an optional hook instead of sleeping."""
-
-    def __init__(self, hook: Callable[[], None] | None = None) -> None:
-        self.calls: list[float] = []
-        self.hook = hook
-
-    def __call__(self, seconds: float) -> None:
-        self.calls.append(seconds)
-        if self.hook is not None:
-            self.hook()
-
-
-class UserGitHub:
-    """One user's view of the shared FakeGitHub; every call is atomic under one lock."""
-
-    def __init__(self, fake: FakeGitHub, login: str, lock: threading.RLock) -> None:
-        self._fake = fake
-        self._login = login
-        self._lock = lock
-        self.fail: dict[str, int] = {}  # method name -> number of calls that raise
-        self.after: dict[str, Callable[[], None]] = {}  # method name -> hook run once after it
-
-    def __getattr__(self, name: str) -> Any:
-        attr = getattr(self._fake, name)
-        if not callable(attr):
-            return attr
-
-        def call(*args: Any, **kwargs: Any) -> Any:
-            if self.fail.get(name, 0) > 0:
-                self.fail[name] -= 1
-                raise GitHubError(f"injected failure in {name}", status=502)
-            with self._lock:
-                self._fake.fake_set_user(self._login)
-                result = attr(*args, **kwargs)
-            hook = self.after.pop(name, None)
-            if hook is not None:
-                hook()
-            return result
-
-        return call
-
-
-class HookedGit(Git):
-    """A clone whose pushes and fetches can run test hooks (to interleave users)."""
-
-    def __init__(self, cwd: Path) -> None:
-        super().__init__(cwd)
-        self.before_push: Callable[[str, str], None] | None = None
-        self.after_push: Callable[[str, str, PushResult], None] | None = None
-        self.after_fetch: Callable[[], None] | None = None
-        self.pushes: list[tuple[str, str, bool]] = []  # (src, dst, no_verify)
-
-    def push(  # type: ignore[override]
-        self, src: str, dst_ref: str, **kwargs: Any
-    ) -> PushResult:
-        if self.before_push is not None:
-            self.before_push(src, dst_ref)
-        result = super().push(src, dst_ref, **kwargs)
-        self.pushes.append((src, dst_ref, bool(kwargs.get("no_verify"))))
-        if self.after_push is not None:
-            self.after_push(src, dst_ref, result)
-        return result
-
-    def fetch(self, *args: Any, **kwargs: Any) -> None:
-        super().fetch(*args, **kwargs)
-        if self.after_fetch is not None:
-            self.after_fetch()
-
-
-@dataclass
-class World:
-    """Shared remote + FakeGitHub, with one clone and one context per user."""
-
-    git_world: GitWorld
-    fake: FakeGitHub = field(default_factory=FakeGitHub)
-    lock: threading.RLock = field(default_factory=threading.RLock)
-    clones: dict[str, HookedGit] = field(default_factory=dict)
-    alive: set[int] = field(default_factory=set)  # pids of simulated runs still running
-
-    def __post_init__(self) -> None:
-        ensure_labels(self.fake)
-
-    def git(self, user: str) -> HookedGit:
-        if user not in self.clones:
-            plain = self.git_world.clone(user)
-            self.clones[user] = HookedGit(plain.cwd)
-        return self.clones[user]
-
-    def ctx(
-        self,
-        user: str,
-        *,
-        clock: Callable[[], datetime] | None = None,
-        sleep: Callable[[float], None] | None = None,
-        agent: AgentProfile = AGENT,
-        config: ForgeConfig | None = None,
-        max_polls: int = 5,
-        profile_login: str | None = None,
-        pid: int = PID,
-        host: str | None = HOST,
-        run_id: Callable[[], str] | None = None,
-        clone: str | None = None,
-    ) -> ClaimContext:
-        """``user`` is the GitHub login; ``clone`` (default: ``user``) the local clone."""
-        extra: dict[str, Any] = {} if run_id is None else {"run_id": run_id}
-        return ClaimContext(
-            config=config or make_config(),
-            git=self.git(clone or user),
-            github=UserGitHub(self.fake, user, self.lock),  # type: ignore[arg-type]
-            zones=ZONES,
-            agent=agent,
-            profile_login=profile_login or user,
-            clock=clock or Clock(),
-            sleep=sleep or Sleeper(),
-            max_polls=max_polls,
-            pid=pid,
-            host=host,
-            pid_running=lambda p: p in self.alive,
-            **extra,
-        )
-
-    def task(
-        self,
-        task_id: str,
-        zones: Sequence[str],
-        *,
-        deps: Sequence[str] = (),
-        size: Size = Size.S,
-        tier: Tier = Tier.STANDARD,
-        milestone: str | None = None,
-        labels: Sequence[str] = (),
-    ) -> int:
-        meta = TaskMetadata(
-            id=task_id,
-            spec="specs/m1/x.md",
-            covers=("AC-1",),
-            depends_on=tuple(deps),
-            zones=tuple(zones),
-            size=size,
-            tier=tier,
-            type=TaskType.IMPL,
-            done_when=("tests pass",),
-        )
-        if milestone is not None and not any(
-            m.title == milestone for m in self.fake.list_milestones()
-        ):
-            self.fake.create_milestone(milestone)
-        issue = self.fake.create_issue(
-            f"[{task_id}] task",
-            upsert_block("Description.\n", meta),
-            labels=["forge:task", "status:ready", *labels],
-            milestone=milestone,
-        )
-        return issue.number
-
-    def remote_tip(self, issue: int) -> str | None:
-        return self.git_world.remote_git.rev_parse(f"refs/heads/task/{issue}")
-
-    def push_event(
-        self,
-        user: str,
-        issue: int,
-        trailers: dict[str, str],
-        when: datetime,
-        *,
-        parent: str | None = None,
-        message: str = "forge: event",
-    ) -> str:
-        """Push a commit carrying ``trailers`` on top of ``task/<issue>`` (or main)."""
-        git = self.git(user)
-        ref = f"refs/heads/task/{issue}"
-        current = self.remote_tip(issue)
-        base = parent or current or self.git_world.remote_git.rev_parse("refs/heads/main")
-        assert base is not None
-        git.fetch()
-        sha = git.commit_tree(git.tree_of(base), [base], message, trailers, date=when)
-        assert git.push(sha, ref, lease=Lease(ref, current)).ok
-        return sha
-
-    def push_work(self, user: str, issue: int, path: str, when: datetime) -> str:
-        """Push a commit that changes ``path`` on ``task/<issue>``."""
-        git = self.git(user)
-        git.fetch()
-        tip = self.remote_tip(issue)
-        assert tip is not None
-        git.run("checkout", "--quiet", "--detach", tip)
-        (git.cwd / path).parent.mkdir(parents=True, exist_ok=True)
-        (git.cwd / path).write_text(f"{path}\n")
-        git.add([path])
-        stamp = f"{int(when.timestamp())} +0000"
-        git.run(
-            "commit",
-            "--quiet",
-            "-m",
-            "feat: work",
-            env={"GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp},
-        )
-        sha = git.rev_parse("HEAD")
-        assert sha is not None
-        ref = f"refs/heads/task/{issue}"
-        assert git.push(sha, ref, lease=Lease(ref, tip)).ok
-        git.run("checkout", "--quiet", "main")
-        return sha
-
-    def claimed_issues(self) -> set[int]:
-        """Issues whose remote branch currently ends with a claim."""
-        git = self.git_world.remote_git
-        result: set[int] = set()
-        for ref in git.list_refs("refs/heads/task"):
-            number = int(ref.rsplit("/", 1)[1])
-            trailers = git.commits(f"{ref}", first_parent=True)[0].trailers
-            if TRAILER_CLAIM in trailers:
-                result.add(number)
-        return result
 
 
 @pytest.fixture
 def world(git_world: GitWorld) -> World:
     return World(git_world)
-
-
-def claim_of(task_id: str, who: str, agent: str = "claude") -> dict[str, str]:
-    return {TRAILER_CLAIM: who, TRAILER_AGENT: agent, TRAILER_TASK: task_id}
-
-
-RUN_ID = "0123456789abcdef0123456789abcdef"
-
-
-def run(ctx: ClaimContext, **options: Any) -> NextOutcome:
-    return claim_next(ctx, NextOptions(**options))
 
 
 # --------------------------------------------------------------------------- pure selection

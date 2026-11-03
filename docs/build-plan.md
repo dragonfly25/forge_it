@@ -49,8 +49,10 @@ Progress notes: ADR 0009 (live claim, lease comment format, safe post-claim veri
 
 **Done when:** tests prove (a) two users racing for the same task → exactly one wins, the other gets the next candidate; (b) two users claiming different tasks with overlapping zones → exactly one keeps its claim; (c) stale claim can be reclaimed, fresh one cannot; (d) handoff tasks are preferred; (e) `--json` output matches the envelope.
 
-## [ ] Phase 4 — Status
-- `core/report.py` + `forge status` with all sections in §11.3 (`--me`, `--milestone`, `--json`), including drift detection on the task's zones, version check and profile-constraint/preset health.
+## [x] Phase 4 — Status
+- [x] `core/report.py` + `forge status` with all sections in §11.3 (`--me`, `--milestone`, `--json`), including drift detection on the task's zones, version check and profile-constraint/preset health.
+
+Progress notes: ADR 0010 (sources, scope, section rules, CI combination, exit codes). The snapshot code in `core/claim.py` is now public and shared by `next` and `status`. New infrastructure: `GitHubClient.commit_ci` and `Git.commits_with_files`. Shared test scenarios live in `tests/support/scenarios.py`, and snapshots in `tests/snapshots/`.
 
 **Done when:** snapshot tests of status JSON for a seeded scenario (in-progress, stale, blocked, in-review, handoff, ready queue).
 

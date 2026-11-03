@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING
 from forge.core.github import (
     STATE_REASONS,
     UNSET,
+    CiStatus,
     Comment,
     GitHubError,
     Issue,
@@ -46,6 +47,7 @@ from forge.core.github import (
 )
 
 _EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
+_NO_CI = CiStatus("none", 0, (), ())
 _CLOSING_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b", re.IGNORECASE)
 _REVIEW_STATES: dict[str, str] = {
     "APPROVE": "APPROVED",
@@ -92,6 +94,7 @@ class FakeGitHub:
         self._pull_files: dict[int, list[str]] = {}
         self._comments: dict[int, Comment] = {}
         self._reviews: dict[int, Review] = {}
+        self._ci: dict[str, CiStatus] = {}  # key: commit sha
         self._next_number = 1  # shared by issues and pull requests
         self._next_milestone = 1
         self._next_comment_id = 1
@@ -554,7 +557,17 @@ class FakeGitHub:
         self._pull(number)
         return list(self._pull_files.get(number, []))
 
+    # ------------------------------------------------------------------ CI
+
+    def commit_ci(self, sha: str) -> CiStatus:
+        """Combined CI state of a commit; ``none`` unless set with ``fake_set_ci``."""
+        return self._ci.get(sha, _NO_CI)
+
     # ------------------------------------------------------------------ test helpers
+
+    def fake_set_ci(self, sha: str, status: CiStatus) -> None:
+        """Set the CI state GitHub reports for commit ``sha``."""
+        self._ci[sha] = status
 
     def fake_set_user(self, login: str) -> None:
         """Change the acting user (affects authorship of new objects)."""

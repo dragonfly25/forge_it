@@ -38,7 +38,7 @@ from forge import __version__
 from forge.core.config import ForgeConfig, check_cli_version
 from forge.core.errors import ExitCode, ForgeError, PreconditionError
 from forge.core.git import Git, Lease
-from forge.core.github import GitHubClient
+from forge.core.github import Comment, GitHubClient, Issue, PullRequest
 from forge.core.graph import GraphCycleError, TaskGraph, natural_key
 from forge.core.lease import (
     ClaimInfo,
@@ -471,33 +471,60 @@ def resolve_task_ref(ref: str, records: Iterable[TaskRecord]) -> int | None:
 # --------------------------------------------------------------------------- reading state
 
 
-class _Leases:
-    """Lease comments, read lazily and cached for one run."""
+class Leases:
+    """Issue comments and their lease data, read lazily and cached for one run.
+
+    Each issue's comments are listed at most once: :meth:`get` (the lease) and
+    :meth:`comments` (e.g. for handoff notes) share the read.
+    """
 
     def __init__(self, github: GitHubClient) -> None:
         self._github = github
+        self._comments: dict[int, tuple[Comment, ...]] = {}
         self._cache: dict[int, LeaseData | None] = {}
 
+    def comments(self, issue_number: int) -> tuple[Comment, ...]:
+        """The comments of ``issue_number`` (listed once, then cached)."""
+        if issue_number not in self._comments:
+            self._comments[issue_number] = tuple(self._github.list_comments(issue_number))
+        return self._comments[issue_number]
+
     def get(self, issue_number: int) -> LeaseData | None:
+        """The data of the authoritative lease comment of ``issue_number`` (or ``None``)."""
         if issue_number not in self._cache:
-            found = find_lease(self._github.list_comments(issue_number))
+            found = find_lease(self.comments(issue_number))
             self._cache[issue_number] = None if found is None else found.data
         return self._cache[issue_number]
 
 
 @dataclass(frozen=True)
-class _GitHubState:
+class GitHubState:
+    """What the snapshot reads from GitHub, before any fetch (ADR 0008 read order).
+
+    ``records`` are the parsed ``forge:task`` issues (open and closed), ``issues`` every
+    ``forge:task`` issue as listed (including those without a valid block), ``pulls`` the
+    open pull requests and ``open_heads`` their head branches. ``deps_closed`` and ``waves``
+    are keyed by task id (the lowest issue number wins on a duplicate id).
+    """
+
     records: tuple[TaskRecord, ...]
     open_heads: frozenset[str]
     open_milestones: frozenset[str]
     deps_closed: Mapping[str, bool]
     waves: Mapping[str, int]
+    issues: tuple[Issue, ...] = ()
+    pulls: tuple[PullRequest, ...] = ()
 
 
-def _read_github(github: GitHubClient, warnings: list[str]) -> _GitHubState:
+def read_github_state(github: GitHubClient, warnings: list[str]) -> GitHubState:
+    """List open milestones, every ``forge:task`` issue and the open pull requests.
+
+    Invalid or missing blocks, duplicate task ids and dependency cycles become warnings.
+    """
     milestones = frozenset(m.title for m in github.list_milestones(state="open"))
     issues = github.list_issues(state="all", labels=[FORGE_TASK_LABEL])
-    heads = frozenset(pr.head for pr in github.list_pulls(state="open"))
+    pulls = github.list_pulls(state="open")
+    heads = frozenset(pr.head for pr in pulls)
     records = tuple(parse_records(issues, warnings))
     first: dict[str, TaskRecord] = {}
     for rec in records:
@@ -516,51 +543,72 @@ def _read_github(github: GitHubClient, warnings: list[str]) -> _GitHubState:
     except GraphCycleError as exc:
         warnings.append(f"{exc.message}; every task counts as wave 0 for ordering")
         waves = {}
-    return _GitHubState(records, heads, milestones, deps_closed, waves)
+    return GitHubState(records, heads, milestones, deps_closed, waves, tuple(issues), tuple(pulls))
 
 
 @dataclass(frozen=True)
-class _Snapshot:
+class TaskSnapshot:
+    """A view of every open task, plus the ``<remote>/<default>`` sha it was compared with."""
+
     views: Mapping[int, TaskView]
     default_sha: str
 
 
-def _fetch_branches(ctx: ClaimContext, warnings: list[str] | None = None) -> dict[int, TaskBranch]:
-    default = ctx.config.project.default_branch
-    fetch_task_refs(ctx.git, default, ctx.remote)
-    scan = gather_task_branches(ctx.git, default, ctx.remote)
+def _fetch_task_branches(
+    git: Git, default: str, remote: str, warnings: list[str] | None = None
+) -> dict[int, TaskBranch]:
+    fetch_task_refs(git, default, remote)
+    scan = gather_task_branches(git, default, remote)
     if warnings is not None:
         warnings.extend(scan.warnings)
     return dict(scan.branches)
 
 
-def _assess(
-    ctx: ClaimContext, claim: ClaimInfo, leases: _Leases, now: datetime, *, exact: bool
+def _fetch_branches(ctx: ClaimContext, warnings: list[str] | None = None) -> dict[int, TaskBranch]:
+    return _fetch_task_branches(ctx.git, ctx.config.project.default_branch, ctx.remote, warnings)
+
+
+def _assess_claim(
+    claim: ClaimInfo, leases: Leases, now: datetime, lease_hours: int, *, exact: bool
 ) -> tuple[datetime, bool]:
     """Return (last activity, stale). The lease is read only when it can matter."""
-    hours = ctx.config.lease_hours
-    if not exact and not is_stale(claim.tip_date, hours, now):
+    if not exact and not is_stale(claim.tip_date, lease_hours, now):
         return claim.tip_date, False
     activity = last_activity(claim.tip_date, leases.get(claim.issue), claim.sha)
-    return activity, is_stale(activity, hours, now)
+    return activity, is_stale(activity, lease_hours, now)
 
 
-def _snapshot(
-    ctx: ClaimContext,
-    gh: _GitHubState,
-    leases: _Leases,
+def _assess(
+    ctx: ClaimContext, claim: ClaimInfo, leases: Leases, now: datetime, *, exact: bool
+) -> tuple[datetime, bool]:
+    return _assess_claim(claim, leases, now, ctx.config.lease_hours, exact=exact)
+
+
+def snapshot_tasks(
+    git: Git,
+    config: ForgeConfig,
+    gh: GitHubState,
+    leases: Leases,
     warnings: list[str],
     *,
-    exact: Iterable[int] = (),
-) -> _Snapshot:
-    """Fetch the task branches and build a view of every open task (pre-push snapshot)."""
-    branches = _fetch_branches(ctx, warnings)
-    default = ctx.config.project.default_branch
-    default_sha = ctx.git.rev_parse(f"refs/remotes/{ctx.remote}/{default}")
+    now: Callable[[], datetime],
+    remote: str = "origin",
+    exact: bool | Iterable[int] = (),
+) -> TaskSnapshot:
+    """Fetch the task branches and build a view of every open task (pre-push snapshot).
+
+    Read-only on the remote. ``now`` is called once, after the fetch. ``exact`` names the
+    issues whose claims always read the lease comment (``True``: every claim); other claims
+    read it only when the branch tip alone would make them stale (ADR 0009/0010).
+    """
+    default = config.project.default_branch
+    branches = _fetch_task_branches(git, default, remote, warnings)
+    default_sha = git.rev_parse(f"refs/remotes/{remote}/{default}")
     if default_sha is None:  # gather_task_branches already checked it; keep mypy honest
-        raise PreconditionError(f"{ctx.remote}/{default} not found")
-    now = ctx.now()
-    exact_set = set(exact)
+        raise PreconditionError(f"{remote}/{default} not found")
+    current = now()
+    exact_all = exact is True
+    exact_set: set[int] = set() if isinstance(exact, bool) else set(exact)
     views: dict[int, TaskView] = {}
     for rec in gh.records:
         if rec.issue.state != "open":
@@ -580,7 +628,13 @@ def _snapshot(
         activity: datetime | None = None
         stale = False
         if claim is not None:
-            activity, stale = _assess(ctx, claim, leases, now, exact=number in exact_set)
+            activity, stale = _assess_claim(
+                claim,
+                leases,
+                current,
+                config.lease_hours,
+                exact=exact_all or number in exact_set,
+            )
         milestone = rec.issue.milestone
         views[number] = TaskView(
             record=rec,
@@ -593,7 +647,50 @@ def _snapshot(
             activity=activity,
             stale=stale,
         )
-    return _Snapshot(views, default_sha)
+    return TaskSnapshot(views, default_sha)
+
+
+def _snapshot(
+    ctx: ClaimContext,
+    gh: GitHubState,
+    leases: Leases,
+    warnings: list[str],
+    *,
+    exact: Iterable[int] = (),
+) -> TaskSnapshot:
+    return snapshot_tasks(
+        ctx.git, ctx.config, gh, leases, warnings, now=ctx.now, remote=ctx.remote, exact=exact
+    )
+
+
+@dataclass(frozen=True)
+class TaskState:
+    """Result of :func:`read_task_state`: the GitHub read, the task views and the leases."""
+
+    github: GitHubState
+    snapshot: TaskSnapshot
+    leases: Leases
+
+
+def read_task_state(
+    git: Git,
+    github: GitHubClient,
+    config: ForgeConfig,
+    *,
+    now: Callable[[], datetime],
+    warnings: list[str],
+    remote: str = "origin",
+    exact: bool | Iterable[int] = True,
+) -> TaskState:
+    """Read GitHub, then fetch and snapshot every open task, as ``forge next`` does (read-only).
+
+    By default every claim's last activity is exact (its lease comment is read), which is
+    what ``forge status`` needs (ADR 0010). Never pushes or writes to GitHub.
+    """
+    leases = Leases(github)
+    gh = read_github_state(github, warnings)
+    snap = snapshot_tasks(git, config, gh, leases, warnings, now=now, remote=remote, exact=exact)
+    return TaskState(gh, snap, leases)
 
 
 # --------------------------------------------------------------------------- outcome
@@ -854,7 +951,7 @@ def _live_conflicts(
     record: TaskRecord,
     branches: Mapping[int, TaskBranch],
     index: _Index,
-    leases: _Leases,
+    leases: Leases,
 ) -> list[ClaimInfo]:
     """Live claims of other open tasks whose zones overlap ``record``'s."""
     now = ctx.now()
@@ -888,7 +985,7 @@ def _verify(
     record: TaskRecord,
     claim_sha: str,
     index: _Index,
-    leases: _Leases,
+    leases: Leases,
 ) -> ClaimInfo | None:
     """Post-claim zone verification (ADR 0009, safe variant).
 
@@ -1178,8 +1275,8 @@ def claim_next(ctx: ClaimContext, options: NextOptions | None = None) -> NextOut
     check_full_history(ctx.git, "claims")
 
     warnings: list[str] = []
-    leases = _Leases(ctx.github)
-    gh = _read_github(ctx.github, warnings)
+    leases = Leases(ctx.github)
+    gh = read_github_state(ctx.github, warnings)
 
     target: int | None = None
     if opts.task is not None:
@@ -1203,7 +1300,7 @@ def claim_next(ctx: ClaimContext, options: NextOptions | None = None) -> NextOut
         assert claim is not None
         return lease is not None and lease.claim == claim.sha and lease.released_at is None
 
-    def _incomplete(current: _Snapshot) -> set[int]:
+    def _incomplete(current: TaskSnapshot) -> set[int]:
         return {v.issue for v in current.views.values() if _mine(v) and not _complete(v)}
 
     own = sorted((v for v in snap.views.values() if _mine(v)), key=lambda v: v.issue)
@@ -1376,8 +1473,8 @@ def _abandoned(ctx: ClaimContext, view: TaskView) -> bool:
 
 def _select(
     ctx: ClaimContext,
-    snap: _Snapshot,
-    leases: _Leases,
+    snap: TaskSnapshot,
+    leases: Leases,
     login: str,
     opts: NextOptions,
     tried: Mapping[int, Reason],
@@ -1398,7 +1495,7 @@ def _select(
 
 
 def _exact_details(
-    ctx: ClaimContext, snap: _Snapshot, leases: _Leases, exclusions: Iterable[Exclusion]
+    ctx: ClaimContext, snap: TaskSnapshot, leases: Leases, exclusions: Iterable[Exclusion]
 ) -> tuple[Exclusion, ...]:
     """Recompute "becomes stale at" of live claims of others from their lease heartbeat.
 

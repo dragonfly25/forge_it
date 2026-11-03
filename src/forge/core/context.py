@@ -160,6 +160,23 @@ def extract_acceptance_criteria(text: str, ids: Iterable[str]) -> dict[str, str]
     return {ac: found[ac] for ac in order if ac in found}
 
 
+def defined_acceptance_criteria(text: str) -> list[str]:
+    """Return every AC id *defined* in the Markdown ``text``, once each, in order of appearance.
+
+    "Defined" has the meaning of :func:`extract_acceptance_criteria`: the id starts a line
+    (optionally after a heading or list marker and emphasis); mentions inside a sentence,
+    front matter and fenced code do not count.
+    """
+    ids: dict[str, None] = {}
+    for line in _content_lines(text):
+        if line is None:
+            continue
+        match = _AC_DEF_RE.match(line)
+        if match is not None:
+            ids.setdefault(match.group("id"), None)
+    return list(ids)
+
+
 # -- handoff notes ---------------------------------------------------------------------------
 
 

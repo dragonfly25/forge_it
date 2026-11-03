@@ -73,6 +73,32 @@ def load_profile_and_agent(
     return profile, agent
 
 
+def load_optional_profile(
+    opts: GlobalOptions, warnings: list[str]
+) -> tuple[Profile | None, AgentProfile | None]:
+    """Load the profile and the active agent when a profile exists (read-only commands).
+
+    A missing or invalid profile yields ``(None, None)``; an invalid one adds a warning, and
+    so does an ``--agent``/``FORGE_AGENT`` that cannot be used without a profile. An unknown
+    agent id in a valid profile is still an error (exit 5), as in the other commands.
+    """
+    path = profile_path()
+    if not path.is_file():
+        if opts.agent:
+            warnings.append(f"agent {opts.agent!r} ignored: no Forge profile at {path}")
+        return None, None
+    try:
+        profile = load_profile(path)
+    except ForgeError as exc:
+        warnings.append(f"profile not used: {exc.message}")
+        return None, None
+    try:
+        agent = select_agent(profile, opts.agent)
+    except ForgeError as exc:
+        raise PreconditionError(exc.message, hint=exc.hint or PROFILE_HINT) from exc
+    return profile, agent
+
+
 def profile_messages(
     result: Result, profile: Profile, agent: AgentProfile, app: AppContext
 ) -> None:

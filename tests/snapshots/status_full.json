@@ -1,0 +1,416 @@
+{
+  "generated_at": "2026-11-02T09:00:00Z",
+  "scope": {
+    "me_only": false,
+    "milestone": null
+  },
+  "sections": [
+    "me",
+    "team",
+    "queue",
+    "blocked",
+    "milestone",
+    "health"
+  ],
+  "me": {
+    "login": "alice",
+    "login_source": "profile",
+    "agent": "claude",
+    "current": {
+      "issue": 3,
+      "id": "M1-T03",
+      "title": "[M1-T03] task",
+      "milestone": "M1",
+      "status": "in-progress",
+      "zones": [
+        "api"
+      ],
+      "url": "https://github.com/acme/shop/issues/3",
+      "source": "branch",
+      "branch": "task/3",
+      "worktree": "<tmp>/alice",
+      "claim": {
+        "owner": "alice",
+        "agent": "claude",
+        "claim": "<sha:1>",
+        "claimed_at": "2026-11-02T04:00:00Z",
+        "last_activity": "2026-11-02T08:30:00Z",
+        "stale": false,
+        "stale_at": "2026-11-03T08:30:00Z"
+      },
+      "sync": {
+        "ref": "task/3",
+        "behind": 3,
+        "unpushed": 1,
+        "pending": true
+      },
+      "drift": {
+        "total": 2,
+        "commits": [
+          {
+            "sha": "<sha:2>",
+            "date": "2026-11-02T07:00:00Z",
+            "author": "lead",
+            "subject": "feat: v2 users",
+            "zones": [
+              "api"
+            ],
+            "files": [
+              "src/api/v2/users.py"
+            ]
+          },
+          {
+            "sha": "<sha:3>",
+            "date": "2026-11-02T05:00:00Z",
+            "author": "lead",
+            "subject": "feat: api routes",
+            "zones": [
+              "api"
+            ],
+            "files": [
+              "src/api/routes.py"
+            ]
+          }
+        ]
+      },
+      "pull": null,
+      "ci": null
+    },
+    "others": [
+      {
+        "issue": 6,
+        "id": "M1-T06",
+        "title": "[M1-T06] task",
+        "milestone": "M1",
+        "status": "in-review",
+        "zones": [
+          "web"
+        ],
+        "url": "https://github.com/acme/shop/issues/6",
+        "claim": {
+          "owner": "alice",
+          "agent": "claude",
+          "claim": "<sha:4>",
+          "claimed_at": "2026-11-01T13:00:00Z",
+          "last_activity": "2026-11-01T14:00:00Z",
+          "stale": false,
+          "stale_at": "2026-11-02T14:00:00Z"
+        },
+        "pull": {
+          "number": 16,
+          "url": "https://github.com/acme/shop/pull/16",
+          "author": "alice",
+          "draft": false,
+          "head_sha": "<sha:5>"
+        },
+        "ci": {
+          "sha": "<sha:5>",
+          "state": "failure",
+          "total": 3,
+          "failing": [
+            "lint",
+            "test"
+          ],
+          "pending": []
+        }
+      }
+    ]
+  },
+  "team": {
+    "in_progress": [
+      {
+        "issue": 3,
+        "id": "M1-T03",
+        "title": "[M1-T03] task",
+        "milestone": "M1",
+        "status": "in-progress",
+        "zones": [
+          "api"
+        ],
+        "url": "https://github.com/acme/shop/issues/3",
+        "claim": {
+          "owner": "alice",
+          "agent": "claude",
+          "claim": "<sha:1>",
+          "claimed_at": "2026-11-02T04:00:00Z",
+          "last_activity": "2026-11-02T08:30:00Z",
+          "stale": false,
+          "stale_at": "2026-11-03T08:30:00Z"
+        }
+      },
+      {
+        "issue": 4,
+        "id": "M1-T04",
+        "title": "[M1-T04] task",
+        "milestone": "M1",
+        "status": "in-progress",
+        "zones": [
+          "db"
+        ],
+        "url": "https://github.com/acme/shop/issues/4",
+        "claim": {
+          "owner": "bob",
+          "agent": "claude",
+          "claim": "<sha:6>",
+          "claimed_at": "2026-11-01T03:00:00Z",
+          "last_activity": "2026-11-01T03:00:00Z",
+          "stale": true,
+          "stale_at": "2026-11-02T03:00:00Z"
+        }
+      }
+    ],
+    "in_review": [
+      {
+        "issue": 6,
+        "id": "M1-T06",
+        "title": "[M1-T06] task",
+        "milestone": "M1",
+        "status": "in-review",
+        "zones": [
+          "web"
+        ],
+        "url": "https://github.com/acme/shop/issues/6",
+        "pull": {
+          "number": 16,
+          "url": "https://github.com/acme/shop/pull/16",
+          "author": "alice",
+          "draft": false,
+          "head_sha": "<sha:5>"
+        }
+      }
+    ],
+    "handoffs": [
+      {
+        "issue": 7,
+        "id": "M1-T07",
+        "title": "[M1-T07] task",
+        "milestone": "M1",
+        "status": "handoff",
+        "zones": [
+          "docs"
+        ],
+        "url": "https://github.com/acme/shop/issues/7",
+        "by": "carol",
+        "note": {
+          "author": "carol",
+          "created_at": "2026-11-02T02:00:19Z"
+        }
+      }
+    ]
+  },
+  "queue": {
+    "ready": 5,
+    "agent": "claude",
+    "next": [
+      {
+        "issue": 7,
+        "id": "M1-T07",
+        "title": "[M1-T07] task",
+        "status": "handoff",
+        "milestone": "M1",
+        "wave": 0,
+        "size": "S",
+        "tier": "standard",
+        "zones": [
+          "docs"
+        ],
+        "resume": true,
+        "reclaim": false
+      },
+      {
+        "issue": 9,
+        "id": "M1-T09",
+        "title": "[M1-T09] task",
+        "status": "ready",
+        "milestone": "M1",
+        "wave": 0,
+        "size": "S",
+        "tier": "standard",
+        "zones": [
+          "db"
+        ],
+        "resume": false,
+        "reclaim": false
+      },
+      {
+        "issue": 10,
+        "id": "M1-T10",
+        "title": "[M1-T10] task",
+        "status": "ready",
+        "milestone": "M1",
+        "wave": 0,
+        "size": "M",
+        "tier": "standard",
+        "zones": [
+          "docs"
+        ],
+        "resume": false,
+        "reclaim": false
+      }
+    ]
+  },
+  "blocked": {
+    "by_dependencies": [
+      {
+        "issue": 5,
+        "id": "M1-T05",
+        "title": "[M1-T05] task",
+        "milestone": "M1",
+        "status": "blocked",
+        "zones": [
+          "web"
+        ],
+        "url": "https://github.com/acme/shop/issues/5",
+        "waiting_on": [
+          {
+            "id": "M1-T04",
+            "issue": 4,
+            "status": "in-progress"
+          },
+          {
+            "id": "M2-T01",
+            "issue": 12,
+            "status": "ready"
+          }
+        ]
+      }
+    ],
+    "by_conflict": [
+      {
+        "issue": 8,
+        "id": "M1-T08",
+        "title": "[M1-T08] task",
+        "milestone": "M1",
+        "status": "ready",
+        "zones": [
+          "db"
+        ],
+        "url": "https://github.com/acme/shop/issues/8"
+      }
+    ]
+  },
+  "milestone": {
+    "title": "M1",
+    "source": "current_task",
+    "open": true,
+    "done": 1,
+    "total": 10,
+    "statuses": {
+      "ready": 4,
+      "blocked": 1,
+      "in-progress": 2,
+      "handoff": 1,
+      "in-review": 1,
+      "done": 1
+    },
+    "dropped": [
+      {
+        "issue": 2,
+        "id": "M1-T02",
+        "title": "[M1-T02] task",
+        "milestone": "M1",
+        "status": "dropped",
+        "zones": [
+          "docs"
+        ],
+        "url": "https://github.com/acme/shop/issues/2"
+      }
+    ],
+    "proposed": [
+      "M1-T12"
+    ],
+    "waves": [
+      {
+        "wave": 0,
+        "done": 1,
+        "total": 8,
+        "tasks": [
+          "M1-T01",
+          "M1-T04",
+          "M1-T06",
+          "M1-T07",
+          "M1-T08",
+          "M1-T09",
+          "M1-T10",
+          "M1-T11"
+        ]
+      },
+      {
+        "wave": 1,
+        "done": 0,
+        "total": 2,
+        "tasks": [
+          "M1-T03",
+          "M1-T05"
+        ]
+      }
+    ],
+    "acs": {
+      "total": 6,
+      "covered": [
+        "AC-1"
+      ],
+      "uncovered": [
+        "AC-2",
+        "AC-3",
+        "AC-4",
+        "AC-5",
+        "AC-9"
+      ],
+      "specs": [
+        "specs/m1/core.md",
+        "specs/m1/missing.md"
+      ],
+      "missing_specs": [
+        "specs/m1/missing.md"
+      ]
+    }
+  },
+  "health": {
+    "version": {
+      "cli": "0.1.0",
+      "required": "<0.2,>=0.1",
+      "ok": true
+    },
+    "profile": true,
+    "violations": [],
+    "presets": [
+      {
+        "agent": "claude",
+        "tier": "standard",
+        "current": "sonnet",
+        "preset": "sonnet-5"
+      }
+    ],
+    "unknown_labels": [
+      {
+        "label": "status:wip",
+        "issues": [
+          9
+        ]
+      }
+    ],
+    "without_metadata": [
+      {
+        "issue": 15,
+        "title": "Loose idea",
+        "url": "https://github.com/acme/shop/issues/15",
+        "error": "no Forge block"
+      }
+    ],
+    "proposals": [
+      {
+        "issue": 14,
+        "title": "[M1-T12] task",
+        "author": "lead",
+        "url": "https://github.com/acme/shop/issues/14",
+        "task": "M1-T12",
+        "forge_task": true
+      }
+    ]
+  },
+  "warnings": [
+    "issue #15: labelled forge:task but has no Forge block (fix: add the block or remove the label); issue skipped",
+    "spec specs/m1/missing.md not found (referenced by M1-T10); its acceptance criteria are not counted"
+  ]
+}
