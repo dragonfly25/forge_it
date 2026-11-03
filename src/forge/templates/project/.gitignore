@@ -1,0 +1,5 @@
+# Forge: local task state, secrets and machine-level rendered subagents
+.forge/local/
+.env.local
+.claude/agents/forge-*.md
+.codex/agents/forge-*.toml

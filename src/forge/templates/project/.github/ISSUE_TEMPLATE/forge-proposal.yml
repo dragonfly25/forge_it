@@ -1,0 +1,38 @@
+name: Forge proposal
+description: Propose work that the plan does not cover. The milestone lead decides.
+title: "[proposal] "
+labels: ["status:proposed"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A proposal is not a task yet. The lead reads it and accepts it by adding it to a plan, or closes it with a comment.
+        Agents can file proposals with `forge propose`.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is the problem or the opportunity?
+      description: Say what is missing, wrong or slow, and for whom.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What do you propose?
+      description: Describe the change. Name the part of the codebase it touches, if you know.
+    validations:
+      required: true
+  - type: textarea
+    id: criteria
+    attributes:
+      label: How will we know it is done?
+      description: One testable statement per line.
+    validations:
+      required: false
+  - type: input
+    id: related
+    attributes:
+      label: Related task or issue
+      description: For example M1-T07 or #42.
+    validations:
+      required: false

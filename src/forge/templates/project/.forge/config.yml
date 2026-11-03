@@ -1,0 +1,60 @@
+# Forge project settings. The lead owns this file; commit changes through a PR.
+# Every key is validated on load; unknown keys are rejected.
+
+# PEP 440 specifier the installed `forge` CLI must satisfy.
+forge_version: "{{forge_version}}"
+
+# Adapters that `forge adapters generate` renders into tool-native files.
+# `generic` (AGENTS.md) is always included. Known names: generic, claude, codex.
+adapters: [generic, claude, codex]
+
+project:
+  name: "{{project_name}}"
+  default_branch: "{{default_branch}}"
+  merge_method: squash             # squash | merge | rebase. Squash is recommended: claim commits disappear.
+
+github:
+  repo: "{{repo}}"                 # owner/name. Replace <ORG>/<REPO> if init could not detect it.
+  project_number: null             # optional GitHub Projects v2 board number
+
+lease_hours: 24                    # a claim with no activity for this long is stale and reclaimable
+
+claim:
+  max_attempts: 5                  # lost claim races before `forge next` gives up (exit 3)
+
+worktrees:
+  enabled: true                    # `forge next` creates <repo>-worktrees/task-<n>
+
+setup:
+  commands:                        # run by `forge setup` after the machine checks
+    - cp -n .env.example .env.local || true
+    # - docker compose pull
+    # - npm install
+
+# Commands run by `forge sync --continue` and `forge ship`, in this order.
+# Each one must exit 0. Add your project's own checks, for example:
+#   lint: "npm run lint"
+#   typecheck: "npm run typecheck"
+#   test: "npm test"
+# Copy the same commands into the "Project checks" step of .github/workflows/forge-ci.yml.
+checks: {}
+
+# Deterministic conflict resolvers (strategy: regenerate | union).
+# `regenerate` takes the upstream file, runs `command`, and stages the result.
+# `union` keeps the lines of both sides.
+resolvers:
+  - glob: "CHANGELOG.md"
+    strategy: union
+  # - glob: "package-lock.json"
+  #   strategy: regenerate
+  #   command: "npm install --package-lock-only"
+
+review:
+  cross_provider: true             # prefer a reviewer whose agent uses a different provider
+  required_approvals: 1
+
+# Project constraints on model choices. Forge warns when a profile breaks them.
+models:
+  recommended: {strong: opus, standard: sonnet}   # shown as suggestions during `forge setup`
+  min_tier_for: {reviewer: strong, plan: strong}  # commands and subagents that must not run below a tier
+  allowed_providers: [anthropic, openai, local]   # warn when a profile uses other providers

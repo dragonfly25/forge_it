@@ -1,0 +1,53 @@
+name: forge-ci
+
+# Checks on every pull request: the generated adapter files are current,
+# and the project's own checks pass.
+on:
+  pull_request:
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: read
+
+jobs:
+  forge-ci:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Check out (full history; Forge refuses shallow clones)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10
+
+      - name: Install Forge (pinned)
+        run: |
+          set -euo pipefail
+          uv tool install "git+https://github.com/dragonfly25/forge_it@{{forge_install_ref}}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Adapter files are up to date
+        run: forge adapters generate --check
+
+      # ---------------------------------------------------------------------
+      # PROJECT CHECKS: the lead edits this step.
+      # Copy the commands from `checks:` in .forge/config.yml here, and add
+      # any setup they need (language runtime, dependencies, services).
+      # Example:
+      #   - uses: actions/setup-node@v7
+      #     with:
+      #       node-version: 22
+      #   - run: npm ci
+      #   - run: npm run lint
+      #   - run: npm run typecheck
+      #   - run: npm test
+      # ---------------------------------------------------------------------
+      - name: Project checks
+        run: |
+          set -euo pipefail
+          echo "No project checks are configured yet."
+          echo "Edit the 'Project checks' step in .github/workflows/forge-ci.yml."
