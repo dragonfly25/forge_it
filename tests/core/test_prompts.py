@@ -55,10 +55,6 @@ Explore.
 """
 
 
-PLANNED_COMMANDS = {"release", "docs"}
-"""Spec §16 commands scheduled for Phase 9 (build plan). Remove each once it is registered."""
-
-
 def cli_commands() -> set[str]:
     """Top-level commands registered on the real CLI."""
     from forge.cli import app
@@ -67,9 +63,9 @@ def cli_commands() -> set[str]:
     return set(group.commands)  # type: ignore[attr-defined]
 
 
-def test_planned_commands_are_not_registered_yet() -> None:
-    # Fails as a reminder once Phase 9 registers them: drop them from PLANNED_COMMANDS.
-    assert not PLANNED_COMMANDS & cli_commands()
+def test_phase9_commands_are_registered() -> None:
+    # `release` and `docs` (Phase 9) are registered, so prompts may name them like any other.
+    assert {"release", "docs"} <= cli_commands()
 
 
 # -- parsing ----------------------------------------------------------------------------------
@@ -202,7 +198,7 @@ def test_shipped_prompts_are_complete() -> None:
     for path, text in texts.items():
         data, _ = split_frontmatter(text, path)
         assert sorted(data) == sorted(PROMPT_KEYS), path
-        problems += check_prompt(parse_prompt(text, path), commands | PLANNED_COMMANDS)
+        problems += check_prompt(parse_prompt(text, path), commands)
     assert problems == []
 
 
@@ -317,9 +313,6 @@ def test_shipped_invocations_parse_with_the_real_cli() -> None:
     assert len(calls) > 40
     problems: list[str] = []
     for source, argv in calls:
-        names = [t for t in argv if not t.startswith("-")]
-        if names and names[0] in PLANNED_COMMANDS:
-            continue
         try:
             parse_only(argv)
         except _Usage as exc:

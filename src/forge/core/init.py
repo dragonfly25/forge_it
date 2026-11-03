@@ -31,9 +31,10 @@ from forge.core.adapters import (
     write_text,
 )
 from forge.core.config import CONFIG_PATH, normalize_adapters
+from forge.core.docs import DEFAULT_OUTPUT, CliDoc, registered_cli, render_reference
 from forge.core.errors import PreconditionError
 from forge.core.git import Git
-from forge.core.prompts import AGENTS_DIR, PROMPTS_DIR, RULES_PATH, read_text
+from forge.core.prompts import AGENTS_DIR, PROMPTS_DIR, RULES_PATH, parse_prompts, read_text
 
 PLACEHOLDERS = (
     "project_name",
@@ -212,6 +213,15 @@ def adapter_files(
     )
 
 
+def commands_reference(rendered: Mapping[Path, str], cli: CliDoc | None = None) -> str:
+    """The `docs/forge/commands.md` text for the rendered templates (same as `forge docs`).
+
+    ``cli`` defaults to the registered CLI description (:func:`registered_cli`).
+    """
+    prompts = parse_prompts({p: t for p, t in rendered.items() if p.parent == PROMPTS_DIR})
+    return render_reference(cli if cli is not None else registered_cli(), prompts)
+
+
 @dataclass
 class InitReport:
     """What ``forge init`` did (repository-relative paths)."""
@@ -238,8 +248,10 @@ class InitReport:
 
 
 NEXT_STEPS = (
-    "Edit .forge/config.yml (github.repo, checks, models), .forge/team.yml and .forge/zones.yml.",
-    "Run `forge adapters generate` after editing .forge/config.yml or .forge/prompts/.",
+    "Review .forge/config.yml (checks, models; github.repo if it was not detected), "
+    ".forge/team.yml and .forge/zones.yml.",
+    "Run `forge adapters generate` (and `forge docs` for .forge/prompts/) after editing "
+    ".forge/config.yml or .forge/prompts/.",
     "Review the files, then commit them (forge init never commits).",
     "Each person then runs `forge setup` on their machine.",
 )
@@ -252,10 +264,13 @@ def init_project(
     adapters: Iterable[str],
     force: bool = False,
     templates: Traversable | None = None,
+    cli: CliDoc | None = None,
 ) -> InitReport:
-    """Write the templates and project-level adapter files into ``repo_root``.
+    """Write the templates, project-level adapter files and command reference.
 
-    ``adapters`` are validated adapter names (``generic`` is added). Raises
+    ``adapters`` are validated adapter names (``generic`` is added). The command reference
+    (`docs/forge/commands.md`, ADR 0015) describes ``cli``, by default the registered CLI
+    (:func:`forge.core.docs.registered_cli`). Raises
     :class:`PreconditionError` listing every conflicting file, before writing anything,
     when a file exists with different content and ``force`` is false.
     """
@@ -275,6 +290,7 @@ def init_project(
         else:
             plain[file.path] = expected_content(repo_root, file)
     region_paths = {f.path for f in generated if f.region}
+    plain[DEFAULT_OUTPUT] = commands_reference(rendered, cli)
 
     conflicts: list[Path] = []
     for rel, text in plain.items():
@@ -324,6 +340,7 @@ __all__ = [
     "InitReport",
     "InitValues",
     "adapter_files",
+    "commands_reference",
     "detect_default_branch",
     "detect_values",
     "github_repo_from_url",

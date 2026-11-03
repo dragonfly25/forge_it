@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
+import forge.commands.docs  # noqa: F401  (registers the CLI description used by init)
 from forge.core import adapters as A
+from forge.core import docs as D
 from forge.core.config import load_config
 from forge.core.errors import ExitCode, PreconditionError
 from forge.core.git import Git
@@ -84,6 +86,7 @@ COMMANDS = (
 )
 ADAPTER_PATHS = sorted(
     [
+        "docs/forge/commands.md",  # the generated command reference (ADR 0015)
         "AGENTS.md",
         "CLAUDE.md",
         *(f".claude/skills/forge-{n}/SKILL.md" for n in COMMANDS),
@@ -240,6 +243,11 @@ def test_init_empty_repo_snapshot(repo: Path) -> None:
     # What init wrote is exactly what `forge adapters generate --check` expects.
     assert A.check(repo, A.load_project(repo, config)) == []
 
+    # ... and what `forge docs --check` expects.
+    reference = D.render_reference(D.registered_cli(), D.load_prompts_dir(repo, D.DEFAULT_PROMPTS))
+    assert D.check_reference(repo / D.DEFAULT_OUTPUT, reference) == []
+    assert "### `forge next`" in reference and "| `release` |" in reference
+
     # The other project files load with the real loaders.
     assert_project_files_load(repo, login="alice")
 
@@ -270,7 +278,7 @@ def test_init_with_placeholders_loads_once_substituted(repo: Path) -> None:
 
 def test_init_with_generic_only(repo: Path) -> None:
     init_project(repo, VALUES, adapters=[])
-    assert tree(repo) == sorted([*TEMPLATE_PATHS, "AGENTS.md"])
+    assert tree(repo) == sorted([*TEMPLATE_PATHS, "AGENTS.md", "docs/forge/commands.md"])
     assert load_config(repo).adapters == ("generic",)
 
 
@@ -326,3 +334,19 @@ def test_init_refuses_directory_in_place_of_file(repo: Path) -> None:
     (repo / ".env.example").mkdir()
     with pytest.raises(PreconditionError):
         init_project(repo, VALUES, adapters=[], force=True)
+
+
+def test_init_uses_the_given_cli_description(repo: Path) -> None:
+    cli = D.CliDoc(root=D.CommandDoc(path=("forge",), usage="forge [OPTIONS]"))
+    init_project(repo, VALUES, adapters=[], cli=cli)
+    text = (repo / "docs/forge/commands.md").read_text()
+    assert text.startswith("# `forge` command reference")
+    assert "## Commands" in text and "### `" not in text
+    assert "| `next` |" in text
+
+
+def test_init_refuses_a_changed_command_reference(repo: Path) -> None:
+    init_project(repo, VALUES, adapters=[])
+    (repo / "docs/forge/commands.md").write_text("edited\n")
+    with pytest.raises(PreconditionError, match=r"docs/forge/commands\.md"):
+        init_project(repo, VALUES, adapters=[])

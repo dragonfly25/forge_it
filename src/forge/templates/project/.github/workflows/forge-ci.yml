@@ -1,6 +1,6 @@
 name: forge-ci
 
-# Checks on every pull request: the generated adapter files are current,
+# Checks on every pull request: the generated adapter files and command reference are current,
 # and the project's own checks pass.
 on:
   pull_request:
@@ -32,6 +32,9 @@ jobs:
 
       - name: Adapter files are up to date
         run: forge adapters generate --check
+
+      - name: Command reference is up to date
+        run: forge docs --check
 
       # ---------------------------------------------------------------------
       # PROJECT CHECKS: the lead edits this step.
