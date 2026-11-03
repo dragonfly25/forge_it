@@ -56,9 +56,11 @@ Progress notes: ADR 0010 (sources, scope, section rules, CI combination, exit co
 
 **Done when:** snapshot tests of status JSON for a seeded scenario (in-progress, stale, blocked, in-review, handoff, ready queue).
 
-## [ ] Phase 5 — Sync and conflicts
-- `core/sync.py`: preflight (wip commit, fetch, backup ref), analysis and classification (§10.2), rebase, mechanical resolvers (`regenerate`, `union`), `sync.json` report, `--continue` (checks + push with lease + sync log), `--abort` (restore backup), escalation path (exit 4, label, comments).
-- `forge escalate` command.
+## [x] Phase 5 — Sync and conflicts
+- [x] `core/sync.py`: preflight (wip commit, fetch, backup ref), analysis and classification (§10.2), rebase, mechanical resolvers (`regenerate`, `union`), `sync.json` report, `--continue` (checks + push with lease + sync log), `--abort` (restore backup), escalation path (exit 4, label, comments).
+- [x] `forge escalate` command.
+
+Progress notes: ADR 0011 (sync state machine, classification, resolvers, escalation, exit codes). It also amends ADR 0009: the lease comment now records the claim's `Forge-Run` id, so a rebased claim keeps its lease. The ADR 0004 amendment makes usage errors exit 1. New modules: `core/escalation.py`, plus git primitives for conflict stages, unions and rerere, and `GitHubClient.commit_pulls`.
 
 **Done when:** scenario tests on temp repos: no-conflict rebase; lockfile conflict auto-resolved by `regenerate`; changelog via `union`; code conflict → exit 2 with correct report, then `--continue` after manual resolution pushes; out-of-zone conflict → exit 4 with rebase aborted; `--abort` restores the exact previous tip; failing check → exit 2.
 

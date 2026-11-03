@@ -38,3 +38,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - Blocked: by dependencies and by `blocked:conflict`.
   - Milestone: done/total, waves, AC coverage.
   - Health: version pin, profile constraints, preset drift, unknown labels, issues without metadata, proposals.
+- `forge sync [--continue|--abort] [--force-resolve]` (Phase 5, ADR 0011):
+  - Before rebasing: a wip commit if the tree is dirty, a local backup ref, and an analysis that classifies the sync as none, textual, semantic or out-of-zone.
+  - It rebases onto the default branch with rerere on. Conflicts in lockfiles go to the `regenerate` resolver and changelog-like files to `union`.
+  - Remaining conflicts are left to the agent (exit 2, with `.forge/local/sync.json`). Out-of-zone conflicts, and conflicts in contract zones the task doesn't own, are escalated instead (exit 4).
+  - Then it runs the configured checks, pushes with a lease, refreshes the lease and writes `sync-log.json`.
+  - `--abort` restores the exact previous state.
+- `forge escalate --reason R`: labels the task `blocked:conflict`, comments with the reason and mentions the upstream authors and the leads.
+- Usage errors now exit 1 instead of 2, which spec §16 reserves for "agent action needed".
