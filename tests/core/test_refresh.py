@@ -24,6 +24,7 @@ from forge.core.refresh import (
     ensure_labels,
     fetch_task_refs,
     gather_task_branches,
+    parse_records,
     plan_refresh,
     run_refresh,
 )
@@ -243,6 +244,21 @@ def test_duplicate_id_warns_and_lowest_issue_wins() -> None:
     plan = plan_refresh([open_dup, dependent, closed_first], {}, set())
     assert any("duplicate task id M1-T01" in w and "#3" in w for w in plan.warnings)
     assert by_issue(plan) == {4: (Status.BLOCKED, Status.READY)}
+
+
+def test_duplicate_closed_as_not_planned_is_ignored_silently() -> None:
+    live = issue(3, meta("M1-T03"), labels=with_status(Status.READY))
+    dup = issue(5, meta("M1-T03"), labels=(), state="closed", reason="not_planned")
+    warnings: list[str] = []
+    records = parse_records([dup, live], warnings)
+    assert [r.issue.number for r in records] == [3] and warnings == []
+    plan = plan_refresh([live, dup], {}, set())
+    assert not any("duplicate task id" in w for w in plan.warnings)
+
+
+def test_task_closed_as_not_planned_without_another_copy_is_kept() -> None:
+    dropped = issue(2, meta("M1-T02"), labels=(), state="closed", reason="not_planned")
+    assert [r.issue.number for r in parse_records([dropped], [])] == [2]
 
 
 def test_unknown_dependency_warns_and_blocks() -> None:

@@ -238,7 +238,10 @@ def parse_records(issues: Sequence[Issue], warnings: list[str]) -> list[TaskReco
     """Parse the Forge block of each issue (sorted by number) into :class:`TaskRecord`.
 
     Issues whose block is invalid or missing are skipped, with a warning appended to
-    ``warnings``.
+    ``warnings``. A record closed as ``not_planned`` whose task id is also carried by another
+    issue that is not closed as ``not_planned`` is a superseded duplicate (for example one
+    `forge plan apply` closed): it is dropped silently, so it neither counts as a dropped task
+    nor triggers duplicate-id warnings.
     """
     records: list[TaskRecord] = []
     for issue in sorted(issues, key=lambda i: i.number):
@@ -255,7 +258,12 @@ def parse_records(issues: Sequence[Issue], warnings: list[str]) -> list[TaskReco
             )
             continue
         records.append(TaskRecord(issue, meta))
-    return records
+    live = {r.meta.id for r in records if not _closed_not_planned(r.issue)}
+    return [r for r in records if not (_closed_not_planned(r.issue) and r.meta.id in live)]
+
+
+def _closed_not_planned(issue: Issue) -> bool:
+    return issue.state == "closed" and issue.state_reason == "not_planned"
 
 
 def _not_planned_warnings(rec: TaskRecord, not_planned: Set[str]) -> list[str]:
