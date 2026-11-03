@@ -118,6 +118,11 @@ class PullRequest:
 
     ``mergeable`` is ``None`` when GitHub has not computed it yet; list endpoints never include
     it, so read it with ``get_pull``.
+
+    ``merge_commit_sha`` is GitHub's field of the same name. Once the pull request is merged it
+    is the commit the base branch got: the merge commit, the squashed commit, or (rebase) the
+    commit the base branch was updated to. Before the merge it is a test merge commit, so only
+    use it when ``merged``. Read it with ``get_pull``; list items may omit it (``None``).
     """
 
     number: int
@@ -136,6 +141,7 @@ class PullRequest:
     assignees: tuple[str, ...]
     requested_reviewers: tuple[str, ...]
     url: str
+    merge_commit_sha: str | None = None
 
 
 @dataclass(frozen=True)
@@ -147,6 +153,21 @@ class Review:
     author: str
     state: str
     body: str
+
+
+@dataclass(frozen=True)
+class Release:
+    """A GitHub release. ``tag`` is the tag name; ``target`` is GitHub's ``target_commitish``
+    (a branch name or a sha; GitHub ignores it when the tag already exists)."""
+
+    id: int
+    tag: str
+    name: str
+    body: str
+    draft: bool
+    prerelease: bool
+    target: str
+    url: str
 
 
 @dataclass(frozen=True)
@@ -427,6 +448,26 @@ class GitHubClient(Protocol):
         """Combined CI state of a commit (check runs and commit statuses)."""
         ...
 
+    # releases
+    def get_release_by_tag(self, tag: str) -> Release | None:
+        """The published release for tag ``tag``, or ``None`` when there is none.
+
+        Draft releases are not returned (GitHub's get-by-tag endpoint only serves published
+        releases).
+        """
+        ...
+
+    def create_release(
+        self, tag: str, name: str, body: str, *, target: str | None = None
+    ) -> Release:
+        """Publish a release (not a draft, not a prerelease) for tag ``tag``.
+
+        When the tag does not exist yet GitHub creates it from ``target`` (default branch by
+        default); Forge always pushes the tag first, so ``target`` is then ignored. A tag that
+        already has a release fails with ``GitHubError`` (HTTP 422).
+        """
+        ...
+
 
 # --------------------------------------------------------------------------- gh CLI client
 
@@ -543,6 +584,7 @@ def _pull_from_json(data: dict[str, Any]) -> PullRequest:
         assignees=tuple(_login(u) for u in data.get("assignees") or ()),
         requested_reviewers=tuple(_login(u) for u in data.get("requested_reviewers") or ()),
         url=str(data.get("html_url") or ""),
+        merge_commit_sha=str(data["merge_commit_sha"]) if data.get("merge_commit_sha") else None,
     )
 
 
@@ -588,6 +630,19 @@ def _page_items(pages: Sequence[Any], field: str) -> list[dict[str, Any]]:
         if isinstance(page, dict):
             items.extend(r for r in page.get(field) or () if isinstance(r, dict))
     return items
+
+
+def _release_from_json(data: dict[str, Any]) -> Release:
+    return Release(
+        id=int(data["id"]),
+        tag=str(data.get("tag_name") or ""),
+        name=str(data.get("name") or ""),
+        body=str(data.get("body") or ""),
+        draft=bool(data.get("draft")),
+        prerelease=bool(data.get("prerelease")),
+        target=str(data.get("target_commitish") or ""),
+        url=str(data.get("html_url") or ""),
+    )
 
 
 def _review_from_json(data: dict[str, Any], pr_number: int) -> Review:
@@ -1039,6 +1094,40 @@ class GhCliClient:
             ],
             [(str(s.get("context") or ""), str(s.get("state") or "")) for s in statuses],
         )
+
+    # ------------------------------------------------------------------ releases
+
+    def get_release_by_tag(self, tag: str) -> Release | None:
+        """``GET /repos/{owner}/{repo}/releases/tags/{tag}``; a 404 means no published release."""
+        try:
+            data = self._call("GET", self._path(f"releases/tags/{quote(tag, safe='')}"))
+        except GitHubError as exc:
+            if exc.status == 404:
+                return None
+            raise
+        return _release_from_json(data)
+
+    def create_release(
+        self, tag: str, name: str, body: str, *, target: str | None = None
+    ) -> Release:
+        """``POST /repos/{owner}/{repo}/releases`` (published, not a prerelease,
+        ``make_latest: legacy``).
+
+        ``target`` becomes ``target_commitish``; GitHub ignores it when the tag exists.
+        """
+        payload: dict[str, Any] = {
+            "tag_name": tag,
+            "name": name,
+            "body": body,
+            "draft": False,
+            "prerelease": False,
+            # "legacy": GitHub picks the latest release by creation date and semantic version,
+            # so publishing a backport (e.g. 1.1.5 after 1.2.0) does not make it "latest".
+            "make_latest": "legacy",
+        }
+        if target is not None:
+            payload["target_commitish"] = target
+        return _release_from_json(self._call("POST", self._path("releases"), payload))
 
 
 if TYPE_CHECKING:

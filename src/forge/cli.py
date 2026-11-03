@@ -10,6 +10,7 @@ from typer.core import TyperGroup
 
 from forge import __version__
 from forge.commands import adapters as adapters_cmd
+from forge.commands import docs as docs_cmd
 from forge.commands import escalate as escalate_cmd
 from forge.commands import handoff as handoff_cmd
 from forge.commands import heartbeat as heartbeat_cmd
@@ -21,6 +22,7 @@ from forge.commands import profile as profile_cmd
 from forge.commands import propose as propose_cmd
 from forge.commands import reclaim as reclaim_cmd
 from forge.commands import refresh as refresh_cmd
+from forge.commands import release as release_mod
 from forge.commands import release_claim as release_cmd
 from forge.commands import review as review_cmd
 from forge.commands import setup as setup_cmd
@@ -288,3 +290,9 @@ profile_cmd.profile_app.command("edit", help="Edit the profile in $VISUAL or $ED
     profile_cmd.edit
 )
 app.add_typer(profile_cmd.profile_app, name="profile")
+app.command("release", help="Release a milestone: changelog PR, then tag and close (§11.4).")(
+    release_mod.release_cmd
+)
+app.command("docs", help="Generate the command reference; --check fails on drift.")(
+    docs_cmd.docs_cmd
+)

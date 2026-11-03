@@ -42,4 +42,10 @@ The lead is the person responsible for one milestone. The role rotates between m
 | Edit zones, config and team | no | yes |
 | Release a milestone | no | yes |
 
-The table is a convention. Forge does not check the lead role for planning: `forge plan validate` and `forge plan apply` run for anyone with access, and `forge-plan-apply` runs them in CI. Only `forge release` checks the role. That command arrives in a later Forge release, and its check is soft: it warns when the person is not the lead, and the team decides what to do. Treat the warning as a stop.
+The table is a convention. Forge does not check the lead role for planning: `forge plan validate` and `forge plan apply` run for anyone with access, and `forge-plan-apply` runs them in CI. Only `forge release` checks the role, and its check is soft: it warns when the person is neither the milestone's `lead` in `plans/roadmap.yml` nor a team member with the role `lead`, and it carries on. Treat the warning as a stop.
+
+`forge release <milestone> --version X.Y.Z` runs in two steps, and the lead runs the same command both times:
+1. When every task of the milestone is closed, it opens a release pull request `chore(release): vX.Y.Z` that adds the changelog section. Forge never pushes to the default branch. The team reviews and merges the pull request like any other.
+2. After the merge, the same command tags the merged commit `vX.Y.Z`, creates the GitHub release and closes the GitHub milestone.
+
+It stops with exit code 5 when tasks are still open (it lists them), when `--version` is missing (the hint suggests the next version), or when the version was already released for another milestone.

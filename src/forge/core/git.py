@@ -155,6 +155,34 @@ class CommitFiles:
     files: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class RemoteTag:
+    """A tag ref on a remote, as listed by ``git ls-remote``.
+
+    ``object`` is what ``refs/tags/<name>`` holds: the tag object of an annotated tag, or the
+    tagged object itself for a lightweight tag. ``target`` is the peeled object (the commit
+    an annotated tag points to; equal to ``object`` for a lightweight tag).
+    """
+
+    name: str
+    object: str
+    target: str
+
+
+_ERE_SPECIAL = re.compile(r"([.\[\]()*+?{}|^$\\])")
+
+
+def _ere_literal(text: str) -> str:
+    """Escape ``text`` for a POSIX extended regular expression (as used by ``git log -G``)."""
+    return _ERE_SPECIAL.sub(r"\\\1", text)
+
+
+def _has_line_starting_with(content: bytes, prefix: str) -> bool:
+    """True when a line of ``content`` (LF or CRLF endings) starts with ``prefix``."""
+    wanted = prefix.encode("utf-8")
+    return any(line.rstrip(b"\r").startswith(wanted) for line in content.split(b"\n"))
+
+
 def parse_version(text: str) -> tuple[int, int, int]:
     """Parse ``git --version`` output such as ``git version 2.39.3 (Apple Git-146)``.
 
@@ -562,6 +590,79 @@ class Git:
         """Return the committer date of ``ref`` as a timezone-aware datetime."""
         return datetime.fromisoformat(self._out("log", "-1", "--format=%cI", ref, "--"))
 
+    def read_file(self, rev: str, path: str) -> bytes | None:
+        """Return the content of ``path`` (repository-relative) in commit ``rev``.
+
+        Returns None when the commit has no such file (or it is not a regular file blob).
+        An unknown ``rev`` raises :class:`GitError`. The content is returned as stored, with
+        no text conversion.
+        """
+        if self.rev_parse(rev) is None:
+            raise GitError(("rev-parse", rev), 1, f"unknown revision {rev!r}")
+        args = ("rev-parse", "--verify", "--quiet", f"{rev}:{path}")
+        proc = self.run(*args, check=False)
+        if proc.returncode == 1:
+            return None
+        if proc.returncode != 0:
+            raise GitError(args, proc.returncode, proc.stderr)
+        blob = proc.stdout.strip()
+        if self._out("cat-file", "-t", blob) != "blob":
+            return None
+        return self._run_bytes("cat-file", "blob", blob).stdout
+
+    def first_parent_line_origin(self, rev: str, path: str, prefix: str) -> str | None:
+        """Return the commit since which ``path`` has a line starting with ``prefix`` on ``rev``.
+
+        Only the first-parent chain of ``rev`` is considered, so on a default branch the
+        answer is the commit that landed the line there: the merge commit of a merged pull
+        request, the squash commit, or the rebased commit (the commit on the second-parent
+        side of a merge is never returned). When the line was added, removed and added again,
+        the latest addition counts: the result is the oldest commit ``c`` such that ``c`` and
+        every first-parent descendant of it up to ``rev`` contain the line.
+
+        Returns None when ``path`` at ``rev`` has no such line. Requires full history (callers
+        check :meth:`is_shallow`).
+
+        Candidates come from ``git log --first-parent --diff-merges=first-parent -G`` (commits
+        whose diff against their first parent adds or removes a matching line; merges are
+        diffed against their first parent too), newest first. The presence of the line can
+        only change at a candidate, so the first candidate whose first parent lacks the line
+        is the answer. Each check reads the file content, which keeps the search exact even
+        for lines that were only edited (e.g. a heading's date changed).
+        """
+        content = self.read_file(rev, path)
+        if content is None or not _has_line_starting_with(content, prefix):
+            return None
+        out = self._out(
+            "-c",
+            "log.showRoot=true",
+            "-c",
+            "diff.relative=false",
+            "log",
+            "--no-patch",
+            "--first-parent",
+            "--diff-merges=first-parent",
+            "--no-textconv",
+            "--no-ext-diff",
+            f"-G^{_ere_literal(prefix)}",
+            "--format=%H",
+            rev,
+            "--",
+            path,
+        )
+        for sha in out.split():
+            parent = self.rev_parse(f"{sha}^1")
+            if parent is None:
+                return sha  # root commit
+            before = self.read_file(parent, path)
+            if before is None or not _has_line_starting_with(before, prefix):
+                return sha
+        raise GitError(
+            ("log", "--first-parent", rev, "--", path),
+            0,
+            f"cannot find the commit that introduced {prefix!r} in {path} on {rev}",
+        )
+
     # ------------------------------------------------------------------ commits
 
     def add(self, paths: Sequence[str] | None = None) -> None:
@@ -680,6 +781,156 @@ class Git:
             stamp = f"{int(date.timestamp())} +0000"
             env = {"GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
         return self.run(*args, input=format_message(message, trailers), env=env).stdout.strip()
+
+    def commit_file(
+        self,
+        parent: str,
+        path: str,
+        content: bytes,
+        message: str,
+        trailers: Mapping[str, str] | None = None,
+        *,
+        date: datetime | None = None,
+    ) -> str:
+        """Create a commit on top of ``parent`` whose tree is ``parent``'s with ``path`` set to
+        ``content``; return its sha.
+
+        Nothing is checked out: HEAD, the index, the working tree and every ref stay as they
+        are (a scratch index is used), so the commit can be prepared from any state and then
+        pushed by sha. ``path`` is repository-relative; an existing file keeps its mode, a new
+        one is a regular file (``100644``). ``date`` is as in :meth:`commit_tree`.
+        """
+        mode = "100644"
+        listing = self._out("ls-tree", "-z", parent, "--", path).rstrip("\x00")
+        if listing:
+            meta, _, name = listing.partition("\t")
+            entry_mode, entry_type, _sha = meta.split(" ")
+            if name != path or entry_type != "blob":
+                raise GitError(("ls-tree", parent, path), 0, f"{path} is not a file in {parent}")
+            mode = entry_mode
+        blob = self._hash_blob(content)
+        with tempfile.TemporaryDirectory(prefix="forge-index-") as tmp:
+            env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}
+            no_split = ("-c", "core.splitIndex=false")
+            self.run(*no_split, "read-tree", parent, env=env)
+            self.run(
+                *no_split,
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                f"{mode},{blob},{path}",
+                env=env,
+            )
+            tree = self.run(*no_split, "write-tree", env=env).stdout.strip()
+        return self.commit_tree(tree, [parent], message, trailers, date=date)
+
+    def _hash_blob(self, content: bytes) -> str:
+        """Write ``content`` to the object store as a blob (no filters) and return its sha."""
+        proc = subprocess.run(
+            ["git", "hash-object", "-w", "--stdin"],
+            cwd=self.cwd,
+            env=self.env(),
+            input=content,
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise GitError(
+                ("hash-object", "-w", "--stdin"),
+                proc.returncode,
+                proc.stderr.decode("utf-8", "replace"),
+            )
+        return proc.stdout.decode("ascii").strip()
+
+    # ------------------------------------------------------------------ tags
+
+    def create_annotated_tag(self, name: str, commit: str, message: str) -> str:
+        """Create the local annotated tag ``name`` on ``commit``; return the tag object's sha.
+
+        Refuses (``GitError``) when ``refs/tags/<name>`` already exists: it never moves a tag.
+        The tagger is the repository's configured identity. The user's ``tag.gpgSign``
+        setting applies.
+        """
+        self.run("tag", "--annotate", "--file=-", "--", name, commit, input=message + "\n")
+        return self._resolve_object(f"refs/tags/{name}")
+
+    def tag_target(self, name: str) -> str | None:
+        """Return the commit the local tag ``name`` points to (peeled), or None when absent."""
+        return self.rev_parse(f"refs/tags/{name}")
+
+    def remote_tags(self, pattern: str = "*", remote: str = "origin") -> dict[str, RemoteTag]:
+        """Return the tags on ``remote`` whose name matches ``pattern`` (a glob such as
+        ``v*``), keyed by tag name, queried live with ``git ls-remote``."""
+        refs = self.ls_remote(remote, f"refs/tags/{pattern}")
+        tags: dict[str, RemoteTag] = {}
+        for ref, sha in refs.items():
+            if ref.endswith("^{}") or not ref.startswith("refs/tags/"):
+                continue
+            name = ref[len("refs/tags/") :]
+            tags[name] = RemoteTag(name, sha, refs.get(f"{ref}^{{}}", sha))
+        return tags
+
+    def remote_tag(self, name: str, remote: str = "origin") -> RemoteTag | None:
+        """Return the tag ``name`` on ``remote`` (queried live), or None when it is absent."""
+        ref = f"refs/tags/{name}"
+        refs = self._ls_remote_exact(remote, (ref, f"{ref}^{{}}"))
+        sha = refs.get(ref)
+        if sha is None:
+            return None
+        return RemoteTag(name, sha, refs.get(f"{ref}^{{}}", sha))
+
+    def local_tag_message(self, name: str) -> str | None:
+        """Return the message of the local annotated tag ``name``; None when it is absent or
+        lightweight."""
+        ref = f"refs/tags/{name}"
+        proc = self.run("cat-file", "-t", ref, check=False)
+        if proc.returncode != 0 or proc.stdout.strip() != "tag":
+            return None
+        return self.run("cat-file", "tag", ref).stdout.partition("\n\n")[2]
+
+    def tag_message(self, tag: RemoteTag, remote: str = "origin") -> str | None:
+        """Return the message of the annotated remote tag ``tag``, or None for a lightweight
+        tag (one whose ref points straight at its target).
+
+        The tag object is fetched by ref when it is not in the local object store; no local
+        ref is written (``--no-tags --no-write-fetch-head``). A signed tag's message includes
+        its signature block after the text.
+        """
+        if tag.object == tag.target:
+            return None
+        if not self._has_object(tag.object):
+            self.run(
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-write-fetch-head",
+                remote,
+                f"refs/tags/{tag.name}",
+            )
+        if self._out("cat-file", "-t", tag.object) != "tag":
+            return None
+        raw = self.run("cat-file", "tag", tag.object).stdout
+        return raw.partition("\n\n")[2]
+
+    def _ls_remote_exact(self, remote: str, refs: Sequence[str]) -> dict[str, str]:
+        """``ls-remote`` restricted to exactly ``refs`` (patterns match ref tails)."""
+        found: dict[str, str] = {}
+        for line in self._out("ls-remote", remote, *refs).splitlines():
+            sha, _, ref = line.partition("\t")
+            if ref in refs:
+                found[ref] = sha
+        return found
+
+    def push_tag(self, name: str, remote: str = "origin") -> PushResult:
+        """Push the local tag ``name`` to ``remote`` only if the remote does not have it yet.
+
+        The push carries the lease ``refs/tags/<name>:`` (expected absent), so an existing
+        remote tag is never overwritten: the result is then ``rejected`` (or ``ok`` when the
+        remote already holds exactly this tag object, i.e. a re-run). The user's ``pre-push``
+        hook is not run, because a tag carries no new code (ADR 0015).
+        """
+        ref = f"refs/tags/{name}"
+        return self.push(ref, ref, lease=Lease(ref, None), remote=remote, no_verify=True)
 
     # ------------------------------------------------------------------ push
 

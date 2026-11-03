@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
-# Forge bootstrap installer (spec §17). DRAFT: structure only until Phase 9.
+# Forge bootstrap installer (spec §17, ADR 0015).
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.sh | bash
 #
+# Pin a version when piping into bash:
+#   curl -fsSL https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.sh | FORGE_VERSION=v0.1.0 bash
+#
 # Environment:
-#   FORGE_VERSION   git ref to install (tag or branch).
+#   FORGE_VERSION   git ref to install (tag or branch). Default: the newest
+#                   release tag (v<major>.<minor>.<patch>) of the repository.
+#                   When the repository has no release tag, `main` is installed.
+#                   When the tags cannot be listed (network, access), the script
+#                   stops: set FORGE_VERSION to skip the listing.
 #   FORGE_REPO_URL  repository URL.
 #
 # This script never reads, stores or sends credentials. Authentication with
 # GitHub is done by the user with `gh auth login`.
 set -euo pipefail
 
-# Defaults to `main` while Forge is unreleased. At release this becomes the
-# latest tag (for example v0.1.0).
-FORGE_VERSION="${FORGE_VERSION:-main}"
+# Empty means "choose the newest release tag" (see resolve_version).
+FORGE_VERSION="${FORGE_VERSION:-}"
 FORGE_REPO_URL="${FORGE_REPO_URL:-https://github.com/dragonfly25/forge_it}"
 
 # PATH as the user's shell sees it, before this script extends it.
@@ -116,16 +122,70 @@ ensure_uv() {
   have uv || die "uv is not on PATH after installation. Add ${uv_bin} to PATH and run this script again."
 }
 
-# 5. Install Forge as a uv tool. uv provisions Python 3.12 itself.
+# Print the newest release tag found in the `git ls-remote` output given as
+# $1 (for example v0.1.0), or nothing when there is none.
+#
+# Only stable tags of the form v<number>.<number>.<number> count. The newest is
+# found with awk, comparing the three numbers one by one, because `sort -V` is
+# missing from some macOS versions.
+newest_tag() {
+  printf '%s\n' "$1" | awk '
+    {
+      ref = $2
+      sub(/^refs\/tags\//, "", ref)
+      if (ref !~ /^v[0-9]+\.[0-9]+\.[0-9]+$/) next
+      split(substr(ref, 2), part, ".")
+      major = part[1] + 0
+      minor = part[2] + 0
+      patch = part[3] + 0
+      if (!found || major > best_major ||
+          (major == best_major && (minor > best_minor ||
+          (minor == best_minor && patch > best_patch)))) {
+        found = 1
+        best_major = major
+        best_minor = minor
+        best_patch = patch
+        best = ref
+      }
+    }
+    END { if (found) print best }
+  '
+}
+
+# 5. Choose the version: FORGE_VERSION if set, else the newest release tag,
+# else `main` with a notice.
+resolve_version() {
+  if [ -n "${FORGE_VERSION}" ]; then
+    info "Using FORGE_VERSION=${FORGE_VERSION}."
+    return 0
+  fi
+  local refs tag
+  # A failed listing (network, authentication, wrong URL) is an error. Falling
+  # back to `main` is only for a repository that has no release tag yet.
+  if ! refs="$(GIT_TERMINAL_PROMPT=0 git ls-remote --tags --refs "${FORGE_REPO_URL}")"; then
+    die "Could not list the release tags of ${FORGE_REPO_URL}. Check your network and your access to the repository, or set FORGE_VERSION (for example FORGE_VERSION=v0.1.0, or FORGE_VERSION=main) and run this script again."
+  fi
+  tag="$(newest_tag "${refs}")"
+  if [ -n "${tag}" ]; then
+    FORGE_VERSION="${tag}"
+    info "Newest release tag: ${FORGE_VERSION}."
+    return 0
+  fi
+  FORGE_VERSION="main"
+  warn "${FORGE_REPO_URL} has no release tag (vX.Y.Z) yet."
+  warn "Installing the 'main' branch, which can change at any time. Set FORGE_VERSION to pin a tag."
+}
+
+# 6. Install Forge as a uv tool. uv provisions Python 3.12 itself.
 install_forge() {
   info "Installing Forge (${FORGE_VERSION}) from ${FORGE_REPO_URL}..."
   uv tool install --force --python 3.12 "git+${FORGE_REPO_URL}@${FORGE_VERSION}" ||
     die "Installing Forge with uv failed. Check FORGE_VERSION='${FORGE_VERSION}' and your network."
 }
 
-# 6. Next steps.
+# 7. Next steps.
 print_next_steps() {
-  local tool_bin forge_bin found
+  local tool_bin forge_bin found login_note
   tool_bin="$(uv tool dir --bin)"
   forge_bin="${tool_bin}/forge"
   [ -x "${forge_bin}" ] || die "Forge was installed but ${forge_bin} is missing."
@@ -137,13 +197,14 @@ print_next_steps() {
   elif [ "${found}" != "${forge_bin}" ]; then
     warn "'forge' on your PATH is ${found}, not Forge (${forge_bin}). It may be Foundry's forge: put ${tool_bin} first on PATH."
   fi
-  printf '\nNext steps:\n'
-  if ! gh auth status >/dev/null 2>&1; then
-    printf '  1. gh auth login            # authenticate with the repo scope\n'
-    printf '  2. cd <project> && forge setup\n'
+  if gh auth status >/dev/null 2>&1; then
+    login_note="gh is already authenticated; run it again only to switch account"
   else
-    printf '  1. cd <project> && forge setup\n'
+    login_note="authenticate with the repo scope"
   fi
+  printf '\nNext steps:\n'
+  printf '  1. gh auth login            # %s\n' "${login_note}"
+  printf '  2. cd <project> && forge setup\n'
   printf '\nNote: the "forge" command name collides with Foundry'"'"'s forge. If both are installed, put the one you want first on PATH.\n'
 }
 
@@ -152,6 +213,7 @@ main() {
   check_git
   check_gh
   ensure_uv
+  resolve_version
   install_forge
   print_next_steps
 }

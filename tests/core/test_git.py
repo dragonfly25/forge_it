@@ -1389,3 +1389,244 @@ def test_push_unknown_source_with_hook_is_not_a_hook_rejection(git_world: GitWor
     with pytest.raises(GitError) as excinfo:
         alice.push("refs/heads/nope", "refs/heads/task/9")
     assert not isinstance(excinfo.value, PushHookRejected)
+
+
+# --------------------------------------------------------------------------- files, tags (Phase 9)
+
+HEADING = "## [1.2.0]"
+
+
+def _changelog(*sections: str) -> str:
+    return "# Changelog\n\n" + "".join(f"{s}\n\n- item\n\n" for s in sections)
+
+
+def test_read_file(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    assert alice.read_file("HEAD", "README.md") == b"# test repo\n"
+    assert alice.read_file("HEAD", "missing.md") is None
+    git_world.commit_file(alice, "dir/x.txt", "x\n", "add dir")
+    assert alice.read_file("HEAD", "dir") is None  # a tree, not a file
+    assert alice.read_file("HEAD~1", "dir/x.txt") is None
+    with pytest.raises(GitError):
+        alice.read_file("no-such-rev", "README.md")
+
+
+def test_commit_file_touches_no_ref_index_or_worktree(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    (alice.cwd / "dirty.txt").write_text("local\n")
+    head = alice.rev_parse("HEAD")
+    assert head is not None
+    sha = alice.commit_file(
+        head,
+        "CHANGELOG.md",
+        b"# Changelog\r\n",
+        "chore(release): v1",
+        date=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    assert alice.rev_parse("HEAD") == head
+    assert alice.dirty_files() == ["dirty.txt"]
+    assert not (alice.cwd / "CHANGELOG.md").exists()
+    assert alice.read_file(sha, "CHANGELOG.md") == b"# Changelog\r\n"  # bytes kept as given
+    assert alice.read_file(sha, "README.md") == b"# test repo\n"
+    assert alice.rev_parse(f"{sha}^1") == head
+    assert alice.diff_names(head, sha) == ["CHANGELOG.md"]
+    assert alice.commit_date(sha) == datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def test_commit_file_keeps_the_mode_of_an_existing_file(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    script = alice.cwd / "run.sh"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o755)
+    alice.add(["run.sh"])
+    head = alice.commit("add script")
+    sha = alice.commit_file(head, "run.sh", b"#!/bin/sh\necho hi\n", "edit")
+    assert alice.run("ls-tree", sha, "--", "run.sh").stdout.startswith("100755 blob ")
+    with_dir = git_world.commit_file(alice, "d/f.txt", "f\n", "dir")
+    with pytest.raises(GitError):
+        alice.commit_file(with_dir, "d", b"x", "file over a dir")
+
+
+def test_first_parent_line_origin_merge_commit_not_branch_commit(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    git_world.commit_file(alice, "CHANGELOG.md", "# Changelog\n", "changelog")
+    alice.checkout("release", create_from="HEAD")
+    branch_commit = git_world.commit_file(alice, "CHANGELOG.md", _changelog(HEADING), "rel")
+    alice.checkout("main")
+    git_world.commit_file(alice, "other.txt", "o\n", "other")
+    alice.run("merge", "--no-ff", "--quiet", "-m", "merge release", "release")
+    merge = alice.rev_parse("HEAD")
+    later = git_world.commit_file(alice, "later.txt", "l\n", "later")
+    assert alice.first_parent_line_origin(later, "CHANGELOG.md", HEADING) == merge
+    assert alice.first_parent_line_origin("release", "CHANGELOG.md", HEADING) == branch_commit
+    assert alice.first_parent_line_origin(later, "CHANGELOG.md", "## [9.9.9]") is None
+    assert alice.first_parent_line_origin(later, "nope.md", HEADING) is None
+
+
+def test_first_parent_line_origin_squash_and_edits(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    git_world.commit_file(alice, "CHANGELOG.md", "# Changelog\n", "changelog")
+    squash = git_world.commit_file(
+        alice, "CHANGELOG.md", _changelog(f"{HEADING} - 2026-01-01"), "squash"
+    )
+    # Editing the heading (its date) keeps the origin; only presence matters.
+    git_world.commit_file(alice, "CHANGELOG.md", _changelog(f"{HEADING} - 2026-01-02"), "date")
+    tip = git_world.commit_file(
+        alice, "CHANGELOG.md", _changelog("## [1.3.0]", f"{HEADING} - 2026-01-02"), "next"
+    )
+    assert alice.first_parent_line_origin(tip, "CHANGELOG.md", HEADING) == squash
+    # "## [1.2.0]" is not a prefix of "## [1.2.0.1]" or "### [1.2.0]".
+    other = git_world.commit_file(alice, "OTHER.md", "## [1.2.0.1]\n### [1.2.0]\n", "o")
+    assert alice.first_parent_line_origin(other, "OTHER.md", HEADING) is None
+
+
+def test_first_parent_line_origin_latest_addition_wins(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    git_world.commit_file(alice, "CHANGELOG.md", _changelog(HEADING), "first")
+    git_world.commit_file(alice, "CHANGELOG.md", "# Changelog\n", "removed")
+    again = git_world.commit_file(alice, "CHANGELOG.md", _changelog(HEADING), "re-added")
+    tip = git_world.commit_file(alice, "x.txt", "x\n", "unrelated")
+    assert alice.first_parent_line_origin(tip, "CHANGELOG.md", HEADING) == again
+
+
+def test_first_parent_line_origin_root_commit_and_crlf(tmp_path: Path) -> None:
+    repo = tmp_path / "solo"
+    Git(tmp_path).run("init", "--quiet", "--initial-branch=main", str(repo))
+    git = Git(repo)
+    git.config_set("user.name", "a")
+    git.config_set("user.email", "a@example.test")
+    (repo / "CHANGELOG.md").write_bytes(b"# Changelog\r\n\r\n## [1.2.0] - x\r\n")
+    git.add(["CHANGELOG.md"])
+    root = git.commit("root")
+    (repo / "a.txt").write_text("a\n")
+    git.add(["a.txt"])
+    tip = git.commit("a")
+    assert git.first_parent_line_origin(tip, "CHANGELOG.md", HEADING) == root
+
+
+def test_annotated_tag_and_remote_tags(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    head = alice.rev_parse("HEAD")
+    assert head is not None
+    assert alice.tag_target("v1.0.0") is None
+    tag_object = alice.create_annotated_tag("v1.0.0", head, "v1.0.0 (M1)")
+    assert tag_object != head
+    assert alice.run("cat-file", "-t", tag_object).stdout.strip() == "tag"
+    assert alice.tag_target("v1.0.0") == head
+    with pytest.raises(GitError):  # never moves an existing tag
+        alice.create_annotated_tag("v1.0.0", head, "again")
+
+    assert alice.remote_tag("v1.0.0") is None
+    assert alice.push_tag("v1.0.0").ok
+    remote = alice.remote_tag("v1.0.0")
+    assert remote is not None and remote.object == tag_object and remote.target == head
+    alice.run("tag", "light", head)
+    assert alice.push("refs/tags/light", "refs/tags/light").ok
+    tags = alice.remote_tags("*")
+    assert set(tags) == {"v1.0.0", "light"}
+    assert tags["light"].object == tags["light"].target == head
+    assert set(alice.remote_tags("v*")) == {"v1.0.0"}
+    # Exact lookup: v1.0.0 must not match v1.0.0.1 or prefix-v1.0.0.
+    assert alice.remote_tag("v1.0") is None
+
+
+def test_push_tag_is_idempotent_and_never_overwrites(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    bob = git_world.clone("bob")
+    head = alice.rev_parse("HEAD") or ""
+    alice.create_annotated_tag("v1.0.0", head, "alice")
+    assert alice.push_tag("v1.0.0").ok
+    assert alice.push_tag("v1.0.0").ok  # same object already there: up to date
+    other = git_world.commit_file(bob, "b.txt", "b\n", "bob work")
+    bob.create_annotated_tag("v1.0.0", other, "bob")
+    result = bob.push_tag("v1.0.0")
+    assert not result.ok and result.rejected
+    remote = bob.remote_tag("v1.0.0")
+    assert remote is not None and remote.target == head
+
+
+def test_push_tag_skips_the_pre_push_hook(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    _install_hook(alice, "pre-push", "exit 1\n")
+    alice.create_annotated_tag("v1.0.0", alice.rev_parse("HEAD") or "", "t")
+    assert alice.push_tag("v1.0.0").ok
+
+
+def test_push_tag_race_exactly_one_winner(git_world: GitWorld) -> None:
+    """Two users push the same tag name on different commits at once: one wins, the other
+    is rejected and sees the winner's tag."""
+    alice = git_world.clone("alice")
+    bob = git_world.clone("bob")
+    a = git_world.commit_file(alice, "a.txt", "a\n", "a")
+    b = git_world.commit_file(bob, "b.txt", "b\n", "b")
+    alice.create_annotated_tag("v2.0.0", a, "alice")
+    bob.create_annotated_tag("v2.0.0", b, "bob")
+    results: dict[str, object] = {}
+    barrier = threading.Barrier(2)
+
+    def go(name: str, git: Git) -> None:
+        barrier.wait()
+        results[name] = git.push_tag("v2.0.0")
+
+    threads = [threading.Thread(target=go, args=(n, g)) for n, g in (("a", alice), ("b", bob))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(20)
+    oks = [n for n, r in results.items() if getattr(r, "ok", False)]
+    assert len(oks) == 1
+    loser = "b" if oks == ["a"] else "a"
+    assert getattr(results[loser], "rejected", False)
+    remote = git_world.remote_git.rev_parse("refs/tags/v2.0.0")
+    assert remote == (a if oks == ["a"] else b)
+
+
+def test_push_tag_server_side_race_is_rejected(git_world: GitWorld) -> None:
+    """The tag appears on the remote after the client's lease check (pre-receive hook)."""
+    alice = git_world.clone("alice")
+    other = _remote_commit(git_world, "carol", "carol")
+    alice.create_annotated_tag("v3.0.0", alice.rev_parse("HEAD") or "", "alice")
+    _hook_moves_ref(git_world, "refs/tags/v3.0.0", other)
+    result = alice.push_tag("v3.0.0")
+    assert not result.ok and result.rejected
+    assert git_world.remote_git.rev_parse("refs/tags/v3.0.0") == other
+
+
+def test_tag_message_fetches_the_tag_object_without_writing_refs(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    head = alice.rev_parse("HEAD") or ""
+    alice.create_annotated_tag("v1.0.0", head, "v1.0.0 (M1)")
+    assert alice.push_tag("v1.0.0").ok
+    alice.run("tag", "light", head)
+    assert alice.push("refs/tags/light", "refs/tags/light").ok
+    bob = git_world.clone("bob")
+    bob.run("tag", "-d", "v1.0.0")  # the clone fetched it: start without the object's ref
+    bob.run("tag", "-d", "light")
+    remote = bob.remote_tag("v1.0.0")
+    assert remote is not None
+    assert bob.tag_message(remote) == "v1.0.0 (M1)\n"
+    assert bob.tag_target("v1.0.0") is None  # no local tag ref written
+    light = bob.remote_tag("light")
+    assert light is not None and bob.tag_message(light) is None
+
+
+def test_tag_message_of_an_object_missing_locally(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    bob = git_world.clone("bob")
+    head = alice.rev_parse("HEAD") or ""
+    alice.create_annotated_tag("v2.0.0", head, "v2.0.0 (M2)")
+    assert alice.push_tag("v2.0.0").ok
+    remote = bob.remote_tag("v2.0.0")
+    assert remote is not None and not bob._has_object(remote.object)
+    assert bob.tag_message(remote) == "v2.0.0 (M2)\n"
+    assert bob.tag_target("v2.0.0") is None
+
+
+def test_local_tag_message(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    head = alice.rev_parse("HEAD") or ""
+    assert alice.local_tag_message("v1.0.0") is None
+    alice.create_annotated_tag("v1.0.0", head, "v1.0.0 (M1)")
+    assert alice.local_tag_message("v1.0.0") == "v1.0.0 (M1)\n"
+    alice.run("tag", "light", head)
+    assert alice.local_tag_message("light") is None

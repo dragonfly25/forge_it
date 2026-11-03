@@ -484,3 +484,40 @@ def test_fake_close_pull_closes_without_merging() -> None:
     closed = fake.fake_close_pull(pr.number)
     assert (closed.state, closed.merged) == ("closed", False)
     assert fake.list_pulls(state="open") == []
+
+
+def test_releases(gh: FakeGitHub) -> None:
+    assert gh.get_release_by_tag("v1.0.0") is None
+    release = gh.create_release("v1.0.0", "v1.0.0 — M1", "notes")
+    assert (release.tag, release.name, release.body, release.target) == (
+        "v1.0.0",
+        "v1.0.0 — M1",
+        "notes",
+        "main",
+    )
+    assert not release.draft and not release.prerelease
+    assert gh.get_release_by_tag("v1.0.0") == release
+    with pytest.raises(GitHubError) as exc:
+        gh.create_release("v1.0.0", "again", "")
+    assert exc.value.status == 422
+    second = gh.create_release("v1.1.0", "n", "", target="abc")
+    assert second.id == release.id + 1 and second.target == "abc"
+
+
+def test_draft_release_is_hidden_from_get_by_tag(gh: FakeGitHub) -> None:
+    gh.create_release("v1.0.0", "n", "")
+    gh.fake_set_release_draft("v1.0.0", True)
+    assert gh.get_release_by_tag("v1.0.0") is None
+    with pytest.raises(GitHubError) as exc:
+        gh.create_release("v1.0.0", "n", "")
+    assert exc.value.status == 422
+
+
+def test_merge_sets_merge_commit_sha(gh: FakeGitHub) -> None:
+    first = gh.create_pull("a", "", "task/1", "main")
+    assert first.merge_commit_sha is None
+    merged = gh.fake_merge_pull(first.number)
+    assert merged.merge_commit_sha is not None and len(merged.merge_commit_sha) == 40
+    second = gh.create_pull("b", "", "task/2", "main")
+    assert gh.fake_merge_pull(second.number, merge_commit_sha="c" * 40).merge_commit_sha == "c" * 40
+    assert gh.get_pull(second.number).merge_commit_sha == "c" * 40

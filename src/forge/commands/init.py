@@ -15,6 +15,7 @@ import typer
 from forge import __version__
 from forge.commands._context import find_repo_root
 from forge.commands._output import get_options, run_command
+from forge.commands.docs import describe_cli
 from forge.core.config import ADAPTERS
 from forge.core.errors import ForgeError
 from forge.core.git import Git
@@ -84,7 +85,7 @@ def init(
         root = find_repo_root(opts)
         git = Git(root)
         values = detect_values(root, git, version=__version__, github_login=login_lookup())
-        report = init_project(root, values, adapters=chosen, force=force)
+        report = init_project(root, values, adapters=chosen, force=force, cli=describe_cli())
         result = Result(data=report.to_data())
         if values.repo.startswith("<"):
             result.warn(
