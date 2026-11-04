@@ -1,6 +1,6 @@
 # 0001 — Naming and repository
 
-- Status: accepted
+- Status: accepted (repository and distribution names superseded by ADR 0016)
 - Date: 2026-11-02
 
 ## Context
