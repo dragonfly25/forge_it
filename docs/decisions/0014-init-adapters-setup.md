@@ -45,7 +45,7 @@ Init then runs the project-level adapters, which add `AGENTS.md`, `CLAUDE.md`, `
 ### `forge init [--adapters generic,claude,codex] [--force]`
 - **Defaults**: the adapters are `generic,claude,codex`, and `generic` is always included. The list is recorded in a new `adapters` key in `config.yml`, validated against the known adapter names.
 - **Template placeholders**:
-  - `{{project_name}}`: the repository directory name.
+  - `{{project_name}}`: the name part of the detected `github.repo`, else the repository directory name (dogfooding fix, Phase 10).
   - `{{repo}}`: `owner/name` from the `origin` remote when it is a GitHub URL, otherwise `<ORG>/<REPO>`.
   - `{{default_branch}}`: from `origin/HEAD`, else the current branch, else `main`.
   - `{{forge_version}}`: the version pin `>=X.Y,<X.(Y+1)`, from the CLI's base version.

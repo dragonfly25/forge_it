@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 import forge.commands.docs  # noqa: F401  (registers the CLI description used by init)
 from forge.core import adapters as A
@@ -183,10 +184,22 @@ def test_detect_values_from_clone(git_world) -> None:  # type: ignore[no-untyped
     clone.run("remote", "set-url", "origin", "git@github.com:acme/shop.git")
     clone.checkout("feature", create_from="HEAD")
     values = detect_values(clone.root(), clone, version="0.2.1", github_login="alice")
+    assert clone.root().name != "shop"
+    assert values.project_name == "shop"  # from github.repo, not the clone's directory
     assert values.repo == "acme/shop"
     assert values.default_branch == "main"  # from origin/HEAD, not the current branch
     assert values.github_login == "alice"
     assert values.forge_version == ">=0.2,<0.3"
+
+
+def test_detect_values_project_name_falls_back_to_directory(tmp_path: Path) -> None:
+    root = tmp_path / "my-dir"
+    root.mkdir()
+    git = Git(root)
+    git.run("init", "--quiet")
+    git.run("remote", "add", "origin", "https://gitlab.com/acme/other.git")
+    values = detect_values(root, git, version="0.1.0", github_login=None)
+    assert values.project_name == "my-dir" and values.repo == REPO_PLACEHOLDER
 
 
 def test_default_branch_falls_back_to_current_branch(tmp_path: Path) -> None:
@@ -250,6 +263,37 @@ def test_init_empty_repo_snapshot(repo: Path) -> None:
 
     # The other project files load with the real loaders.
     assert_project_files_load(repo, login="alice")
+
+
+def test_workflows_install_with_optional_forge_install_token(repo: Path) -> None:
+    init_project(repo, VALUES, adapters=["generic"])
+    public = 'uv tool install "git+https://github.com/dragonfly25/forge_it@v0.1.0"'
+    for name in ("forge-ci", "forge-plan-apply", "forge-radar"):
+        text = (repo / f".github/workflows/{name}.yml").read_text()
+        workflow = yaml.safe_load(text)
+        steps = [s for job in workflow["jobs"].values() for s in job["steps"]]
+        install = [s for s in steps if s.get("name") == "Install Forge (pinned)"]
+        assert len(install) == 1, name
+        step = install[0]
+        assert step["env"] == {"FORGE_INSTALL_TOKEN": "${{ secrets.FORGE_INSTALL_TOKEN }}"}
+        run = step["run"]
+        # One install, always from the public URL: the token is never part of a URL or argv.
+        installs = [line.strip() for line in run.splitlines() if "uv tool install" in line]
+        assert installs == [public], name
+        assert "@github.com" not in run and "x-access-token:${" not in run
+        # With the secret set, git authenticates through env config (an extra header).
+        guard = 'if [ -n "${FORGE_INSTALL_TOKEN:-}" ]; then'
+        end = run.index("\nfi\n")
+        assert run.index(guard) < end < run.index(public)
+        block = run[run.index(guard) : end]
+        assert "printf 'x-access-token:%s' \"$FORGE_INSTALL_TOKEN\" | base64" in block
+        assert 'echo "::add-mask::${basic}"' in block
+        assert "export GIT_CONFIG_COUNT=1" in block
+        assert 'export GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"' in block
+        assert 'export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${basic}"' in block
+        assert run.count("FORGE_INSTALL_TOKEN") == 2  # the guard and the printf only
+        assert 'echo "$FORGE_INSTALL_TOKEN' not in run and "set -x" not in run
+        assert "secrets.FORGE_INSTALL_TOKEN" not in run
 
 
 def assert_project_files_load(repo: Path, *, login: str) -> None:

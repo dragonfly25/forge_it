@@ -15,6 +15,7 @@ from typer.testing import CliRunner
 
 from forge.cli import app
 from forge.commands import _context
+from forge.commands.review import _ac_summary
 from forge.core.config import ForgeConfig
 from forge.core.github import GitHubClient
 from support.review_world import ReviewWorld
@@ -132,6 +133,29 @@ def test_context_human_view(
     assert f"PR #{pr.number}" in out and "M1-T01" in out
     assert "src/api/[a].py" in out  # never read as rich markup
     assert "Diff:" in out
+    assert "  AC-1  Users can log in.\n" in out
+    assert "  AC-2  Users can log out.\n" in out
+    assert out.count("AC-1") == 1
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "- **AC-1** The API contract defines save.",
+        "- AC-1: The API contract defines save.",
+        "1. `AC-1` The API contract defines save.",
+        "### AC-1 The API contract defines save.",
+        "**AC-1:** The API contract defines save.\nsecond line",
+        "* AC-1 \u2014 The API contract defines save.",
+    ],
+)
+def test_ac_summary_strips_marker_and_id(text: str) -> None:
+    assert _ac_summary("AC-1", text) == "The API contract defines save."
+
+
+def test_ac_summary_keeps_other_text() -> None:
+    assert _ac_summary("AC-1", "- AC-10 is different") == "AC-10 is different"
+    assert _ac_summary("AC-1", "") == ""
 
 
 def test_submit_requires_body_file(

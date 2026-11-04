@@ -59,7 +59,7 @@ Spec §9 defines the spec, roadmap and plan formats, the validation rules (§9.4
 2. **Compute**: compute a pure **apply plan** from the plan file, all `forge:task` issues (open and closed), the task branches (fetched as `forge next` does) and the open PRs. `--dry-run` prints the plan and writes nothing.
 3. **Labels**: ensure the labels exist.
 4. **Milestone**: ensure the GitHub milestone exists. Its title is the milestone id (`M1`), which Forge uses everywhere to match. The description is the roadmap title and goal when present.
-5. **Upsert**: one issue per task, matched by the metadata `id` across all states. When two issues share an id, the lowest number wins, with a warning (as in refresh).
+5. **Upsert**: one issue per task, matched by the metadata `id` across all states. When two issues share an id, the lowest number wins, with a warning (as in refresh). An issue closed as `not_planned` is ignored when a live issue carries the same id: it is a superseded duplicate (Phase 10 amendment).
    - **Missing**: create the issue with title `[<id>] <title>`, the body below, the milestone, and the labels `forge:task`, mirror labels and derived status.
    - **Closed**: never modified.
    - **Not started**: everything is updated as needed: title, body (description region and metadata block), milestone, mirror labels.
@@ -128,7 +128,7 @@ Text outside both regions belongs to humans and is kept byte for byte. On an iss
 - **Label-only and title/description updates**: they do not re-check the branch. Their status labels may be stale for a task claimed mid-run; the next `forge refresh` (radar workflow) repairs them.
 - **Per-issue comment keys**: the "removed" and "duplicate" comments are keyed per issue, not per removal. An issue removed, re-added and removed again is closed without a second comment.
 - **Proposal checks**: a proposal referenced by two tasks is a validate error. Apply reads proposals before the fetch and refuses before any write.
-- **Re-added tasks**: when the issue matching a plan task was closed as `not_planned` (removed, then put back in the plan), apply warns and names the fix: reopen the issue, then re-run. A closed issue can win the duplicate rule, and closed issues are never modified.
+- **Re-added tasks**: when the issue matching a plan task was closed as `not_planned` (removed, then put back in the plan), apply warns and names the fix: reopen the issue, then re-run. With no live copy, the closed issue is still the match. Closed issues are never modified.
 - **More validate errors**:
   - an AC defined twice in the same spec;
   - a title containing a newline;

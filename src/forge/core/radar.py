@@ -194,7 +194,8 @@ def render_radar(finding: RadarFinding) -> str:
         lines += [
             "",
             f"**Sync recommended:** {_plural(total, 'commit')} on "
-            f"{code_span(finding.default_branch)} touch this task's zones "
+            f"{code_span(finding.default_branch)} {'touches' if total == 1 else 'touch'} "
+            "this task's zones "
             f"({', '.join(code_span(z) for z in zones)}). Run `forge sync`.",
             "",
         ]

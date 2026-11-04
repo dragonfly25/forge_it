@@ -27,7 +27,15 @@ from forge.core.git import Git
 from forge.core.github import Comment, GitHubClient, Issue
 from forge.core.lease import describe_lease, load_task
 from forge.core.refresh import TaskRecord, parse_records
-from forge.core.tasks import FORGE_TASK_LABEL, TASK_ID_RE, Status, TaskMetadata, split_body
+from forge.core.tasks import (
+    FORGE_TASK_LABEL,
+    TASK_ID_RE,
+    Status,
+    TaskBodyError,
+    TaskMetadata,
+    split_body,
+    split_description,
+)
 from forge.core.zones import ZonesConfig
 
 HANDOFF_MARKER = "<!-- forge:handoff -->"
@@ -364,9 +372,25 @@ def metadata_dict(meta: TaskMetadata) -> dict[str, Any]:
     return {f.name: _plain(getattr(meta, f.name)) for f in fields(meta)}
 
 
+def _join_parts(*parts: str) -> str:
+    return "\n\n".join(p.strip() for p in parts if p.strip())
+
+
 def _human_body(issue: Issue) -> str:
+    """The issue body as a person reads it: no metadata block and no Forge markers.
+
+    The description region (ADR 0013) is shown as its text only. A body whose description
+    markers are unbalanced is shown without the metadata block but otherwise unchanged.
+    """
     before, _block, after = split_body(issue.body, issue_number=issue.number)
-    return (before.rstrip() + "\n\n" + after.strip()).strip() if after.strip() else before.strip()
+    text = _join_parts(before, after)
+    try:
+        d_before, region, d_after = split_description(text, issue_number=issue.number)
+    except TaskBodyError:
+        return text
+    if region is None:
+        return text
+    return _join_parts(d_before, region, d_after)
 
 
 def _spec_criteria(repo_root: Path, meta: TaskMetadata, warnings: list[str]) -> dict[str, str]:

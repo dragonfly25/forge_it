@@ -8,6 +8,7 @@ Forge footer. The work is done by :mod:`forge.core.review`.
 from __future__ import annotations
 
 import io
+import re
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -27,6 +28,27 @@ from forge.core.zones import ZONES_PATH
 
 MAX_DIFF_LINES = 400
 """Diff lines printed in the human view (the JSON output carries the whole capped diff)."""
+
+_AC_LEAD_RE = re.compile(r"^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)?")
+
+
+def _ac_summary(ac: str, text: str) -> str:
+    """First line of an AC definition without its heading/list marker and its own id.
+
+    ``- **AC-1** The API ...`` becomes ``The API ...``; text that does not start with the
+    id (after the marker and emphasis) is returned with only the marker removed.
+    """
+    first = text.splitlines()[0] if text else ""
+    rest = _AC_LEAD_RE.sub("", first, count=1)
+    id_re = re.compile(
+        r"^(?P<wrap>\*\*|__|\*|_|`)?"
+        + re.escape(ac)
+        + r"(?![\w-])[:.]?(?P=wrap)?\s*[:.\u2014\u2013-]?\s*"
+    )
+    match = id_re.match(rest)
+    if match is not None:
+        rest = rest[match.end() :]
+    return rest.strip()
 
 
 def review(
@@ -176,7 +198,7 @@ def _render_context(console: Console, data: dict[str, Any]) -> None:
         for item in meta["done_when"]:
             console.print(f"  done when: {item}")
         for ac, text in task["acceptance_criteria"].items():
-            console.print(f"  {ac}: {text.splitlines()[0] if text else ''}")
+            console.print(Text(f"  {ac}  {_ac_summary(ac, text)}".rstrip()))
     _render_zones(console, data.get("zones"))
     ci = data["ci"]
     console.print("CI: " + ("unavailable" if ci is None else ci["state"]))

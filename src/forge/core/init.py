@@ -107,11 +107,15 @@ def detect_default_branch(git: Git) -> str:
 def detect_values(
     repo_root: Path, git: Git, *, version: str, github_login: str | None
 ) -> InitValues:
-    """Compute the placeholder values for ``repo_root`` (ADR 0014)."""
+    """Compute the placeholder values for ``repo_root`` (ADR 0014).
+
+    The project name is the GitHub repository's name when ``origin`` is a GitHub remote
+    (a clone may live in a directory with another name), else the directory name.
+    """
     proc = git.run("remote", "get-url", "origin", check=False)
     repo = github_repo_from_url(proc.stdout) if proc.returncode == 0 else None
     return InitValues(
-        project_name=repo_root.name,
+        project_name=repo.split("/", 1)[1] if repo else repo_root.name,
         repo=repo or REPO_PLACEHOLDER,
         default_branch=detect_default_branch(git),
         forge_version=version_pin(version),

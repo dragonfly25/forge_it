@@ -247,11 +247,25 @@ def _upsert_pull(
 ) -> PullRequest:
     existing = github.list_pulls(state="open", head=branch, base=base)
     if not existing:
-        pr = github.create_pull(title, initial_body(block, template), branch, base, draft=draft)
-        out.outcome = "created"
-        out.body_changed = True
-        out.info(f"opened pull request #{pr.number}" + (" as a draft" if draft else ""))
-        return pr
+        try:
+            pr = github.create_pull(title, initial_body(block, template), branch, base, draft=draft)
+        except GitHubError as exc:
+            # GitHub refuses (422) a second pull request for the same head and base: another
+            # ship opened it concurrently. Re-read it and update it instead.
+            if exc.status != 422:
+                raise
+            existing = github.list_pulls(state="open", head=branch, base=base)
+            if not existing:
+                raise
+            out.warn(
+                f"pull request #{existing[0].number} for {branch} was opened concurrently; "
+                "updating it"
+            )
+        else:
+            out.outcome = "created"
+            out.body_changed = True
+            out.info(f"opened pull request #{pr.number}" + (" as a draft" if draft else ""))
+            return pr
     pr = existing[0]
     out.outcome = "updated"
     if draft and not pr.draft:

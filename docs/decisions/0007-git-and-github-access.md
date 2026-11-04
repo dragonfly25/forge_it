@@ -41,3 +41,20 @@ All git access goes through `core/git.py`, and all GitHub access goes through th
 - **List ordering contract**: issues, PRs, comments and reviews come back oldest first. `GhCliClient` sends `sort=created&direction=asc`. Labels are sorted by name, case-insensitively, and milestones by number. `FakeGitHub` enforces the same order, so tests cannot depend on an order production doesn't give.
 - **Minimum gh version**: `MIN_GH_VERSION = 2.48.0`, the first release with `gh api --slurp` (cli/cli PR #8620). `forge setup --check` (Phase 8) verifies it with `parse_gh_version`.
 - `PullRequest.mergeable` is only populated by `get_pull`. List endpoints return `None`.
+
+## Amendment (Phase 10, dogfooding): read-after-write lag on GitHub
+
+Measured on a real repository on 2026-11-03:
+- **New issues**: a newly created issue is missing from `GET /repos/{r}/issues` for about 2 seconds, filtered or not, and from the `direction=desc` list for 2–5 seconds. `GET /repos/{r}/issues/{n}` returns it immediately.
+- **Label changes**: a label added to an issue showed up in a label-filtered list only after about 7 seconds.
+- **No lag**: comment lists and pull request lists did not lag. GitHub rejects a second pull request for the same head and base with 422.
+
+Consequences:
+- **`GhCliClient.list_issues`**: after listing, it reads the newest issue numbers and fetches the numbers above them one by one until a 404, capped at 50, so issues created moments earlier are never missed. Without this, two `forge plan apply` runs a few seconds apart created duplicate task issues; the duplicate cleanup then converged on the next run.
+- **Label and state changes**: a change made in the last few seconds can still be missing from a filtered list. Forge's task and proposal labels are set at creation, so the creation probe covers them.
+- **`forge ship`**: it treats a 422 from creating the pull request as "opened concurrently", re-reads it and updates it.
+- **Tests**: `FakeGitHub.fake_set_list_lag` reproduces the issue-list lag.
+- **Milestones**: milestone lists were not observed to lag, so a milestone missing from the list is treated as absent.
+- **How the guard works**: the newest-issues list is filtered like the main list, so issues it sees are kept. Fetches above the newest number go first, with their own cap of 50. Gap fetches are limited to the 20 numbers below the newest.
+- **Cost per `list_issues` call**: normally 2 extra requests, the newest-issues list and one 404, plus one per deleted issue or Discussion in that 20-number span. At worst it makes 72 requests, which only happens when more than 50 issues are created within the lag window.
+- **Token in workflows**: the project workflows pass `FORGE_INSTALL_TOKEN` to git through `GIT_CONFIG_COUNT`/`KEY_0`/`VALUE_0` as an auth header, and mask its base64 form. It never appears in the install URL.

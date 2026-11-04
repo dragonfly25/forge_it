@@ -34,9 +34,20 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v10
 
+      # Optional secret FORGE_INSTALL_TOKEN: a read-only token for a private Forge repository.
       - name: Install Forge (pinned)
+        env:
+          FORGE_INSTALL_TOKEN: ${{ secrets.FORGE_INSTALL_TOKEN }}
         run: |
           set -euo pipefail
+          if [ -n "${FORGE_INSTALL_TOKEN:-}" ]; then
+            # git reads the credentials from env config: never from the URL or the command line.
+            basic="$(printf 'x-access-token:%s' "$FORGE_INSTALL_TOKEN" | base64 | tr -d '\n')"
+            echo "::add-mask::${basic}"
+            export GIT_CONFIG_COUNT=1
+            export GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
+            export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${basic}"
+          fi
           uv tool install "git+https://github.com/dragonfly25/forge_it@{{forge_install_ref}}"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
