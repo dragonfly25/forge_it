@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Guided project configuration** (ADR 0018):
+  - **`forge config validate`**: checks `config.yml`, `team.yml` and `zones.yml` together, offline. Each file that is missing or invalid gives one error that names the file, the key and the fix (exit 1). Warnings cover init placeholders, a team without a lead, files that match no zone, zones that match no file and a CLI outside `forge_version`.
+  - **`/forge-configure` prompt** (`$forge-configure` in Codex): the lead's agent reads the codebase, proposes `checks`, `setup.commands`, zones and team members, writes them after the lead agrees, validates them and opens a PR. With `--update` it changes only what drifted. This is the eleventh prompt.
 - **Development agent and delegation switch** (ADR 0017):
   - **`implementer` subagent**: a fourth subagent, rendered as `forge-implementer` for Claude Code and Codex. It writes the code of a task from a brief written by the main session, which acts as lead.
   - **Delegation modes**: `off`, `auto` (default) or `on`. `auto` delegates tasks of size M or with two or more zones.
@@ -17,6 +20,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
     - the project: a `delegation:` policy in `.forge/config.yml`.
   - **Fallback**: tools without native subagents fall back to `off`.
   - **Where it shows**: the task context, the PR body and `forge status` all show the decision.
+
+### Changed
+
+- `forge init` next steps now point the lead to `/forge-configure` and `forge config validate` instead of editing the three project files by hand (ADR 0018). Existing projects get the new prompt by running `forge init` again or by copying `configure.md` and running `forge adapters generate`.
 
 ## [0.1.0] - 2026-11-03
 

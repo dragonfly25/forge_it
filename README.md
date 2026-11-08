@@ -58,12 +58,12 @@ You adopt Forge in a product repository once. Everything below runs in a clone o
    ```bash
    forge init                       # add --adapters generic,claude,codex to choose tools
    ```
-   Init never overwrites a file without `--force` and never commits.
-3. **Edit** the three files that describe your project:
+   Init never overwrites a file without `--force` and never commits. It pre-fills the repository, your login and the Forge version.
+3. **Configure** the three files that describe your project. In your agent, run `/forge-configure` (Codex: `$forge-configure`). It reads your codebase, proposes the files, writes them after you agree, validates them with `forge config validate` and opens a PR. Or edit them by hand and run `forge config validate`:
    - `.forge/config.yml`: the GitHub repository, `checks` (lint, typecheck, test), `setup.commands`, `resolvers` and model constraints.
    - `.forge/team.yml`: one entry per person, with GitHub login, roles (`dev`, `lead`) and AI providers.
    - `.forge/zones.yml`: the areas of your codebase as path globs. Mark shared interfaces as `contract: true`.
-4. **Commit and push** the `.forge/` files, `AGENTS.md`, `CLAUDE.md`, the generated adapter files, the specs/plans folders, the docs and the three workflows in `.github/workflows/`. If the default branch is protected, push a branch and open a PR for these files, and merge it before the next steps. Forge itself never pushes to the default branch.
+4. **Commit and push** the `.forge/` files (`/forge-configure` does this through a PR; merge it), `AGENTS.md`, `CLAUDE.md`, the generated adapter files, the specs/plans folders, the docs and the three workflows in `.github/workflows/`. If the default branch is protected, push a branch and open a PR for these files, and merge it before the next steps. Forge itself never pushes to the default branch.
 5. **Set up your machine**: `forge setup`. It checks your tools, creates your profile, and renders your subagents.
 6. **Write a spec.** Put the full project description in a Markdown file, or fill `specs/_template.md` for a milestone. In your agent, run `/forge-plan roadmap <spec-file>`, then `/forge-plan M1`. In Claude Code the commands are `/forge-plan`. In Codex they are `$forge-plan`.
 7. **Merge the plan PRs.** When `plans/M1.yml` reaches the default branch, the `forge-plan-apply` workflow runs `forge plan validate` and `forge plan apply`. It creates the GitHub milestone and one issue per task.
