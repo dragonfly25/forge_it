@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -321,6 +322,8 @@ def test_current_null_worktree_round_trip(tmp_path: Path) -> None:
         (lambda d: d.update(base="abc"), "base"),
         (lambda d: d.update(claimed_at="yesterday"), "claimed_at"),
         (lambda d: d.update(worktree=3), "worktree"),
+        (lambda d: d.update(delegation_override="always"), "delegation_override"),
+        (lambda d: d.update(delegation_override=True), "delegation_override"),
     ],
 )
 def test_current_invalid_field(tmp_path: Path, mutate: object, key: str) -> None:
@@ -414,3 +417,22 @@ def test_task_worktrees_lists_only_existing_task_branches(
     shutil.rmtree(d)
     found = {(n, os.path.realpath(p)) for n, p in task_worktrees(git)}
     assert found == {(3, os.path.realpath(a)), (12, os.path.realpath(b))}
+
+
+@pytest.mark.parametrize("mode", ["off", "auto", "on"])
+def test_current_delegation_override_round_trip(tmp_path: Path, mode: str) -> None:
+    cur = replace(current(None), delegation_override=mode)  # type: ignore[arg-type]
+    file = write_current(tmp_path, cur)
+    assert json.loads(file.read_text())["delegation_override"] == mode
+    assert read_current(tmp_path) == cur
+
+
+def test_current_without_override_omits_the_key_and_old_files_load(tmp_path: Path) -> None:
+    file = write_current(tmp_path, current(None))
+    data = json.loads(file.read_text())
+    assert "delegation_override" not in data  # files are byte-identical to v0.1.0's
+    loaded = read_current(tmp_path)
+    assert loaded is not None and loaded.delegation_override is None
+    data["delegation_override"] = None
+    file.write_text(json.dumps(data))
+    assert read_current(tmp_path) == current(None)

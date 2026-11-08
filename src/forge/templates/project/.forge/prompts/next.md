@@ -14,11 +14,13 @@ Claim the next task that fits you, load its full context, and agree an implement
    `forge next --json`
    `forge next --task M1-T07 --json` (or `--task 42`, or `--task "#42"` with quotes: an unquoted `#` starts a shell comment)
    Add `--reclaim` only when the user wants to take over a stale task. Add `--agent <id>` only when the user names an agent.
-3. Load the full context (task metadata, issue body, spec sections for the covered ACs, zones and their paths, dependency summaries, ADRs, and the latest handoff note if there is one):
+   Add `--delegation off|auto|on` only when the user states how the code should be written for this task (`off`: you write it, `on`: delegate it to `forge-implementer`). Otherwise leave it out: an earlier choice saved for this task stays in effect, and without one the profile and the project decide.
+3. Load the full context (task metadata, issue body, spec sections for the covered ACs, zones and their paths, dependency summaries, ADRs, the delegation decision, and the latest handoff note if there is one):
    `forge task show --json`
+   If you passed `--delegation` in step 2, pass the same value here, for example `forge task show --delegation off --json`. Forge saves the choice in the task's local state until release or handoff (a new `--delegation` replaces it), so `forge ship` and `forge status` report the decision you followed.
 4. Read the code the task touches. Keep your own context small (see Subagents).
-5. Summarize for the user: the task id and title, what must be true when done (`done_when`), the zones, the dependencies, the handoff note if any, and the worktree path to work in.
-6. Propose an implementation outline: files to change, order of steps, tests to write, risks.
+5. Summarize for the user: the task id and title, what must be true when done (`done_when`), the zones, the dependencies, the handoff note if any, the delegation decision from `data.delegation` (`delegate` and `reason`), and the worktree path to work in.
+6. Propose an implementation outline: files to change, order of steps, tests to write, risks. If `data.delegation.delegate` is true, outline it as briefs for `forge-implementer`.
 7. Ask the user to confirm the outline. Do not write code before they confirm.
 
 ## Exit codes
@@ -29,7 +31,7 @@ Claim the next task that fits you, load its full context, and agree an implement
   - no profile, or the profile login differs from the `gh` login: run `/forge-setup`.
   - an incomplete claim of yours on #n: run `forge next --task <n> --json` to complete it.
   - dirty working tree or a diverged local branch: show `messages`, ask the user. Do not stash, reset or delete anything yourself.
-- `forge next` `1`: a GitHub or git failure. Report `messages`.
+- `forge next` `1`: a GitHub or git failure, or an invalid `--delegation` mode (use `off`, `auto` or `on`). Report `messages`.
 - `forge task show` `0`: use the context. `5`: no current task (claim one first). `1`: report.
 - `2` and `4` are not expected from these calls. Report the output to the user.
 
@@ -42,11 +44,12 @@ Claim the next task that fits you, load its full context, and agree an implement
 
 ## Subagents
 - If `forge-explorer` is available, delegate step 4 to it: ask for a compact summary of the relevant code, specs and ADRs for the task's zones. Otherwise read them yourself and keep notes short.
-- Writing the outline stays with you (the main agent).
+- Writing the outline stays with you (the main agent). Writing the code is decided by `data.delegation` and handled in `/forge-dev`. Do not start it here.
 
 ## Final report
 Tell the user:
 - the task claimed (id, title, issue number, tier, size), or why nothing was available;
 - the zones and the worktree path;
+- the delegation decision (delegate or not, and why);
 - the outline you propose, and the question: "Shall I start?";
 - any handoff note and any warning from the call.

@@ -29,7 +29,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from forge.core.config import DelegationMode
 from forge.core.context import extract_acceptance_criteria
+from forge.core.delegation import delegation_for
 from forge.core.errors import ExitCode, ForgeError
 from forge.core.github import GitHubClient, GitHubError, PullRequest
 from forge.core.lease import format_time, heartbeat, load_task
@@ -47,6 +49,7 @@ from forge.core.pr_body import (
     update_body,
 )
 from forge.core.presets import Preset
+from forge.core.profile import Profile
 from forge.core.refresh import ensure_labels
 from forge.core.reviewers import ReviewerSelection, select_reviewers
 from forge.core.sync import (
@@ -59,16 +62,22 @@ from forge.core.sync import (
     sync,
 )
 from forge.core.tasks import Status, TaskMetadata, desired_labels
+from forge.core.workspace import find_current_task
 from forge.core.zones import ZonesConfig
 
 
 @dataclass
 class ShipContext:
     """Everything ship needs: the sync context (config, git, GitHub, zones, agent, team,
-    clock, check runner) plus the shipped presets used to resolve the effort value."""
+    clock, check runner) plus the shipped presets used to resolve the effort value.
+
+    ``profile`` is the machine profile, used for the delegation line of the PR body
+    (ADR 0017); without it the decision is ``off`` (no profile).
+    """
 
     sync: SyncContext
     presets: Mapping[str, Preset] | None = None
+    profile: Profile | None = None
 
 
 @dataclass(frozen=True)
@@ -210,7 +219,8 @@ def _criteria(
 
 
 def agent_info(ctx: ShipContext, meta: TaskMetadata) -> AgentInfo:
-    """The author's agent and the model resolved for the task's tier (``tier: task``)."""
+    """The author's agent, the model resolved for the task's tier (``tier: task``) and the
+    delegation decision for the task (ADR 0017, decided in the current worktree)."""
     agent = ctx.sync.agent
     resolution = resolve(
         agent,
@@ -231,7 +241,28 @@ def agent_info(ctx: ShipContext, meta: TaskMetadata) -> AgentInfo:
         effort_value=resolution.effort_value,
         tier_map=model_map(agent),
         notes=tuple(note.text for note in resolution.notes),
+        delegation=delegation_for(
+            meta,
+            config=ctx.sync.config,
+            profile=ctx.profile,
+            agent=agent if ctx.profile is not None else None,
+            worktree=ctx.sync.git.root(),
+            override=_recorded_override(ctx, meta),
+            presets=ctx.presets,
+        ),
     )
+
+
+def _recorded_override(ctx: ShipContext, meta: TaskMetadata) -> DelegationMode | None:
+    """The ``--delegation`` override recorded in ``current.json`` for the task (ADR 0017)."""
+    try:
+        location = find_current_task(ctx.sync.git)
+    except ForgeError:
+        return None
+    current = None if location is None else location.current
+    if current is None or current.task != meta.id:
+        return None
+    return current.delegation_override
 
 
 def _upsert_pull(

@@ -31,7 +31,8 @@ from typing import Any, Protocol
 import yaml
 
 from forge.core import adapters
-from forge.core.config import ForgeConfig, check_cli_version
+from forge.core.config import DelegationConfig, DelegationMode, ForgeConfig, check_cli_version
+from forge.core.delegation import SUBAGENT_TOOLS
 from forge.core.errors import ConfigError, ExitCode, ForgeError, PreconditionError
 from forge.core.git import Git, GitError
 from forge.core.github import (
@@ -883,12 +884,14 @@ def build_profile(
     recommended: Mapping[Tier, str] | None = None,
     existing: Profile | None = None,
     login: str | None = None,
+    delegation: DelegationConfig | None = None,
 ) -> Profile:
     """Run the profile wizard (ADR 0014, steps 3-4) and return the new profile.
 
     With an ``existing`` profile every value it holds is the default, agents of tools that
-    were not detected are kept unchanged and new tools are offered. Pure: all input comes
-    through ``io_``.
+    were not detected are kept unchanged and new tools are offered. The last question is the
+    delegation mode (ADR 0017, see :func:`ask_delegation`); ``delegation`` is the project
+    policy (built-in defaults outside a project). Pure: all input comes through ``io_``.
     """
     rec = dict(recommended or {})
     default_login = login or (existing.github if existing else "")
@@ -952,7 +955,50 @@ def build_profile(
         agents=tuple(agents),
         default_agent=chosen,
         worktrees_dir=existing.worktrees_dir if existing else None,
+        delegation=ask_delegation(
+            io_,
+            delegation or DelegationConfig(),
+            existing.delegation if existing else None,
+            tools=tuple(a.tool for a in agents),
+        ),
     )
+
+
+def ask_delegation(
+    io_: WizardIO,
+    policy: DelegationConfig,
+    current: DelegationMode | None,
+    *,
+    tools: Sequence[str],
+) -> DelegationMode | None:
+    """Ask the personal delegation mode (ADR 0017); return what the profile should hold.
+
+    The preselected answer is ``current`` when set, else the project default, so ``--yes``
+    keeps what is there. The profile stores no value (``None``, follow the project) when the
+    answer equals the project default and no value was set before; otherwise it stores the
+    answer. Nothing is asked, and ``current`` is kept, without a tool that has native
+    subagents, when the project allows a single mode, or when ``current`` is a mode this
+    project does not allow (the profile is machine-wide; the run-time decision warns).
+    """
+    if not any(tool in SUBAGENT_TOOLS for tool in tools) or len(policy.allowed) < 2:
+        return current
+    if current is not None and current not in policy.allowed:
+        io_.print(
+            f"Delegation: your profile's mode {current!r} is not allowed by this project; the "
+            f"project default {policy.default!r} applies here (kept unchanged in the profile)"
+        )
+        return current
+    preselected = current if current is not None else policy.default
+    io_.print(
+        "Delegation: off = the main session writes the code; auto = delegate size M or "
+        "multi-zone tasks to forge-implementer; on = always delegate "
+        f"(project default: {policy.default})"
+    )
+    answer = io_.choose("Delegation mode", list(policy.allowed), preselected)
+    chosen: DelegationMode = next((m for m in policy.allowed if m == answer), preselected)
+    if current is None and chosen == policy.default:
+        return None
+    return chosen
 
 
 def validate_profile(profile: Profile, path: Path) -> Profile:
@@ -1043,6 +1089,7 @@ def run_setup(
         recommended=recommended,
         existing=existing,
         login=machine.login,
+        delegation=target.config.delegation if target.config else None,
     )
     profile = validate_profile(profile, path)
     # 5. Write.
@@ -1216,6 +1263,7 @@ __all__ = [
     "SetupTarget",
     "ShellRunner",
     "WizardIO",
+    "ask_delegation",
     "blocking",
     "build_profile",
     "default_agent_id",

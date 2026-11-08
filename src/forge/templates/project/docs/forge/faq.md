@@ -66,6 +66,29 @@ Your profile is in `~/.config/forge/profile.yml` (or `$XDG_CONFIG_HOME/forge/pro
 
 Show it with `forge profile show`. Change a value with `forge profile set <agent>.<tier>=<model>`.
 
+## How do I spend fewer tokens?
+
+Turn delegation off. Your main agent then writes the code itself, with no briefs and no summaries passing between agents:
+
+```bash
+forge profile set delegation=off
+```
+
+For one task, use `/forge-dev --solo` (saved locally until release or handoff). The lead can set the same for the whole project with `delegation: {default: off}` in `.forge/config.yml`. If the project does not allow `off`, ask the lead to add it to `delegation.allowed`.
+
+Other ways to cut tokens: keep tasks small, let the agent use `forge-explorer` for reading, and hand off with `/forge-handoff` instead of restarting a long session.
+
+## When is delegation worth it?
+
+Delegation pays off when:
+- the task is big (size `M`) or touches several zones, so your main agent would fill its context with code;
+- the work splits into parts with separate files, so several implementers can run at the same time;
+- your lead model costs much more per token than a `standard` model.
+
+It is not worth it for small, single-zone tasks. The briefs and the re-reading cost more than they save, and some detail is lost in the handoff. The default `auto` mode delegates only for size `M` or two or more zones. Use `/forge-dev --delegate` or `--solo` to override it for this task (saved locally until release or handoff).
+
+Forge records the decision in the pull request. It cannot see what the agent did, so treat the line as the plan. Compare modes on real pull requests to learn what works for your team.
+
 ## A review asks me to change something after I shipped.
 
 Make the changes in your worktree, then run `/forge-ship` again. It updates the same pull request, keeps the boxes reviewers ticked and does not add reviewers beyond what is needed.

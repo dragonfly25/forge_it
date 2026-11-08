@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 
+from forge.core.config import DELEGATION_MODES, DelegationMode, parse_delegation_mode
 from forge.core.errors import ForgeError
 from forge.core.team import LOGIN_RE
 from forge.core.tiers import EFFORTS, TIERS, Effort, Tier
@@ -25,11 +26,11 @@ from forge.core.validate import Fields, load_yaml_mapping
 AGENT_ID_PATTERN = r"[a-z0-9][a-z0-9._-]*"
 """Pattern every agent id must match (full match)."""
 
-_TOP_KEYS = ("github", "agents", "default_agent", "worktrees_dir")
+_TOP_KEYS = ("github", "agents", "default_agent", "worktrees_dir", "delegation")
 _AGENT_KEYS = ("id", "tool", "providers", "tiers", "effort")
 _SET_USAGE = (
-    "use `<agent>.<tier>=<model>`, `<agent>.effort.<level>=<value>` or `default_agent=<id>`, "
-    "e.g. `claude-pro-1.strong=opus`"
+    "use `<agent>.<tier>=<model>`, `<agent>.effort.<level>=<value>`, `default_agent=<id>` or "
+    "`delegation=<off|auto|on>`, e.g. `claude-pro-1.strong=opus`"
 )
 
 
@@ -52,6 +53,8 @@ class Profile:
     agents: tuple[AgentProfile, ...]
     default_agent: str
     worktrees_dir: Path | None = None
+    delegation: DelegationMode | None = None
+    """Personal delegation mode (ADR 0017); ``None`` follows the project default."""
 
     def agent_ids(self) -> list[str]:
         """Return the agent ids in file order."""
@@ -134,7 +137,23 @@ def parse_profile(f: Fields) -> Profile:
         agents=tuple(agents),
         default_agent=default_agent,
         worktrees_dir=worktrees_dir,
+        delegation=_delegation(f),
     )
+
+
+def _delegation(f: Fields) -> DelegationMode | None:
+    raw = f.raw("delegation")
+    if raw is None:
+        return None
+    mode = parse_delegation_mode(raw)
+    if mode is None:
+        modes = ", ".join(DELEGATION_MODES)
+        raise f.fail(
+            "delegation",
+            f"invalid mode {raw!r}; expected one of: {modes}",
+            "write it as `delegation: auto`, or remove the key to follow the project default",
+        )
+    return mode
 
 
 def _agent(f: Fields) -> AgentProfile:
@@ -201,16 +220,22 @@ def _to_data(profile: Profile) -> dict[str, Any]:
                 "effort": {str(e): a.effort[e] for e in EFFORTS if e in a.effort},
             }
         )
-    return {
+    data: dict[str, Any] = {
         "github": profile.github,
         "agents": agents,
         "default_agent": profile.default_agent,
         "worktrees_dir": str(profile.worktrees_dir) if profile.worktrees_dir else None,
     }
+    if profile.delegation is not None:
+        data["delegation"] = profile.delegation
+    return data
 
 
 def profile_to_data(profile: Profile) -> dict[str, Any]:
-    """Return ``profile`` as plain data, with keys in spec §6.4 order (what the file holds)."""
+    """Return ``profile`` as plain data, with keys in spec §6.4 order (what the file holds).
+
+    ``delegation`` is present only when the profile sets it (ADR 0017).
+    """
     return _to_data(profile)
 
 
@@ -241,8 +266,9 @@ def save_profile(profile: Profile, path: Path) -> None:
 def apply_setting(profile: Profile, setting: str) -> Profile:
     """Return a copy of ``profile`` with one ``forge profile set`` assignment applied.
 
-    Accepted forms: ``<agent>.<tier>=<model>``, ``<agent>.effort.<level>=<value>`` and
-    ``default_agent=<id>``. Raises :class:`ForgeError` with a usage hint on bad input.
+    Accepted forms: ``<agent>.<tier>=<model>``, ``<agent>.effort.<level>=<value>``,
+    ``default_agent=<id>`` and ``delegation=<off|auto|on>``. Raises :class:`ForgeError`
+    with a usage hint on bad input.
     """
     key, sep, value = setting.partition("=")
     key, value = key.strip(), value.strip()
@@ -257,6 +283,15 @@ def apply_setting(profile: Profile, setting: str) -> Profile:
                 hint=f"use one of: {', '.join(profile.agent_ids())}",
             )
         return dataclasses.replace(profile, default_agent=value)
+    if key == "delegation":
+        mode = parse_delegation_mode(value)
+        if mode is None:
+            raise ForgeError(
+                f"invalid delegation mode {value!r}; expected one of: "
+                f"{', '.join(DELEGATION_MODES)}",
+                hint="e.g. `forge profile set delegation=auto`",
+            )
+        return dataclasses.replace(profile, delegation=mode)
 
     parts = key.split(".")
     tier_names = [str(t) for t in TIERS]

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from forge.core.delegation import Delegation
 from forge.core.pr_body import (
     BEGIN_MARKER,
     END_MARKER,
@@ -244,3 +246,61 @@ def test_read_template(tmp_path: Path) -> None:
     path.parent.mkdir()
     path.write_text("## Template\n")
     assert read_template(tmp_path) == "## Template\n"
+
+
+# --------------------------------------------------------------------------- delegation
+
+
+def _delegation(**overrides: Any) -> Delegation:
+    data: dict[str, Any] = {
+        "mode": "auto",
+        "requested": "auto",
+        "source": "project",
+        "delegate": True,
+        "reason": "size M",
+        "model": "sonnet",
+    }
+    data.update(overrides)
+    return Delegation(**data)
+
+
+def test_agent_section_records_the_delegation_decision() -> None:
+    agent = replace(AGENT, delegation=_delegation())
+    lines = section(render_block(block(agent=agent)), "Agent")
+    assert lines[3] == "- Delegation: auto → delegated (size M) to `forge-implementer` (`sonnet`)"
+    assert lines[4].startswith("- Note: tier raised")
+
+
+def test_delegation_line_forms() -> None:
+    cases = {
+        _delegation(
+            mode="off",
+            requested="off",
+            source="profile",
+            delegate=False,
+            reason="requested by profile",
+            model=None,
+        ): "- Delegation: off (requested by profile)",
+        _delegation(delegate=False, reason="1 zone, size S", model=None): (
+            "- Delegation: auto → not delegated (1 zone, size S)"
+        ),
+        _delegation(
+            mode="on",
+            requested="on",
+            source="invocation",
+            reason="requested by --delegation",
+            model=None,
+        ): (
+            "- Delegation: on → delegated (requested by --delegation) to `forge-implementer` "
+            "(inherits the session's model)"
+        ),
+    }
+    for delegation, expected in cases.items():
+        text = render_block(block(agent=replace(AGENT, delegation=delegation)))
+        assert expected in section(text, "Agent")
+
+
+def test_no_delegation_line_without_a_decision() -> None:
+    assert not any(
+        line.startswith("- Delegation") for line in section(render_block(block()), "Agent")
+    )

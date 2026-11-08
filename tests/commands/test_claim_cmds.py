@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from forge.cli import app
 from forge.commands import _claims, _context
+from forge.core import report
 from forge.core.config import ForgeConfig
 from forge.core.git import Git
 from forge.core.github import GitHubClient
@@ -120,6 +121,7 @@ class Env:
     sleeps: list[float] = field(default_factory=list)
     clones: dict[str, Git] = field(default_factory=dict)
     extra_agents: str = ""
+    extra_top: str = ""
 
     def clone(self, user: str) -> Path:
         if user not in self.clones:
@@ -140,7 +142,9 @@ class Env:
     def profile(self, login: str) -> Path:
         path = self.xdg / "forge" / "profile.yml"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(profile_yaml(login, self.worktrees / login, self.extra_agents))
+        path.write_text(
+            profile_yaml(login, self.worktrees / login, self.extra_agents) + self.extra_top
+        )
         return path
 
     def invoke(
@@ -631,3 +635,418 @@ def test_reclaim_fresh_is_3_stale_is_0(env: Env) -> None:
     assert env.fake.get_issue(n).assignees == ("alice",)
     assert out["data"]["context"]["lease"]["owner"] == "alice"
     assert env.sleeps == []
+
+
+# --------------------------------------------------------------------------- delegation
+
+
+def commit_all_subagents(env: Env, config: str | None = None) -> None:
+    """Commit every template subagent (implementer included), the `.gitignore` and, when
+    given, a replacement `.forge/config.yml` to main."""
+    from importlib import resources
+
+    template = resources.files("forge") / "templates" / "project"
+    lead = env.git_world.clone("lead-delegation")
+    for name in ("explorer", "implementer", "reviewer", "test-writer"):
+        text = (template / ".forge" / "agents" / f"{name}.md").read_text("utf-8")
+        env.git_world.commit_file(lead, f".forge/agents/{name}.md", text, f"chore: {name}")
+    text = (template / ".gitignore").read_text("utf-8")
+    env.git_world.commit_file(lead, ".gitignore", text, "chore: gitignore")
+    if config is not None:
+        env.git_world.commit_file(lead, ".forge/config.yml", config, "chore: config")
+    env.git_world.push(lead, "main")
+
+
+def big_task(env: Env, task_id: str = "M1-T01") -> int:
+    body = task_body(task_id, ("api",)).replace("size: S", "size: M")
+    issue = env.fake.create_issue(f"[{task_id}] task", body, labels=["forge:task", "status:ready"])
+    return issue.number
+
+
+def test_next_delegates_an_m_task(env: Env) -> None:
+    commit_all_subagents(env)
+    n = big_task(env)
+    code, out = env.invoke(env.clone("alice"), "next")
+    assert code == 0, out
+    assert (env.worktree(n) / ".claude/agents/forge-implementer.md").is_file()
+    assert out["data"]["context"]["delegation"] == {
+        "mode": "auto",
+        "requested": "auto",
+        "source": "project",
+        "delegate": True,
+        "reason": "size M",
+        "subagent": "forge-implementer",
+        "model": "sonnet",
+        "warnings": [],
+        "notes": [],
+    }
+
+
+def test_next_delegation_override_off(env: Env) -> None:
+    commit_all_subagents(env)
+    big_task(env)
+    code, out = env.invoke(env.clone("alice"), "next", "--delegation", "off")
+    assert code == 0, out
+    delegation = out["data"]["context"]["delegation"]
+    assert (delegation["mode"], delegation["source"], delegation["delegate"]) == (
+        "off",
+        "invocation",
+        False,
+    )
+    assert delegation["reason"] == "requested by --delegation"
+
+
+def test_next_small_task_is_not_delegated_by_auto(env: Env) -> None:
+    commit_all_subagents(env)
+    env.task("M1-T01")
+    code, out = env.invoke(env.clone("alice"), "next")
+    assert code == 0
+    delegation = out["data"]["context"]["delegation"]
+    assert (delegation["mode"], delegation["delegate"]) == ("auto", False)
+    assert delegation["reason"] == "1 zone, size S"
+
+
+def test_next_human_output_has_the_delegation_block(env: Env) -> None:
+    commit_all_subagents(env)
+    big_task(env)
+    result = env.human(env.clone("alice"), "next")
+    assert result.exit_code == 0, result.output
+    assert "## Delegation" in result.stdout
+    assert "- decision: delegate to `forge-implementer` (`sonnet`): size M" in result.stdout
+
+
+def test_task_show_reports_delegation_in_the_worktree(env: Env) -> None:
+    commit_all_subagents(env)
+    n = big_task(env)
+    assert env.invoke(env.clone("alice"), "next")[0] == 0
+    code, out = env.invoke(env.worktree(n), "task", "show")
+    assert code == 0
+    assert out["data"]["delegation"]["delegate"] is True
+    code, out = env.invoke(env.worktree(n), "task", "show", "--delegation", "off")
+    assert out["data"]["delegation"]["mode"] == "off"
+    human = env.human(env.worktree(n), "task", "show", "--delegation", "on")
+    assert "## Delegation" in human.stdout
+    assert "- mode: on (requested on by --delegation)" in human.stdout
+
+
+def test_task_show_in_main_clone_without_rendered_files_is_off_with_hint(env: Env) -> None:
+    commit_all_subagents(env)
+    big_task(env)
+    code, out = env.invoke(env.clone("alice"), "task", "show", "M1-T01", "--delegation", "on")
+    assert code == 0
+    delegation = out["data"]["delegation"]
+    assert (delegation["mode"], delegation["requested"]) == ("off", "on")
+    assert delegation["reason"] == "forge-implementer not rendered"
+    infos = [m["text"] for m in out["messages"] if m["level"] == "info"]
+    assert any("forge adapters generate --local" in t for t in infos)
+
+
+def test_task_show_without_profile_is_off(env: Env) -> None:
+    big_task(env)
+    repo = env.clone("alice")
+    result = runner.invoke(app, ["--json", "--repo", str(repo), "task", "show", "M1-T01"])
+    assert result.exit_code == 0, result.output
+    delegation = json.loads(result.stdout)["data"]["delegation"]
+    assert (delegation["mode"], delegation["reason"]) == ("off", "no profile")
+    human = runner.invoke(app, ["--repo", str(repo), "task", "show", "M1-T01"])
+    assert "## Delegation" in human.stdout
+    assert "implement in the main session: no profile" in human.stdout
+
+
+def test_task_show_profile_mode_and_policy_fallback(env: Env) -> None:
+    config = CONFIG + "delegation:\n  default: auto\n  allowed: [off, auto]\n"
+    commit_all_subagents(env, config)
+    n = big_task(env)
+    assert env.invoke(env.clone("alice"), "next")[0] == 0
+    worktree = env.worktree(n)
+    env.profile("alice")
+    path = env.xdg / "forge" / "profile.yml"
+    path.write_text(path.read_text() + "delegation: off\n")
+    result = runner.invoke(app, ["--json", "--repo", str(worktree), "task", "show"])
+    delegation = json.loads(result.stdout)["data"]["delegation"]
+    assert (delegation["mode"], delegation["source"]) == ("off", "profile")
+    # an override the project does not allow falls back to the project default, with a warning
+    code, out = env.invoke(worktree, "task", "show", "--delegation", "on")
+    assert code == 0
+    delegation = out["data"]["delegation"]
+    assert (delegation["mode"], delegation["requested"], delegation["delegate"]) == (
+        "auto",
+        "on",
+        True,
+    )
+    warnings = [m["text"] for m in out["messages"] if m["level"] == "warning"]
+    assert any("delegation.allowed" in w for w in warnings)
+
+
+def test_task_show_rejects_an_unknown_delegation_mode(env: Env) -> None:
+    env.task("M1-T01")
+    result = env.human(env.clone("alice"), "task", "show", "M1-T01", "--delegation", "always")
+    assert result.exit_code == 1
+    assert "always" in result.output
+
+
+# ------------------------------------------------------------ delegation: read-only profile
+
+
+def _show(env: Env, repo: Path, *args: str) -> tuple[int, dict[str, Any]]:
+    """``task show --json`` without rewriting the profile (it is set up by the test)."""
+    env.fake.fake_set_user("alice")
+    result = runner.invoke(app, ["--json", "--repo", str(repo), "task", "show", *args])
+    return result.exit_code, json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("how", ["flag", "env"])
+def test_task_show_unknown_agent_never_fails(
+    env: Env, monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    commit_all_subagents(env, OFF_CONFIG)  # delegation off: messages must match v0.1.0
+    env.task("M1-T01")
+    repo = env.clone("alice")
+    env.profile("alice")
+    _, baseline = _show(env, repo, "M1-T01")
+    if how == "flag":
+        env.fake.fake_set_user("alice")
+        result = runner.invoke(
+            app, ["--json", "--repo", str(repo), "--agent", "ghost", "task", "show", "M1-T01"]
+        )
+        code, out = result.exit_code, json.loads(result.stdout)
+    else:
+        monkeypatch.setenv("FORGE_AGENT", "ghost")
+        code, out = _show(env, repo, "M1-T01")
+    assert code == 0, out
+    assert out["messages"] == baseline["messages"]
+    assert any("'ghost' is not in the profile" in n for n in out["data"]["delegation"]["notes"])
+
+
+def test_task_show_invalid_profile_is_one_note_inside_delegation(env: Env) -> None:
+    commit_all_subagents(env, OFF_CONFIG)  # delegation off: messages must match v0.1.0
+    env.task("M1-T01")
+    repo = env.clone("alice")
+    path = env.profile("alice")
+    _, baseline = _show(env, repo, "M1-T01")
+    path.write_text("github: [not, a, login]\n")
+    code, out = _show(env, repo, "M1-T01")
+    assert code == 0
+    assert out["messages"] == baseline["messages"]
+    notes = out["data"]["delegation"]["notes"]
+    assert [n for n in notes if n.startswith("profile not used:")] == notes[-1:]
+    assert len([n for n in notes if "profile" in n]) == 1
+
+
+# ------------------------------------------------------------ delegation: recorded override
+
+
+def _current_json(worktree: Path) -> dict[str, Any]:
+    data: dict[str, Any] = json.loads((worktree / ".forge/local/current.json").read_text())
+    return data
+
+
+def test_next_records_the_override_and_task_show_follows_it(env: Env) -> None:
+    commit_all_subagents(env)
+    n = env.task("M1-T01")
+    code, out = env.invoke(env.clone("alice"), "next", "--delegation", "on")
+    assert code == 0, out
+    worktree = env.worktree(n)
+    assert _current_json(worktree)["delegation_override"] == "on"
+    assert out["data"]["current"]["delegation_override"] == "on"
+    code, out = env.invoke(worktree, "task", "show")
+    delegation = out["data"]["delegation"]
+    assert (delegation["mode"], delegation["source"], delegation["delegate"]) == (
+        "on",
+        "invocation",
+        True,
+    )
+
+
+def test_task_show_override_on_the_current_task_is_recorded(env: Env) -> None:
+    commit_all_subagents(env)
+    n = env.task("M1-T01")
+    other = env.task("M1-T02", ("web",))
+    assert env.invoke(env.clone("alice"), "next", "--task", str(n))[0] == 0
+    worktree = env.worktree(n)
+    assert "delegation_override" not in _current_json(worktree)
+    # another task: shown with the override, nothing recorded
+    env.invoke(worktree, "task", "show", str(other), "--delegation", "off")
+    assert "delegation_override" not in _current_json(worktree)
+    # the current task, by default and by reference
+    env.invoke(worktree, "task", "show", "--delegation", "off")
+    assert _current_json(worktree)["delegation_override"] == "off"
+    env.invoke(worktree, "task", "show", "M1-T01", "--delegation", "on")
+    assert _current_json(worktree)["delegation_override"] == "on"
+    # a later run without the flag follows the recorded override
+    _, out = env.invoke(worktree, "task", "show")
+    assert out["data"]["delegation"]["source"] == "invocation"
+
+
+def test_resume_keeps_the_recorded_override(env: Env) -> None:
+    n = env.task("M1-T01")
+    repo = env.clone("alice")
+    assert env.invoke(repo, "next", "--delegation", "off")[0] == 0
+    code, out = env.invoke(repo, "next", "--task", str(n))
+    assert code == 0, out
+    assert _current_json(env.worktree(n))["delegation_override"] == "off"
+
+
+def test_status_me_reports_the_recorded_override(env: Env) -> None:
+    commit_all_subagents(env)
+    n = big_task(env)
+    assert env.invoke(env.clone("alice"), "next", "--delegation", "off")[0] == 0
+    code, out = env.invoke(env.worktree(n), "status", "--me")
+    assert code == 0, out
+    delegation = out["data"]["me"]["current"]["delegation"]
+    assert (delegation["mode"], delegation["source"], delegation["delegate"]) == (
+        "off",
+        "invocation",
+        False,
+    )
+
+
+# ------------------------------------------------------- delegation: v0.1.0 equivalence
+
+
+OFF_CONFIG = CONFIG + "delegation:\n  default: off\n  allowed: [off]\n"
+V010_CONTEXT_KEYS = [
+    "task",
+    "metadata",
+    "issue",
+    "body",
+    "spec",
+    "zones",
+    "dependencies",
+    "handoff",
+    "adrs",
+    "lease",
+    "warnings",
+]
+V010_CURRENT_KEYS = [
+    "path",
+    "task",
+    "issue",
+    "branch",
+    "base",
+    "claim",
+    "agent",
+    "claimed_at",
+    "worktree",
+]
+
+
+def _without(data: dict[str, Any], *keys: str) -> dict[str, Any]:
+    return {k: v for k, v in data.items() if k not in keys}
+
+
+def test_delegation_off_everywhere_equals_v010(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Done-when of ADR 0017 for `next`, `task show` and `status`.
+
+    Approach: `off` in the project, the profile and `--delegation off`; each payload is
+    compared with the same command run with the delegation code path neutralised (the hook
+    patched to do nothing, as in v0.1.0), after removing only the new fields
+    (`delegation`, and `delegation_override` in `current`); `messages` must be equal. For
+    `next`, which cannot be re-run on the same claim, the claimed context is compared with the
+    neutralised `task show` of the same task, the key sets are pinned to v0.1.0's, and the
+    delegation step is checked to add no message.
+    """
+    commit_all_subagents(env, OFF_CONFIG)
+    env.extra_top = "delegation: off\n"
+    n = big_task(env)
+
+    added: list[int] = []
+    real_attach = _claims.attach_delegation
+
+    def spy(*args: Any, **kwargs: Any) -> None:
+        result = args[6]
+        before = len(result.messages)
+        real_attach(*args, **kwargs)
+        added.append(len(result.messages) - before)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(_claims, "attach_delegation", spy)
+        code, nxt = env.invoke(env.clone("alice"), "next", "--delegation", "off")
+    assert code == 0, nxt
+    assert added == [0]
+    data = nxt["data"]
+    assert list(data["context"]) == [*V010_CONTEXT_KEYS[:10], "delegation", "warnings"]
+    assert list(data["current"]) == [*V010_CURRENT_KEYS, "delegation_override"]
+    assert data["context"]["delegation"]["mode"] == "off"
+    assert all(not m["text"].lower().count("delegation") for m in nxt["messages"])
+
+    worktree = env.worktree(n)
+    real = env.invoke(worktree, "task", "show", "--delegation", "off")
+    with monkeypatch.context() as patch:
+        patch.setattr(_claims, "show_delegation", lambda *a, **k: None)
+        neutral = env.invoke(worktree, "task", "show", "--delegation", "off")
+    assert real[0] == neutral[0] == 0
+    assert real[1]["messages"] == neutral[1]["messages"]
+    assert _without(real[1]["data"], "delegation") == _without(neutral[1]["data"], "delegation")
+    assert list(_without(neutral[1]["data"], "delegation")) == V010_CONTEXT_KEYS
+    assert _without(data["context"], "delegation") == _without(neutral[1]["data"], "delegation")
+
+    real_status = env.invoke(worktree, "status")
+    with monkeypatch.context() as patch:
+        patch.setattr(report, "delegation_for", lambda *a, **k: None)
+        neutral_status = env.invoke(worktree, "status")
+    assert real_status[0] == neutral_status[0]
+    assert real_status[1]["messages"] == neutral_status[1]["messages"]
+    real_me = real_status[1]["data"]["me"]["current"]
+    neutral_me = neutral_status[1]["data"]["me"]["current"]
+    assert real_me["delegation"]["mode"] == "off" and neutral_me["delegation"] is None
+    real_data = real_status[1]["data"]
+    real_data["me"]["current"] = _without(real_me, "delegation")
+    neutral_data = neutral_status[1]["data"]
+    neutral_data["me"]["current"] = _without(neutral_me, "delegation")
+    assert real_data == neutral_data
+
+
+# ------------------------------------------------------- delegation: saved agent, worktree
+
+
+def test_status_me_uses_the_agent_saved_for_the_task(env: Env) -> None:
+    commit_all_subagents(env)
+    env.extra_agents = CODEX_AGENT
+    n = big_task(env)
+    env.fake.fake_set_user("alice")
+    env.profile("alice")
+    repo = env.clone("alice")
+    result = runner.invoke(app, ["--json", "--repo", str(repo), "--agent", "codex", "next"])
+    assert result.exit_code == 0, result.output
+    assert _current_json(env.worktree(n))["agent"] == "codex"
+    # status runs with the default agent (claude) but reports the claim's agent (codex)
+    code, out = env.invoke(env.worktree(n), "status", "--me")
+    assert code == 0, out
+    assert out["data"]["me"]["agent"] == "claude"
+    delegation = out["data"]["me"]["current"]["delegation"]
+    assert (delegation["delegate"], delegation["model"]) == (True, "gpt-standard")
+    # task show agrees
+    _, shown = env.invoke(env.worktree(n), "task", "show")
+    assert shown["data"]["delegation"]["model"] == "gpt-standard"
+
+
+def test_task_show_from_main_clone_decides_in_the_task_worktree(env: Env) -> None:
+    commit_all_subagents(env)
+    n = big_task(env)
+    repo = env.clone("alice")
+    assert env.invoke(repo, "next")[0] == 0
+    assert not (repo / ".claude/agents/forge-implementer.md").exists()
+    code, out = env.invoke(repo, "task", "show", "M1-T01")
+    assert code == 0
+    delegation = out["data"]["delegation"]
+    assert (delegation["delegate"], delegation["model"]) == (True, "sonnet")
+    # an override given from the main clone is saved in the task's worktree
+    env.invoke(repo, "task", "show", "M1-T01", "--delegation", "off")
+    assert _current_json(env.worktree(n))["delegation_override"] == "off"
+    assert not (repo / ".forge/local/current.json").exists()
+
+
+def test_override_write_rereads_current_json(env: Env) -> None:
+    n = env.task("M1-T01")
+    assert env.invoke(env.clone("alice"), "next")[0] == 0
+    worktree = env.worktree(n)
+    location = _claims.find_current_task(Git(worktree))
+    assert location is not None and location.current is not None
+    # a concurrent update (e.g. a sync moving the claim) lands after our read
+    newer = {**_current_json(worktree), "claim": "f" * 40}
+    (worktree / ".forge/local/current.json").write_text(json.dumps(newer))
+    assert _claims.remember_override(location, n, "on") == "on"
+    saved = _current_json(worktree)
+    assert saved["claim"] == "f" * 40
+    assert saved["delegation_override"] == "on"

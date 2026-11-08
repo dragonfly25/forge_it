@@ -70,7 +70,20 @@
         ]
       },
       "pull": null,
-      "ci": null
+      "ci": null,
+      "delegation": {
+        "mode": "off",
+        "requested": "auto",
+        "source": "project",
+        "delegate": false,
+        "reason": ".forge/agents/implementer.md missing",
+        "subagent": "forge-implementer",
+        "model": null,
+        "warnings": [],
+        "notes": [
+          "delegation auto needs a valid .forge/agents/implementer.md; copy forge/templates/project/.forge/agents/implementer.md from the installed Forge package; using off"
+        ]
+      }
     },
     "others": [
       {

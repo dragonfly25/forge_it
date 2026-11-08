@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from forge.core.config import DelegationMode, parse_delegation_mode
 from forge.core.errors import ConfigError, ForgeError, PreconditionError
 from forge.core.git import Git
 from forge.core.tasks import TASK_ID_RE, TaskMetadata
@@ -42,6 +43,7 @@ _TASK_BRANCH_RE = re.compile(r"^task/([1-9][0-9]*)$")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 _TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _CURRENT_KEYS = ("task", "issue", "branch", "base", "claim", "agent", "claimed_at", "worktree")
+_OPTIONAL_CURRENT_KEYS = ("delegation_override",)
 
 
 # -- paths -----------------------------------------------------------------------------------
@@ -342,7 +344,9 @@ class CurrentTask:
 
     ``base`` is the base sha (``origin/<default>`` at claim time, or the merge-base on a
     resume), ``claim`` the claim commit sha, ``worktree`` the worktree path (None when the
-    task is checked out in the main working tree).
+    task is checked out in the main working tree). ``delegation_override`` is the last
+    per-run ``--delegation`` mode given for the task (ADR 0017), ``None`` when none was; it
+    is written only when set, so files without it stay valid.
     """
 
     task: str
@@ -353,10 +357,11 @@ class CurrentTask:
     agent: str
     claimed_at: datetime
     worktree: Path | None
+    delegation_override: DelegationMode | None = None
 
     def to_data(self) -> dict[str, Any]:
         """Return the JSON-able form written to ``current.json``."""
-        return {
+        data: dict[str, Any] = {
             "task": self.task,
             "issue": self.issue,
             "branch": self.branch,
@@ -366,6 +371,9 @@ class CurrentTask:
             "claimed_at": format_timestamp(self.claimed_at),
             "worktree": None if self.worktree is None else str(self.worktree),
         }
+        if self.delegation_override is not None:
+            data["delegation_override"] = self.delegation_override
+        return data
 
 
 def write_current(workspace: Path, current: CurrentTask) -> Path:
@@ -398,7 +406,7 @@ def _parse_current(data: Any, file: Path) -> CurrentTask:
     missing = [k for k in _CURRENT_KEYS if k not in data]
     if missing:
         raise _corrupt(file, missing[0], "missing key")
-    unknown = sorted(set(data) - set(_CURRENT_KEYS))
+    unknown = sorted(set(data) - set(_CURRENT_KEYS) - set(_OPTIONAL_CURRENT_KEYS))
     if unknown:
         raise _corrupt(file, unknown[0], "unknown key")
 
@@ -430,6 +438,11 @@ def _parse_current(data: Any, file: Path) -> CurrentTask:
     worktree = data["worktree"]
     if worktree is not None and (not isinstance(worktree, str) or not worktree):
         raise _corrupt(file, "worktree", "expected a path or null")
+    override: DelegationMode | None = None
+    if data.get("delegation_override") is not None:
+        override = parse_delegation_mode(data["delegation_override"])
+        if override is None or not isinstance(data["delegation_override"], str):
+            raise _corrupt(file, "delegation_override", "expected off, auto, on or null")
     return CurrentTask(
         task=task,
         issue=issue,
@@ -439,6 +452,7 @@ def _parse_current(data: Any, file: Path) -> CurrentTask:
         agent=text("agent"),
         claimed_at=claimed_at,
         worktree=None if worktree is None else Path(worktree),
+        delegation_override=override,
     )
 
 

@@ -31,6 +31,7 @@ from forge.core.claim import (
 )
 from forge.core.config import ForgeConfig, check_cli_version
 from forge.core.context import defined_acceptance_criteria, latest_handoff
+from forge.core.delegation import Delegation, delegation_for
 from forge.core.errors import ForgeError
 from forge.core.git import Git
 from forge.core.github import CiStatus, GitHubClient, GitHubError, Issue, PullRequest
@@ -338,7 +339,11 @@ class DriftInfo:
 
 @dataclass(frozen=True)
 class CurrentTaskInfo:
-    """The task the working directory belongs to, with its claim, sync, drift and CI."""
+    """The task the working directory belongs to, with its claim, sync, drift and CI.
+
+    ``delegation`` is the effective delegation mode and decision for the task (ADR 0017),
+    decided in its worktree; ``None`` for a closed task.
+    """
 
     task: TaskRef
     source: str
@@ -349,6 +354,7 @@ class CurrentTaskInfo:
     drift: DriftInfo | None
     pull: PullInfo | None
     ci: CiInfo | None
+    delegation: Delegation | None = None
 
     def to_data(self) -> dict[str, Any]:
         """JSON form."""
@@ -362,6 +368,7 @@ class CurrentTaskInfo:
             "drift": None if self.drift is None else self.drift.to_data(),
             "pull": None if self.pull is None else self.pull.to_data(),
             "ci": None if self.ci is None else self.ci.to_data(),
+            "delegation": None if self.delegation is None else self.delegation.to_data(),
         }
 
 
@@ -956,7 +963,7 @@ def _current(run: _Run) -> CurrentTaskInfo | None:
         return None
     number = location.issue
     view = run.views.get(number)
-    base = {
+    base: dict[str, Any] = {
         "source": location.source,
         "branch": location.branch,
         "worktree": str(location.workspace),
@@ -987,8 +994,28 @@ def _current(run: _Run) -> CurrentTaskInfo | None:
         drift=drift,
         pull=None if pr is None else _pull_info(pr),
         ci=None if pr is None else run.ci_for(pr),
+        delegation=delegation_for(
+            view.record.meta,
+            config=run.ctx.config,
+            profile=run.ctx.profile,
+            agent=_task_agent(run, location),
+            worktree=location.workspace,
+            override=None if location.current is None else location.current.delegation_override,
+            presets=run.ctx.presets,
+        ),
         **base,
     )
+
+
+def _task_agent(run: _Run, location: TaskLocation) -> AgentProfile | None:
+    """The agent saved in ``current.json`` for the current task when the profile has it,
+    else the active agent (as ``task show`` and ``ship`` do)."""
+    profile, saved = run.ctx.profile, location.current
+    if profile is not None and saved is not None:
+        for agent in profile.agents:
+            if agent.id == saved.agent:
+                return agent
+    return run.ctx.agent
 
 
 def _sync_and_drift(

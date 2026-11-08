@@ -210,6 +210,22 @@ def test_set_effort_and_default_agent(profile_file: Path, tmp_path: Path, monkey
     assert profile.agents[0].effort[Effort.HIGH] == "max"
 
 
+def test_set_help_mentions_delegation() -> None:
+    result = runner.invoke(app, ["profile", "set", "--help"], terminal_width=200)
+    assert result.exit_code == 0
+    assert "delegation=<off|auto|on>" in " ".join(result.output.split())
+
+
+def test_set_delegation(profile_file: Path, tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["profile", "set", "delegation=on"])
+    assert result.exit_code == 0, result.output
+    assert load_profile(profile_file).delegation == "on"
+    result = runner.invoke(app, ["profile", "set", "delegation=sometimes"])
+    assert result.exit_code == 1
+    assert load_profile(profile_file).delegation == "on"
+
+
 def test_set_invalid_keeps_profile(profile_file: Path, tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["profile", "set", "nobody.strong=opus"])

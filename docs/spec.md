@@ -48,7 +48,7 @@ This document is the source of truth for building Forge. When something here is 
 | Lead | The milestone lead: plans, approves the plan, triages proposals, decides escalations. Rotates per milestone |
 | Tier | The model strength a task needs: `strong`, `standard`, `light` |
 | Handoff | A structured note that lets another person/account/provider resume a task |
-| Subagent | A role-named helper agent (explorer, test-writer, reviewer) defined once in `.forge/agents/`, rendered per machine (§12.1) |
+| Subagent | A role-named helper agent (explorer, test-writer, implementer, reviewer) defined once in `.forge/agents/`, rendered per machine (§12.1) |
 | Profile | Per-machine file mapping abstract tiers/effort to concrete models for each of the user's agents (§6.4, §6.5) |
 | Preset | Default tier → model mapping per tool, shipped with Forge and proposed during setup (§6.5) |
 
@@ -574,13 +574,16 @@ tools: [read, edit, shell]
 <instructions>
 ```
 
-v0 ships three:
+v0 ships these subagents:
 
 | Subagent | Tier / effort | Used by | Purpose |
 |---|---|---|---|
 | `explorer` | light / low | `/next`, `/dev` | Read code, specs, ADRs; return a compact context summary to keep the main agent's context clean |
 | `test-writer` | task / medium | `/dev` | Write and run tests for `done_when` |
 | `reviewer` | strong / high | `/review`, self-check before `/ship` | Review against ACs, zones, contracts, tests |
+| `implementer` | standard / medium | `/dev` (when delegation is on) | Implement one brief from the lead agent inside the listed files and zones (added in v0.2, see [ADR 0017](decisions/0017-implementer-subagent-and-delegation.md)) |
+
+Note: v0.1 shipped the first three. A fourth subagent, `implementer`, was added in v0.2 for delegation. The delegation switch (`off`, `auto`, `on`) is defined in ADR 0017, which amends this section.
 
 Rules:
 - Every command must work **without** subagents (tools/models that do not support them): prompts say "if subagents are available, delegate X to `<name>`; otherwise do it yourself".

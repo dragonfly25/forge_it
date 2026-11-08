@@ -288,6 +288,20 @@ def _render_current(console: Console, current: dict[str, Any], now: datetime) ->
         text = Text(f"  PR       #{pull['number']}{' (draft)' if pull['draft'] else ''} · CI ")
         text.append_text(_ci(current.get("ci")))
         console.print(text)
+    delegation = current.get("delegation")
+    if delegation is not None:
+        console.print(f"  Delegate {_delegation(delegation)}")
+
+
+def _delegation(delegation: dict[str, Any]) -> str:
+    """One line for the effective delegation mode of the current task (ADR 0017)."""
+    mode, reason = delegation["mode"], delegation["reason"]
+    if delegation["delegate"]:
+        model = f" ({delegation['model']})" if delegation.get("model") else ""
+        return f"{mode} → {delegation['subagent']}{model} · {reason}"
+    if mode == "auto":
+        return f"auto → main session · {reason}"
+    return f"{mode} · {reason}"
 
 
 def _render_drift(console: Console, drift: dict[str, Any], now: datetime) -> None:

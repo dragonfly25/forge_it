@@ -9,6 +9,7 @@ import typer
 from forge.commands import _claims
 from forge.commands._output import get_options, run_command
 from forge.core.claim import NextOptions, claim_next
+from forge.core.config import DelegationMode
 from forge.core.output import Result
 
 
@@ -31,6 +32,16 @@ def next_task(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Print the ordered candidates; push nothing.")
     ] = False,
+    delegation: Annotated[
+        DelegationMode | None,
+        typer.Option(
+            "--delegation",
+            help=(
+                "Delegation mode for this task (saved locally until release or handoff): "
+                "off, auto or on."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Select and claim the next task, create its worktree and print its context."""
     opts = get_options(ctx)
@@ -43,6 +54,7 @@ def next_task(
             lambda claim_ctx: claim_next(claim_ctx, options),
             rendered,
             use_worktree=not no_worktree,
+            delegation=delegation,
         )
 
     run_command(opts, run, lambda result: _claims.render_claim(result, rendered))

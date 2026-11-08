@@ -11,6 +11,7 @@ import pytest
 import yaml
 from packaging.specifiers import SpecifierSet
 
+from forge.commands.docs import describe_cli
 from forge.core import adapters as A
 from forge.core.adapters import claude, codex, generic
 from forge.core.adapters._common import GENERATED_MARK, Project, project_from_texts
@@ -78,7 +79,7 @@ def repo(tmp_path: Path) -> Path:
     root = tmp_path / "shop"
     root.mkdir()
     Git(root).run("init", "--quiet", "--initial-branch=main")
-    init_project(root, VALUES, adapters=["claude", "codex"])
+    init_project(root, VALUES, adapters=["claude", "codex"], cli=describe_cli())
     return root
 
 
@@ -103,7 +104,7 @@ def test_agents_md_region_content() -> None:
     )
     for prompt in project.prompts:
         assert f"| `/{prompt.name}` | `.forge/prompts/{prompt.name}.md` |" in text
-    for agent in ("forge-explorer", "forge-test-writer", "forge-reviewer"):
+    for agent in ("forge-explorer", "forge-test-writer", "forge-reviewer", "forge-implementer"):
         assert f"`{agent}`" in text
     # Rules are inlined (headings shifted under "## Rules"), prompt bodies are not.
     rules_line = next(
@@ -355,6 +356,33 @@ def test_local_render_codex_toml() -> None:
     assert "model" not in writer
     reviewer = tomllib.loads(files[".codex/agents/forge-reviewer.toml"])
     assert (reviewer["model"], reviewer["model_reasoning_effort"]) == ("gpt-6-astra", "xhigh")
+
+
+def test_local_render_implementer_for_claude_and_codex() -> None:
+    files = {f.path.as_posix(): f.content for f in local(config()).files}
+    meta, body = meta_and_body(files[".claude/agents/forge-implementer.md"])
+    assert meta == {
+        "name": "forge-implementer",
+        "description": meta["description"],
+        "tools": "Read, Grep, Glob, Edit, Write, Bash",
+        "model": "sonnet",
+        "effort": "medium",
+    }
+    assert "implementer.md" in body.splitlines()[0]
+    data = tomllib.loads(files[".codex/agents/forge-implementer.toml"])
+    assert data["name"] == "forge-implementer"
+    # The Codex agent serves no standard tier, so the next tier up is used.
+    assert (data["model"], data["model_reasoning_effort"]) == ("gpt-6-astra", "medium")
+    assert data["developer_instructions"].strip()
+    assert "tools" not in data
+
+
+def test_min_tier_for_raises_the_implementer() -> None:
+    cfg = config({"implementer": Tier.STRONG})
+    files = {f.path.as_posix(): f.content for f in local(cfg).files}
+    meta, _ = meta_and_body(files[".claude/agents/forge-implementer.md"])
+    assert (meta["model"], meta["effort"]) == ("opus", "medium")
+    assert tomllib.loads(files[".codex/agents/forge-implementer.toml"])["model"] == "gpt-6-astra"
 
 
 def test_min_tier_for_raises_the_subagent() -> None:

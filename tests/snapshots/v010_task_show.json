@@ -1,0 +1,100 @@
+{
+  "exit_code": 0,
+  "ok": true,
+  "code": 0,
+  "data": {
+    "task": "M1-T01",
+    "metadata": {
+      "id": "M1-T01",
+      "spec": "specs/m1/x.md",
+      "covers": [
+        "AC-1",
+        "AC-9"
+      ],
+      "depends_on": [],
+      "zones": [
+        "api",
+        "web"
+      ],
+      "size": "M",
+      "tier": "standard",
+      "type": "impl",
+      "done_when": [
+        "tests pass"
+      ],
+      "allow_contract_change": false
+    },
+    "issue": {
+      "number": 1,
+      "title": "[M1-T01] task",
+      "url": "https://github.com/acme/shop/issues/1",
+      "state": "open",
+      "labels": [
+        "forge:task",
+        "size:M",
+        "status:in-progress",
+        "tier:standard",
+        "type:impl"
+      ],
+      "assignees": [
+        "alice"
+      ]
+    },
+    "body": "Implement M1-T01.",
+    "spec": {
+      "path": "specs/m1/x.md",
+      "acceptance_criteria": [
+        {
+          "id": "AC-1",
+          "text": "- AC-1: the API answers."
+        },
+        {
+          "id": "AC-9",
+          "text": null
+        }
+      ]
+    },
+    "zones": [
+      {
+        "name": "api",
+        "paths": [
+          "src/api/**"
+        ],
+        "contract": false,
+        "known": true
+      },
+      {
+        "name": "web",
+        "paths": [
+          "src/web/**"
+        ],
+        "contract": false,
+        "known": true
+      }
+    ],
+    "dependencies": [],
+    "handoff": null,
+    "adrs": [],
+    "lease": {
+      "state": "live",
+      "owner": "alice",
+      "agent": "claude",
+      "claim": "<sha>",
+      "claimed_at": "2026-11-02T09:00:00Z",
+      "heartbeat_at": "2026-11-02T09:00:00Z",
+      "released_at": null,
+      "last_activity": "2026-11-02T09:00:00Z",
+      "stale_at": "2026-11-03T09:00:00Z"
+    },
+    "warnings": [
+      "AC-9 is not defined in specs/m1/x.md"
+    ]
+  },
+  "messages": [
+    {
+      "level": "warning",
+      "text": "AC-9 is not defined in specs/m1/x.md",
+      "hint": null
+    }
+  ]
+}

@@ -306,3 +306,65 @@ def test_apply_setting_errors(spec_profile: Profile, setting: str, fragment: str
         apply_setting(spec_profile, setting)
     assert fragment in exc.value.message
     assert exc.value.hint
+
+
+# -- delegation (ADR 0017) --------------------------------------------------------------------
+
+
+def test_delegation_absent_is_none(tmp_path: Path) -> None:
+    assert load_profile(make(tmp_path)).delegation is None
+
+
+@pytest.mark.parametrize(
+    ("line", "mode"),
+    [
+        ("delegation: off\n", "off"),  # YAML boolean, read as off
+        ("delegation: on\n", "on"),
+        ("delegation: auto\n", "auto"),
+        ('delegation: "off"\n', "off"),
+    ],
+)
+def test_delegation_field(tmp_path: Path, line: str, mode: str) -> None:
+    assert load_profile(make(tmp_path, extra_top=line)).delegation == mode
+
+
+@pytest.mark.parametrize("line", ["delegation: sometimes\n", "delegation: 3\n"])
+def test_delegation_invalid(tmp_path: Path, line: str) -> None:
+    err = error(make(tmp_path, extra_top=line))
+    assert err.key == "delegation"
+    assert "delegation: auto" in (err.hint or "")
+
+
+def test_delegation_round_trip_and_dump_order(tmp_path: Path) -> None:
+    profile = load_profile(make(tmp_path, extra_top="delegation: off\n"))
+    text = dump_profile(profile)
+    keys = [line.split(":")[0] for line in text.splitlines() if not line.startswith((" ", "-"))]
+    assert keys == ["github", "agents", "default_agent", "worktrees_dir", "delegation"]
+    assert "delegation: 'off'" in text  # quoted, so YAML does not read it as a boolean
+    target = tmp_path / "saved.yml"
+    save_profile(profile, target)
+    assert load_profile(target) == profile
+
+
+def test_dump_without_delegation_has_no_key(spec_profile: Profile) -> None:
+    assert "delegation" not in dump_profile(spec_profile)
+
+
+@pytest.mark.parametrize("mode", ["off", "auto", "on"])
+def test_apply_delegation(spec_profile: Profile, mode: str) -> None:
+    updated = apply_setting(spec_profile, f"delegation={mode}")
+    assert updated.delegation == mode
+    assert spec_profile.delegation is None
+
+
+def test_apply_delegation_invalid(spec_profile: Profile) -> None:
+    with pytest.raises(ForgeError) as exc:
+        apply_setting(spec_profile, "delegation=always")
+    assert "invalid delegation mode" in exc.value.message
+    assert exc.value.hint and "delegation=auto" in exc.value.hint
+
+
+def test_set_usage_mentions_delegation(spec_profile: Profile) -> None:
+    with pytest.raises(ForgeError) as exc:
+        apply_setting(spec_profile, "strong=opus")
+    assert "delegation=<off|auto|on>" in (exc.value.hint or "")

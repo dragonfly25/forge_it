@@ -6,7 +6,7 @@ its tick when its text is unchanged, so ship never unticks what a reviewer check
 
 Block sections, in order: header (``Closes #n``, task id, spec path), acceptance criteria,
 done when, out-of-zone changes, conflict resolutions (from ``sync-log.json``) and the agent
-(id, tool, providers, resolved tier → model map).
+(id, tool, providers, resolved tier → model map, and the delegation decision of ADR 0017).
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from forge.core.delegation import Delegation
 from forge.core.sync import BACKUP_PREFIX
 
 BEGIN_MARKER = "<!-- forge:pr-begin -->"
@@ -80,7 +81,11 @@ class SyncResolutions:
 
 @dataclass(frozen=True)
 class AgentInfo:
-    """The author's agent and the model resolved for the task's tier (spec §6.5.7)."""
+    """The author's agent and the model resolved for the task's tier (spec §6.5.7).
+
+    ``delegation`` is the delegation decision for the task (ADR 0017): what Forge told the
+    agent, not what the agent did. ``None`` leaves the line out.
+    """
 
     id: str
     tool: str
@@ -92,6 +97,7 @@ class AgentInfo:
     effort_value: str | None
     tier_map: Mapping[str, str] = field(default_factory=dict)
     notes: tuple[str, ...] = ()
+    delegation: Delegation | None = None
 
 
 @dataclass(frozen=True)
@@ -238,6 +244,8 @@ def render_block(block: PrBlock) -> str:
         lines.append(
             "- Tier map: " + ", ".join(f"{tier} → `{m}`" for tier, m in agent.tier_map.items())
         )
+    if agent.delegation is not None:
+        lines.append(f"- Delegation: {agent.delegation.summary()}")
     lines += [f"- Note: {note}" for note in agent.notes]
     lines.append(END_MARKER)
     return "\n".join(lines)

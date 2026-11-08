@@ -15,6 +15,7 @@ A dev takes tasks and delivers them.
 - Hand a task off when blocked or out of tokens: `/forge-handoff`.
 - Propose work the plan missed. The agent files it as a proposal; the dev does not do it unprompted.
 - Escalate when a conflict or failing check belongs to someone else.
+- Choose how the code is written: `off`, `auto` or `on` (delegation), within what the project allows. See `onboarding.md`.
 
 A dev does not change the plan, the zones or the project config on their own.
 
@@ -29,7 +30,8 @@ The lead is the person responsible for one milestone. The role rotates between m
 - **Decide escalations**: when a task is labeled `blocked:conflict`, the lead helps decide who changes what.
 - **Watch the health**: `/forge-status` shows stale claims, proposals waiting, version mismatches and profile problems.
 - **Release**: when every task of the milestone is closed, run `/forge-release <milestone>`.
-- **Own the project config**: `.forge/config.yml` (checks, resolvers, model constraints) and `.forge/team.yml`.
+- **Own the project config**: `.forge/config.yml` (checks, resolvers, model constraints, delegation policy) and `.forge/team.yml`.
+- **Set the delegation policy**: the `delegation` section of `.forge/config.yml` sets the project default and the modes members may choose (`default: auto`, `allowed: [off, auto, on]`). Devs pick their own mode inside it, in their profile or for one task. The lead can raise the tier of `forge-implementer` with `models.min_tier_for: {implementer: strong}`.
 
 ## Who may do what
 
