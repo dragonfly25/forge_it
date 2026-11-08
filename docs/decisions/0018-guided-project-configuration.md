@@ -27,11 +27,11 @@ A new deterministic, offline command (no GitHub). It is the agent's feedback loo
 - **Load**: loads `config.yml`, `team.yml` and `zones.yml` independently.
 - **Errors**: one error per file that is missing or invalid. Each error names the file, the key and the fix, using the existing `ConfigError` of each loader.
 - **Warnings**, on files that load:
-  - `github.repo` or a team login still holds an init placeholder;
   - the team has no member with role `lead`;
   - tracked files (`git ls-files`) match no zone. The count and a sample are reported; Forge's own files (`.forge/`, `.github/`, `.claude/`, `.agents/`, `.codex/`, `AGENTS.md`, `CLAUDE.md`) are ignored;
   - a zone matches no tracked file, which is usually a typo in a glob;
   - the installed CLI does not satisfy `forge_version` (a warning, as in `forge plan validate`).
+- **Placeholders**: an init placeholder left in `github.repo` or in a team login is already rejected by the loaders. It is reported as an error on that key, not as a warning.
 - **Exit code**: `1` if any file has an error, `0` otherwise (warnings included). It is not on the list of commands that refuse to run on a version mismatch (README).
 - **Code layout**: the logic lives in `core/config_check.py`, and `commands/config.py` is thin.
 

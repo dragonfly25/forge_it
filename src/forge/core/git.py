@@ -347,6 +347,14 @@ class Git:
         )
         return sorted({*tracked, *untracked})
 
+    def tracked_files(self) -> list[str]:
+        """Paths of every file in the index (``git ls-files``), repository-relative and sorted.
+
+        Works from any subdirectory of the working tree and before the first commit.
+        """
+        out = self.run("ls-files", "--full-name", "-z", ":/").stdout
+        return sorted(set(_split_z(out)))
+
     def config_get(self, key: str) -> str | None:
         """Return the value of a git config key, or None when it is not set."""
         args = ("config", "--get", key)

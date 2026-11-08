@@ -56,6 +56,30 @@ Regenerate adapter files; --check fails on drift (§13).
 | `--check` | flag | no | - | Write nothing; exit 1 when files are out of date. |
 | `--local` | flag | no | - | Render machine-level subagents from your profile. |
 
+<a id="forge-config"></a>
+
+### `forge config`
+
+```text
+forge config [OPTIONS] COMMAND [ARGS]...
+```
+
+Check the project configuration files (ADR 0018).
+
+Subcommands:
+
+- [`forge config validate`](#forge-config-validate)
+
+<a id="forge-config-validate"></a>
+
+### `forge config validate`
+
+```text
+forge config validate [OPTIONS]
+```
+
+Validate config.yml, team.yml and zones.yml offline (ADR 0018).
+
 <a id="forge-docs"></a>
 
 ### `forge docs`
@@ -439,6 +463,7 @@ Print the task context: metadata, body, criteria, zones, dependencies, lease, AD
 | Prompt | Description | Args | Roles |
 | --- | --- | --- | --- |
 | `setup` | Check this machine, create or update your personal profile, and run the project setup | `[--check]` | dev, lead |
+| `configure` | Fill the project's config, team and zones from the codebase, validate them and open a PR | `[--update]` | lead |
 | `plan` | Turn a project spec into a roadmap, or a milestone's specs into a validated task plan, and open a PR | `roadmap <spec-file> \| <milestone> [--update] [--agent <id>]` | lead |
 | `next` | Pick and claim the next available task, then load its context | `[task-id] [--reclaim] [--agent <id>]` | dev |
 | `dev` | Implement the current task inside its zones, with tests, small commits and heartbeats | `[--solo\|--delegate]` | dev |

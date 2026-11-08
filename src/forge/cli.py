@@ -10,6 +10,7 @@ from typer.core import TyperGroup
 
 from forge import __version__
 from forge.commands import adapters as adapters_cmd
+from forge.commands import config as config_cmd
 from forge.commands import docs as docs_cmd
 from forge.commands import escalate as escalate_cmd
 from forge.commands import handoff as handoff_cmd
@@ -277,6 +278,10 @@ adapters_cmd.adapters_app.command(
     "generate", help="Regenerate adapter files; --check fails on drift (§13)."
 )(adapters_cmd.generate)
 app.add_typer(adapters_cmd.adapters_app, name="adapters")
+config_cmd.config_app.command(
+    "validate", help="Validate config.yml, team.yml and zones.yml offline (ADR 0018)."
+)(config_cmd.validate)
+app.add_typer(config_cmd.config_app, name="config")
 app.command("setup", help="Check this machine and create or update the profile (§6.5).")(
     setup_cmd.setup
 )
