@@ -22,6 +22,7 @@ from typing import Any
 
 from forge.core.claim import resolve_task_ref
 from forge.core.config import ForgeConfig
+from forge.core.delegation import Delegation
 from forge.core.errors import ForgeError
 from forge.core.git import Git
 from forge.core.github import Comment, GitHubClient, Issue
@@ -311,7 +312,11 @@ class DependencySummary:
 
 @dataclass
 class TaskContext:
-    """Everything ``forge task show`` prints. ``lease`` is filled by the caller (claim/lease)."""
+    """Everything ``forge task show`` prints.
+
+    ``lease`` is filled by the caller (claim/lease), and so is ``delegation`` (ADR 0017,
+    :func:`forge.core.delegation.delegation_for`); ``None`` means it was not computed.
+    """
 
     meta: TaskMetadata
     issue: Issue
@@ -323,6 +328,7 @@ class TaskContext:
     adrs: list[AdrRef]
     lease: dict[str, Any] | None = None
     warnings: list[str] = field(default_factory=list)
+    delegation: Delegation | None = None
 
     def to_data(self) -> dict[str, Any]:
         """Return the JSON-able ``data`` payload."""
@@ -349,6 +355,7 @@ class TaskContext:
             "handoff": None if self.handoff is None else self.handoff.to_data(),
             "adrs": [a.to_data() for a in self.adrs],
             "lease": self.lease,
+            "delegation": None if self.delegation is None else self.delegation.to_data(),
             "warnings": list(self.warnings),
         }
 
@@ -540,6 +547,8 @@ def render_context(ctx: TaskContext) -> str:
             out.append(f"- {dep.id} #{dep.issue} {dep.title} ({dep.state}, {dep.status})")
     if ctx.lease is not None:
         out += ["", "## Lease", *_render_lease(ctx.lease)]
+    if ctx.delegation is not None:
+        out += ["", "## Delegation", *ctx.delegation.render_lines()]
     if ctx.handoff is not None:
         note = ctx.handoff
         out += ["", f"## Latest handoff note (by {note.author}, {_ts(note.created_at)})", note.body]

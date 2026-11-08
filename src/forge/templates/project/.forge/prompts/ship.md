@@ -12,7 +12,7 @@ Publish the finished task as a pull request: synced with the default branch, che
 2. Ship. Add `--draft` only when the user asks for a draft PR:
    `forge ship --json`
    `forge ship --draft --json`
-   The CLI syncs first, runs the checks (unless the last sync already passed them on this commit), computes out-of-zone changes, creates or updates the PR, sets `status:in-review` and requests reviewers.
+   The CLI syncs first, runs the checks (unless the last sync already passed them on this commit), computes out-of-zone changes, creates or updates the PR, sets `status:in-review` and requests reviewers. The PR records the delegation decision in the Agent section (for example ``Delegation: auto → delegated (size M) to `forge-implementer` (`sonnet`)``). It is the decision the agent followed, taken from the task's local state, which keeps your `--delegation` choice. It is not proof of what the agent did. Do not edit that line.
 3. If it exits 2, follow `/forge-sync` (read `.forge/local/sync.json`, resolve, `forge sync --continue --json`, escalate when needed). Then run ship again. If it exits 4, stop: sync escalated the conflict. Do not run ship again. Tell the user who was mentioned.
 4. When it exits 0, read the PR URL, the out-of-zone changes, the conflict resolutions and the requested reviewers from `data`.
 5. Report the CI state of the PR:
@@ -43,6 +43,7 @@ Publish the finished task as a pull request: synced with the default branch, che
 ## Final report
 Tell the user:
 - the PR URL, title and whether it is a draft;
+- the delegation line in the PR body;
 - reviewers requested;
 - out-of-zone changes (or "none") and conflict resolutions (or "none");
 - the check results and the CI state, noting if CI is still running;

@@ -297,7 +297,24 @@ It exits 0 whenever the report is produced. It exits 5 without `.forge/config.ym
 
 **Step 2: tag.** After the PR is reviewed and merged, the same command finds the section. It creates the annotated tag `vX.Y.Z` on the commit that landed the section: the release PR's merge commit, its squash commit, or the last commit of a rebase-merge. If no merged release PR exists (a manual merge), it finds the commit where the heading first appeared on the default branch. It creates a GitHub release with the section as its notes, closes the GitHub milestone and exits 0 with `data.step` set to `released`. A tag that already exists on that commit is fine. A tag on another commit exits 5.
 
-## 12. Cross-cutting rules
+## 12. Delegation
+
+([ADR 0017](decisions/0017-implementer-subagent-and-delegation.md))
+
+Delegation decides whether the main agent writes a task's code itself or acts as lead and hands the code to the `forge-implementer` subagent (tier `standard` by default). The CLI never calls a model. It decides the mode, tells the agent and records the decision.
+
+- **Modes.** `off`: the main agent writes the code. `auto` (default): delegate when the task has `size: M` or two or more zones. `on`: always delegate.
+- **Where the mode comes from**, most specific first:
+  1. `--delegation off|auto|on` on `forge task show` and `forge next`. The `/forge-dev` flags `--solo` and `--delegate` map to `off` and `on`. The choice is saved in the worktree's `.forge/local/current.json` and applies to the task until it is released or handed off. A new `--delegation` replaces it.
+  2. The profile field `delegation`, set with `forge profile set delegation=<mode>` or by `forge setup`.
+  3. The `delegation` section of `.forge/config.yml` (`default`, `allowed`).
+
+  A mode the project does not allow falls back to the project default, with a warning.
+- **Capability.** The mode is forced to `off`, with a note, when the active agent's tool is not `claude-code` or `codex`, when there is no profile, or when the machine-level subagent files are missing (`forge adapters generate --local`).
+- **Output.** The task context has a `delegation` object (`mode`, `requested`, `source`, `delegate`, `reason`, `subagent`, `model`). `forge ship` writes one line in the PR block's Agent section. `forge status` shows the mode for the current task. The PR line records the decision. Forge cannot verify what the agent did.
+- **Lead path.** When `delegate` is true, the `/forge-dev` prompt makes the main agent explore, split the work into briefs (goal, files, `done_when` items, constraints, tests; disjoint files when parallel), delegate each brief, verify the diff and the checks, and take a brief over after two failed rounds. The implementer never claims, syncs, ships, pushes or comments.
+
+## 13. Cross-cutting rules
 
 - **Version pin.** `.forge/config.yml` sets `forge_version`, a PEP 440 specifier. Forge compares the CLI's base version, so `0.1.0.dev0` satisfies `>=0.1,<0.2` ([ADR 0003](decisions/0003-version-compatibility.md)). A mismatch is a warning in `setup`, `status`, `escalate`, `propose`, `plan validate`, `sync --abort` and `review` without `--submit`. It is exit 5 in `next`, `reclaim`, `sync` (except `--abort`), `ship`, `plan apply`, `release` and `review --submit`.
 - **Models.** Repository files speak in tiers and effort. The profile in `~/.config/forge/profile.yml` maps them to concrete models. A task's tier picks the model, `config.models.min_tier_for` can raise it, and manual overrides can only raise it. An agent serves a tier with the lowest mapped tier at or above it ([ADR 0005](decisions/0005-model-resolution-and-constraints.md)).

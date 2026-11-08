@@ -18,7 +18,7 @@ from typer.testing import CliRunner
 
 from forge.cli import app
 from forge.commands import _claims, _context
-from forge.commands.status import ago
+from forge.commands.status import _delegation, ago
 from forge.core.config import ForgeConfig
 from forge.core.errors import PreconditionError
 from forge.core.git import Git
@@ -356,3 +356,34 @@ def test_ago() -> None:
     assert ago("2026-10-29T09:00:00Z", T0) == "4d ago"
     assert ago("2026-11-03T08:30:00Z", T0) == "in 23h"
     assert ago(None, T0) == "-"
+
+
+def test_human_output_shows_the_delegation_of_the_current_task(full: Path) -> None:
+    result = runner.invoke(app, ["--repo", str(full), "status", "--me"])
+    assert result.exit_code == 0, result.output
+    assert "Delegate off · .forge/agents/implementer.md missing" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("delegation", "line"),
+    [
+        (
+            {"mode": "auto", "delegate": True, "reason": "size M", "model": "sonnet"},
+            "auto → forge-implementer (sonnet) · size M",
+        ),
+        (
+            {"mode": "on", "delegate": True, "reason": "requested by profile", "model": None},
+            "on → forge-implementer · requested by profile",
+        ),
+        (
+            {"mode": "auto", "delegate": False, "reason": "1 zone, size S", "model": None},
+            "auto → main session · 1 zone, size S",
+        ),
+        (
+            {"mode": "off", "delegate": False, "reason": "requested by profile", "model": None},
+            "off · requested by profile",
+        ),
+    ],
+)
+def test_delegation_line(delegation: dict[str, Any], line: str) -> None:
+    assert _delegation({"subagent": "forge-implementer", **delegation}) == line

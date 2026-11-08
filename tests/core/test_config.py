@@ -11,6 +11,7 @@ from forge.core.config import (
     ADAPTERS,
     CONFIG_PATH,
     ClaimConfig,
+    DelegationConfig,
     ModelsConfig,
     Resolver,
     ReviewConfig,
@@ -19,6 +20,7 @@ from forge.core.config import (
     check_cli_version,
     load_config,
     normalize_adapters,
+    parse_delegation_mode,
 )
 from forge.core.errors import ConfigError
 from forge.core.tiers import Tier
@@ -359,3 +361,63 @@ def test_unknown_adapter_names_file_key_and_fix(tmp_path: Path) -> None:
 def test_normalize_adapters() -> None:
     assert normalize_adapters(["claude"]) == ("generic", "claude")
     assert normalize_adapters([]) == ("generic",)
+
+
+# -- delegation (ADR 0017) --------------------------------------------------------------------
+
+
+def test_delegation_defaults_when_absent(tmp_path: Path) -> None:
+    write(tmp_path, MINIMAL)
+    config = load_config(tmp_path)
+    assert config.delegation == DelegationConfig(default="auto", allowed=("off", "auto", "on"))
+
+
+@pytest.mark.parametrize(
+    ("section", "default", "allowed"),
+    [
+        ("delegation: {}\n", "auto", ("off", "auto", "on")),
+        ("delegation:\n  default: off\n", "off", ("off", "auto", "on")),
+        ("delegation:\n  default: 'on'\n", "on", ("off", "auto", "on")),
+        ("delegation:\n  default: off\n  allowed: [off]\n", "off", ("off",)),
+        # unquoted YAML booleans are read as off/on; order is canonical, duplicates collapse
+        ("delegation:\n  allowed: [on, auto, auto]\n", "auto", ("auto", "on")),
+        ('delegation:\n  default: "off"\n  allowed: ["off", "on"]\n', "off", ("off", "on")),
+    ],
+)
+def test_delegation_section(
+    tmp_path: Path, section: str, default: str, allowed: tuple[str, ...]
+) -> None:
+    write(tmp_path, MINIMAL + section)
+    config = load_config(tmp_path)
+    assert config.delegation.default == default
+    assert config.delegation.allowed == allowed
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "fix_part"),
+    [
+        ("delegation: {default: sometimes}\n", "delegation.default", "default: auto"),
+        ("delegation: {default: 3}\n", "delegation.default", "default: auto"),
+        ("delegation: {allowed: auto}\n", "delegation.allowed", "allowed: [off, auto, on]"),
+        ("delegation: {allowed: [auto, maybe]}\n", "delegation.allowed[1]", "off, auto, on"),
+        ("delegation: {allowed: []}\n", "delegation.allowed", "at least one mode"),
+        ("delegation: {default: on, allowed: [off, auto]}\n", "delegation.default", "allowed"),
+        ("delegation: {allowed: [off]}\n", "delegation.default", "delegation.default"),
+        ("delegation: {mode: auto}\n", "delegation", "mode"),
+        ("delegation: auto\n", "delegation", "delegation"),
+    ],
+)
+def test_delegation_errors_name_key_and_fix(
+    tmp_path: Path, section: str, key: str, fix_part: str
+) -> None:
+    err = config_error(tmp_path, MINIMAL + section)
+    assert err.key is not None and err.key.startswith(key)
+    assert fix_part in (err.hint or "") or fix_part in err.message
+
+
+def test_parse_delegation_mode() -> None:
+    assert parse_delegation_mode("auto") == "auto"
+    assert parse_delegation_mode(False) == "off"
+    assert parse_delegation_mode(True) == "on"
+    assert parse_delegation_mode("never") is None
+    assert parse_delegation_mode(None) is None

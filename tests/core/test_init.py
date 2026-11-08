@@ -56,7 +56,7 @@ TEMPLATE_PATHS = sorted(
                 "release",
             )
         ),
-        *(f".forge/agents/{n}.md" for n in ("explorer", "test-writer", "reviewer")),
+        *(f".forge/agents/{n}.md" for n in ("explorer", "test-writer", "reviewer", "implementer")),
         "specs/_template.md",
         "plans/roadmap.yml",
         "docs/decisions/_template.md",

@@ -118,3 +118,24 @@ Progress notes:
 - **Version and tag**: the version is bumped to `0.1.0`. The `v0.1.0` tag is created locally on `main` once this phase's PR is merged.
 
 **Done when:** the checklist passes end to end and v0.1.0 is tagged locally.
+
+## [x] Phase 11 — Development agent and delegation switch (v0.2)
+- [x] `implementer` subagent template, rendered as `forge-implementer` (Claude, Codex).
+- [x] Delegation modes `off | auto | on`, decided per invocation (`--delegation`), per person (profile) and per project (`config.yml` `delegation:` policy); capability fallback to `off`.
+- [x] `core/delegation.py` decision; `delegation` in the task context, PR body and status; setup wizard question; `forge profile set delegation=…`.
+- [x] `dev` prompt with a lead path (brief → `forge-implementer` → verify) and the current solo path; docs.
+
+See ADR 0017.
+
+Progress notes:
+- **Reviews**: two passes; every high and medium finding fixed.
+- **Equivalence with v0.1.0**: with `delegation: off`, `next` and `task show` are compared against golden files captured from v0.1.0's code.
+- **Override scope**: the per-invocation override is saved for the task in `current.json`, and `ship` and `status` read it.
+
+**Done when:**
+- the decision matrix tests pass;
+- `forge init` writes `implementer.md` and `adapters generate --local` renders `forge-implementer` with the profile's model;
+- `task show --json` reports the decision and `--delegation` overrides it within the project policy;
+- the PR body records the decision;
+- the `dev` prompt has both paths and passes the prompt checks;
+- with `delegation: off` the output equals v0.1.0's apart from the new `delegation` field.

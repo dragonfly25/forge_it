@@ -27,6 +27,10 @@ Strategy = Literal["regenerate", "union"]
 MERGE_METHODS: tuple[MergeMethod, ...] = ("squash", "merge", "rebase")
 STRATEGIES: tuple[Strategy, ...] = ("regenerate", "union")
 
+DelegationMode = Literal["off", "auto", "on"]
+DELEGATION_MODES: tuple[DelegationMode, ...] = ("off", "auto", "on")
+"""Implementation delegation modes (ADR 0017), from fewest to most delegation."""
+
 ADAPTERS: tuple[str, ...] = ("generic", "claude", "codex")
 """Known adapter names, in rendering order (ADR 0014). ``generic`` is always enabled."""
 
@@ -103,6 +107,14 @@ class ModelsConfig:
 
 
 @dataclass(frozen=True)
+class DelegationConfig:
+    """The `delegation` section (ADR 0017): the project default and the modes members may use."""
+
+    default: DelegationMode = "auto"
+    allowed: tuple[DelegationMode, ...] = DELEGATION_MODES
+
+
+@dataclass(frozen=True)
 class ForgeConfig:
     """The whole `.forge/config.yml`."""
 
@@ -118,6 +130,7 @@ class ForgeConfig:
     review: ReviewConfig = field(default_factory=ReviewConfig)
     models: ModelsConfig = field(default_factory=ModelsConfig)
     adapters: tuple[str, ...] = ADAPTERS
+    delegation: DelegationConfig = field(default_factory=DelegationConfig)
 
 
 _TOP_KEYS = (
@@ -133,6 +146,7 @@ _TOP_KEYS = (
     "review",
     "models",
     "adapters",
+    "delegation",
 )
 
 
@@ -162,6 +176,7 @@ def parse_config(f: Fields) -> ForgeConfig:
         review=_review(f.mapping("review")),
         models=_models(f.mapping("models")),
         adapters=_adapters(f),
+        delegation=_delegation(f.mapping("delegation")),
     )
 
 
@@ -356,6 +371,75 @@ def _adapters(f: Fields) -> tuple[str, ...]:
     return normalize_adapters(names)
 
 
+def parse_delegation_mode(value: object) -> DelegationMode | None:
+    """Return the delegation mode ``value`` names, or ``None`` when it names none.
+
+    YAML 1.1 reads unquoted ``off``/``on`` as booleans, so ``False`` and ``True`` are
+    accepted as ``off`` and ``on``.
+    """
+    if value is False:
+        return "off"
+    if value is True:
+        return "on"
+    if isinstance(value, str):
+        for mode in DELEGATION_MODES:
+            if value == mode:
+                return mode
+    return None
+
+
+def _delegation(f: Fields) -> DelegationConfig:
+    f.reject_unknown(("default", "allowed"))
+    modes = ", ".join(DELEGATION_MODES)
+    allowed: tuple[DelegationMode, ...] = DELEGATION_MODES
+    raw_allowed = f.raw("allowed")
+    if raw_allowed is not None:
+        if not isinstance(raw_allowed, list):
+            raise f.fail(
+                "allowed",
+                f"expected a list of modes, got {type_name(raw_allowed)}",
+                f"write it as `allowed: [{modes}]`",
+            )
+        chosen: list[DelegationMode] = []
+        for i, item in enumerate(raw_allowed):
+            mode = parse_delegation_mode(item)
+            if mode is None:
+                raise f.fail(
+                    f"allowed[{i}]",
+                    f"invalid mode {item!r}; expected one of: {modes}",
+                    f"use only {modes}",
+                )
+            if mode not in chosen:
+                chosen.append(mode)
+        if not chosen:
+            raise f.fail(
+                "allowed",
+                "empty list would allow no mode",
+                f"list at least one mode, e.g. `allowed: [{modes}]`, or remove the key",
+            )
+        allowed = tuple(m for m in DELEGATION_MODES if m in chosen)
+    default: DelegationMode = "auto"
+    if f.raw("default") is not None:
+        raw_default = f.raw("default")
+        parsed = parse_delegation_mode(raw_default)
+        if parsed is None:
+            raise f.fail(
+                "default",
+                f"invalid mode {raw_default!r}; expected one of: {modes}",
+                "write it as `default: auto`",
+            )
+        default = parsed
+    if default not in allowed:
+        where = "" if f.has("default") else " (the built-in default)"
+        raise f.fail(
+            "default",
+            f"default mode {default!r}{where} is not in allowed ({', '.join(allowed)})",
+            f"add {default!r} to `delegation.allowed`, or set `delegation.default` to one of: "
+            f"{', '.join(allowed)}",
+        )
+    return DelegationConfig(default=default, allowed=allowed)
+
+
 # -- helpers ----------------------------------------------------------------------------------
 
 
@@ -386,9 +470,12 @@ def _optional_int(f: Fields, key: str, *, min_: int) -> int | None:
 __all__ = [
     "ADAPTERS",
     "CONFIG_PATH",
+    "DELEGATION_MODES",
     "MERGE_METHODS",
     "STRATEGIES",
     "ClaimConfig",
+    "DelegationConfig",
+    "DelegationMode",
     "ForgeConfig",
     "GitHubConfig",
     "MergeMethod",
@@ -403,4 +490,5 @@ __all__ = [
     "load_config",
     "normalize_adapters",
     "parse_config",
+    "parse_delegation_mode",
 ]

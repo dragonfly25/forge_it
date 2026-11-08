@@ -12,15 +12,19 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from forge.core import ship as ship_module
+from forge.core.config import DelegationConfig
 from forge.core.errors import ExitCode, ForgeError, PreconditionError
 from forge.core.git import Git
 from forge.core.github import GitHubError
 from forge.core.lease import format_time
 from forge.core.pr_body import BEGIN_MARKER, find_block
+from forge.core.profile import Profile
 from forge.core.reviewers import select_reviewers
-from forge.core.ship import ShipContext, ship
+from forge.core.ship import ShipContext, ShipOutcome, ship
 from forge.core.sync import SyncOptions, read_sync_log, sync, sync_continue
 from forge.core.tasks import Status
+from forge.core.workspace import read_current, write_current
 from forge.core.zones import ZonesConfig
 from support.scenarios import T0, UserGitHub
 from support.ship_world import TEAM, CheckRecorder, ShipWorld, ship_config
@@ -500,3 +504,92 @@ def test_heartbeat_failure_after_the_pr_says_the_pr_exists_and_rerun_completes(
     assert again.requested == ["bob"] and sw.pull(issue).requested_reviewers == ("bob",)
     lease = sw.lease(issue).data
     assert lease is not None and again.heartbeat_at == format_time(lease.heartbeat_at)
+
+
+# --------------------------------------------------------------------------- delegation
+
+
+def test_pr_body_records_the_delegation_decision(sw: ShipWorld) -> None:
+    issue = claimed(sw)
+    sw.commit("alice", "src/api/a.py", "a\n")
+    ctx = sw.ship_ctx()
+    agent = ctx.sync.agent
+    profile = Profile("alice", (agent,), agent.id, delegation="off")
+
+    out = ship(replace(ctx, profile=profile))
+
+    assert out.code == ExitCode.OK, out.messages
+    assert "- Delegation: off (requested by profile)" in block_of(sw.pull(issue).body)
+
+
+def test_pr_body_delegation_without_profile_is_off(sw: ShipWorld) -> None:
+    issue = claimed(sw)
+    sw.commit("alice", "src/api/a.py", "a\n")
+    out = sw.ship()
+    assert out.code == ExitCode.OK, out.messages
+    assert "- Delegation: off (no profile)" in block_of(sw.pull(issue).body)
+
+
+def test_pr_body_delegation_missing_template(sw: ShipWorld) -> None:
+    issue = claimed(sw)
+    sw.commit("alice", "src/api/a.py", "a\n")
+    ctx = sw.ship_ctx()
+    agent = ctx.sync.agent
+    out = ship(replace(ctx, profile=Profile("alice", (agent,), agent.id, delegation="on")))
+    assert out.code == ExitCode.OK, out.messages
+    assert "- Delegation: off (.forge/agents/implementer.md missing)" in block_of(
+        sw.pull(issue).body
+    )
+
+
+def _record_override(sw: ShipWorld, mode: str) -> None:
+    root = sw.world.git("alice").root()
+    current = read_current(root)
+    assert current is not None
+    write_current(root, replace(current, delegation_override=mode))  # type: ignore[arg-type]
+
+
+def test_pr_body_uses_the_override_recorded_in_current_json(sw: ShipWorld) -> None:
+    issue = claimed(sw)
+    sw.commit("alice", "src/api/a.py", "a\n")
+    _record_override(sw, "off")
+    ctx = sw.ship_ctx()
+    agent = ctx.sync.agent
+    out = ship(replace(ctx, profile=Profile("alice", (agent,), agent.id, delegation="on")))
+    assert out.code == ExitCode.OK, out.messages
+    assert "- Delegation: off (requested by --delegation)" in block_of(sw.pull(issue).body)
+
+
+def test_delegation_off_everywhere_changes_only_the_delegation_line(
+    sw: ShipWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Done-when of ADR 0017: with `off` in the project, the profile and the recorded override,
+    the PR block and the messages equal the output with the delegation code path neutralised
+    (``delegation_for`` patched to return None, as v0.1.0 had no decision), except for the
+    one new line."""
+    issue = claimed(sw)
+    sw.commit("alice", "src/api/a.py", "a\n")
+    _record_override(sw, "off")
+    config = replace(ship_config(), delegation=DelegationConfig("off", ("off",)))
+    ctx = sw.ship_ctx(config=config)
+    agent = ctx.sync.agent
+    ctx = replace(ctx, profile=Profile("alice", (agent,), agent.id, delegation="off"))
+
+    def neutral_ship() -> ShipOutcome:
+        with monkeypatch.context() as patch:
+            patch.setattr(ship_module, "delegation_for", lambda *a, **k: None)
+            return ship(ctx)
+
+    # Alternate so that both compared runs rewrite the block (same "updated" messages).
+    assert neutral_ship().outcome == "created"
+    assert ship(ctx).outcome == "updated"
+    neutral = neutral_ship()
+    neutral_block = block_of(sw.pull(issue).body)
+    real = ship(ctx)
+    real_block = block_of(sw.pull(issue).body)
+
+    line = "- Delegation: off (requested by --delegation)"
+    assert line in real_block.splitlines()
+    assert real_block.replace(line + "\n", "") == neutral_block
+    assert [m.to_dict() for m in real.messages] == [m.to_dict() for m in neutral.messages]
+    assert real.code == neutral.code and real.outcome == neutral.outcome == "updated"

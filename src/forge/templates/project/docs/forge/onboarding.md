@@ -81,6 +81,25 @@ Run `/forge-dev`. The agent implements the task inside its zones, writes tests f
 
 On a long session, the agent sends heartbeats so your claim does not look stale.
 
+### Who writes the code: delegation modes
+
+Forge can have your main agent write the code itself, or act as lead and delegate the code to a subagent, `forge-implementer`. The lead plans, briefs, checks the diff and runs the tests. The subagent runs on the `standard` tier, so the bulk of the code costs less per token. Delegation uses more tokens in total. There are three modes:
+
+| Mode | What happens |
+|---|---|
+| `off` | Your main agent writes the code. Fewest tokens. |
+| `auto` | Delegate only when the task is big: size `M`, or two or more zones. This is the default. |
+| `on` | Always delegate the code. |
+
+Delegation needs Claude Code or Codex, and the machine-level subagent files. Other agents work as `off`.
+
+The mode comes from, most specific first:
+1. The command: `/forge-dev --solo` means `off` and `/forge-dev --delegate` means `on`, for this task (saved locally until release or handoff). A new flag replaces the saved choice.
+2. Your profile: `forge profile set delegation=off`. `forge setup` asks for it too.
+3. The project: the `delegation` section of `.forge/config.yml`. The lead sets the default and which modes members may choose.
+
+`forge task show` prints the decision for your task, with the reason. `forge status` shows it. The pull request records it.
+
 If you run out of tokens or time, run `/forge-handoff`. Anyone can then continue from your note. See the FAQ.
 
 ## 6. Stay in sync

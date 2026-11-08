@@ -70,7 +70,9 @@ def ship(
             team=team,
             clock=lambda: _claims.clock(),
         )
-        outcome = run_ship(ShipContext(sync=sync_ctx, presets=load_presets()), ShipOptions(draft))
+        outcome = run_ship(
+            ShipContext(sync=sync_ctx, presets=load_presets(), profile=profile), ShipOptions(draft)
+        )
         result = outcome.to_result()
         for text in warnings:
             result.warn(text)

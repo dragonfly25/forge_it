@@ -4,6 +4,8 @@ Forge is a command-line tool, a set of project templates and a set of agent prom
 
 GitHub is the only coordination bus. Tasks are Issues, claims are branches, reviews are PRs. The `forge` CLI is deterministic and never calls an LLM. It handles claims, leases, zones, sync, ship, planning and releases. The reasoning (implementing, resolving a conflict, reviewing) happens in your own agent, guided by prompts in `.forge/prompts/`. There is no server, database or web UI.
 
+Delegation is a switch: your main agent can write the code itself, or act as lead and delegate it to a `forge-implementer` subagent. Choose `off`, `auto` or `on` for this task (saved locally until release or handoff), per person or per project. See [docs/protocol.md](docs/protocol.md) and [ADR 0017](docs/decisions/0017-implementer-subagent-and-delegation.md).
+
 ## Status
 
 Forge v0.1.0 is the first release. It was dogfooded end to end on a sandbox GitHub repository; see [docs/dogfooding-v0.1.0.md](docs/dogfooding-v0.1.0.md) for the checklist, the findings and what was not exercised.

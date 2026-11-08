@@ -117,7 +117,10 @@ def set_(
     setting: Annotated[
         str,
         typer.Argument(
-            help="<agent>.<tier>=<model>, <agent>.effort.<level>=<value> or default_agent=<id>."
+            help=(
+                "<agent>.<tier>=<model>, <agent>.effort.<level>=<value>, default_agent=<id> "
+                "or delegation=<off|auto|on>."
+            )
         ),
     ],
 ) -> None:

@@ -9,9 +9,10 @@ are looked up at call time, like ``_context.github_factory``.
 
 from __future__ import annotations
 
+import contextlib
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,8 +21,9 @@ from forge.commands._context import AppContext, load_context
 from forge.commands._output import GlobalOptions
 from forge.core import adapters
 from forge.core.claim import ClaimContext, Claimed, NextOutcome
-from forge.core.config import ForgeConfig, check_cli_version
+from forge.core.config import DelegationMode, ForgeConfig, check_cli_version
 from forge.core.context import TaskContext, gather_task_context, render_context
+from forge.core.delegation import delegation_for
 from forge.core.errors import ExitCode, ForgeError, PreconditionError
 from forge.core.models import check_profile
 from forge.core.output import Level, Result
@@ -34,6 +36,8 @@ from forge.core.workspace import (
     Workspace,
     find_current_task,
     prepare_workspace,
+    read_current,
+    task_worktrees,
     write_current,
 )
 from forge.core.zones import ZonesConfig, load_zones
@@ -102,6 +106,141 @@ def load_optional_profile(
     except ForgeError as exc:
         raise PreconditionError(exc.message, hint=exc.hint or PROFILE_HINT) from exc
     return profile, agent
+
+
+def quiet_profile(
+    opts: GlobalOptions, recorded_agent: str | None
+) -> tuple[Profile | None, AgentProfile | None, list[str]]:
+    """Profile and agent for the delegation of a read-only view (``forge task show``).
+
+    Never raises and never adds messages: the problems are returned as notes, which go into
+    the ``delegation`` object only, so ``task show`` keeps its v0.1.0 exit codes and messages.
+    The agent is ``--agent``, else the one recorded in ``current.json``, else the default; an
+    unknown id falls back to the default agent. A missing or invalid profile gives no profile.
+    """
+    path = profile_path()
+    if not path.is_file():
+        return None, None, []
+    try:
+        profile = load_profile(path)
+    except ForgeError as exc:
+        return None, None, [f"profile not used: {exc.message}"]
+    wanted = opts.agent or recorded_agent
+    try:
+        return profile, select_agent(profile, wanted), []
+    except ForgeError:
+        note = (
+            f"agent {wanted!r} is not in the profile; using the default agent "
+            f"{profile.default_agent!r}"
+        )
+        return profile, select_agent(profile, None), [note]
+
+
+def attach_delegation(
+    context: TaskContext,
+    config: ForgeConfig,
+    profile: Profile | None,
+    agent: AgentProfile | None,
+    worktree: Path,
+    override: DelegationMode | None,
+    result: Result,
+    extra_notes: Sequence[str] = (),
+) -> None:
+    """Decide the delegation for ``context`` (ADR 0017) and add its warnings and notes.
+
+    ``extra_notes`` (profile problems of a read-only view) are kept in the ``delegation``
+    object only; they are not added to the messages.
+    """
+    delegation = delegation_for(
+        context.meta,
+        config=config,
+        profile=profile,
+        agent=agent,
+        worktree=worktree,
+        override=override,
+        presets=load_presets(),
+    )
+    for warning in delegation.warnings:
+        result.warn(warning)
+    for note in delegation.notes:
+        result.info(note)
+    if extra_notes:
+        delegation = replace(delegation, notes=(*delegation.notes, *extra_notes))
+    context.delegation = delegation
+
+
+def remember_override(
+    location: TaskLocation | None, issue: int, override: DelegationMode | None
+) -> DelegationMode | None:
+    """The per-run delegation override in force for ``issue`` (ADR 0017).
+
+    When ``location`` holds ``current.json`` for ``issue``, a given ``override`` is recorded
+    there (so ``ship`` and ``status`` report the decision the agent followed) and, without
+    one, the recorded override applies. Otherwise ``override`` is returned unchanged. Writing
+    is best effort: a failure keeps the override for this run only.
+    """
+    current = None if location is None else location.current
+    if location is None or current is None or current.issue != issue:
+        return override
+    if override is None:
+        return current.delegation_override
+    if override != current.delegation_override:
+        with contextlib.suppress(OSError, ForgeError):
+            # Re-read just before writing so a concurrent update (sync, claim) is kept.
+            fresh = read_current(location.workspace)
+            if fresh is not None and fresh.issue == issue:
+                write_current(location.workspace, replace(fresh, delegation_override=override))
+    return override
+
+
+def show_delegation(
+    app: AppContext,
+    opts: GlobalOptions,
+    context: TaskContext,
+    location: TaskLocation | None,
+    override: DelegationMode | None,
+    result: Result,
+) -> None:
+    """The delegation step of ``forge task show``: profile, recorded override, decision."""
+    if location is None or location.issue != context.issue.number:
+        location = task_location(app, context.issue.number) or location
+    recorded = recorded_agent(location) if location is not None else None
+    if location is not None and location.issue != context.issue.number:
+        recorded = None
+    profile, agent, notes = quiet_profile(opts, recorded)
+    effective = remember_override(location, context.issue.number, override)
+    worktree = (
+        location.workspace
+        if location is not None and location.issue == context.issue.number
+        else app.root
+    )
+    attach_delegation(context, app.config, profile, agent, worktree, effective, result, notes)
+
+
+def task_location(app: AppContext, issue: int) -> TaskLocation | None:
+    """The task worktree of ``issue`` holding its ``current.json``, when there is one.
+
+    Lets ``forge task show <id>`` from the main clone decide the delegation where the agent
+    works. Any problem (git, a corrupt file) gives ``None``.
+    """
+    try:
+        candidates = [path for n, path in task_worktrees(app.git) if n == issue]
+    except ForgeError:
+        return None
+    for path in candidates:
+        try:
+            current = read_current(path)
+        except ForgeError:
+            continue
+        if current is not None and current.issue == issue:
+            return TaskLocation(
+                source="current",
+                issue=issue,
+                branch=current.branch,
+                workspace=path,
+                current=current,
+            )
+    return None
 
 
 def profile_messages(
@@ -176,6 +315,14 @@ def require_current_task(app: AppContext) -> TaskLocation:
     return location
 
 
+def try_current_task(app: AppContext) -> TaskLocation | None:
+    """The current task when there is one; a problem (corrupt ``current.json``) gives None."""
+    try:
+        return find_current_task(app.git)
+    except ForgeError:
+        return None
+
+
 def recorded_agent(location: TaskLocation) -> str | None:
     """The agent recorded in ``current.json`` for the current task (``None`` if unknown)."""
     return None if location.current is None else location.current.agent
@@ -241,8 +388,13 @@ def finish_claim(
     rendered: Rendered,
     *,
     use_worktree: bool,
+    delegation: DelegationMode | None = None,
 ) -> None:
-    """Post-claim local steps: workspace, ``current.json``, then the task context in ``data``."""
+    """Post-claim local steps: workspace, ``current.json``, then the task context in ``data``.
+
+    The context carries the delegation decision (ADR 0017) for the claimed task, computed in
+    the task's workspace with ``delegation`` as the ``--delegation`` override.
+    """
     claimed = outcome.claimed
     assert claimed is not None
     workspace: Workspace = prepare_workspace(
@@ -254,6 +406,8 @@ def finish_claim(
         use_worktree=use_worktree and app.config.worktrees.enabled,
         worktrees_dir=profile.worktrees_dir,
     )
+    if delegation is None:
+        delegation = _previous_override(workspace.path, claimed.issue)
     current = CurrentTask(
         task=claimed.task_id,
         issue=claimed.issue,
@@ -263,6 +417,7 @@ def finish_claim(
         agent=claimed.agent,
         claimed_at=claimed.claimed_at,
         worktree=None if workspace.in_place else workspace.path,
+        delegation_override=delegation,
     )
     current_file = write_current(workspace.path, current)
     if not workspace.in_place:
@@ -270,12 +425,24 @@ def finish_claim(
     context = load_task_context(
         app, claimed.issue, zones=ctx.zones, now=ctx.now(), remote=ctx.remote
     )
+    attach_delegation(context, app.config, profile, ctx.agent, workspace.path, delegation, result)
     rendered.context = context
     result.data["workspace"] = workspace.to_data()
     result.data["current"] = {"path": str(current_file), **current.to_data()}
     result.data["context"] = context.to_data()
     for warning in context.warnings:
         result.warn(warning)
+
+
+def _previous_override(workspace: Path, issue: int) -> DelegationMode | None:
+    """The override already recorded for ``issue`` in ``workspace`` (kept on a resume)."""
+    try:
+        previous = read_current(workspace)
+    except ForgeError:
+        return None
+    if previous is None or previous.issue != issue:
+        return None
+    return previous.delegation_override
 
 
 def render_subagents(worktree: Path, profile: Profile, config: ForgeConfig, result: Result) -> None:
@@ -307,8 +474,12 @@ def claim_command(
     rendered: Rendered,
     *,
     use_worktree: bool = True,
+    delegation: DelegationMode | None = None,
 ) -> Result:
-    """Shared body of ``forge next`` and ``forge reclaim``."""
+    """Shared body of ``forge next`` and ``forge reclaim``.
+
+    ``delegation`` is the ``--delegation`` override of ``forge next`` (ADR 0017).
+    """
     app = load_context(opts)
     profile, agent = load_profile_and_agent(opts)
     ctx = claim_context(app, profile, agent, load_zones(app.root))
@@ -318,7 +489,16 @@ def claim_command(
     claimed = outcome.claimed
     if claimed is not None and not outcome.dry_run:
         try:
-            finish_claim(app, ctx, profile, outcome, result, rendered, use_worktree=use_worktree)
+            finish_claim(
+                app,
+                ctx,
+                profile,
+                outcome,
+                result,
+                rendered,
+                use_worktree=use_worktree,
+                delegation=delegation,
+            )
         except ForgeError as exc:
             # The claim is held on GitHub: keep its summary in ``data`` so --json callers
             # know which task they hold, and say how to finish the local steps.

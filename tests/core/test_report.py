@@ -13,6 +13,7 @@ import json
 import os
 import re
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -21,6 +22,7 @@ import pytest
 
 from forge.core.claim import NextOptions, claim_next, read_task_state
 from forge.core.config import ForgeConfig, parse_config
+from forge.core.delegation import IMPLEMENTER_PATH, rendered_path
 from forge.core.errors import PreconditionError
 from forge.core.git import Git
 from forge.core.github import CiStatus
@@ -559,3 +561,39 @@ def test_read_task_state_reads_every_lease_when_exact(seeder: Seeder) -> None:
     assert exact.snapshot.views[number].activity == T0 - timedelta(minutes=5)
     assert lazy.snapshot.views[number].activity == T0 - timedelta(hours=2)  # tip date only
     assert exact.github.pulls == () and len(exact.github.issues) == 1
+
+
+# --------------------------------------------------------------------------- delegation
+
+
+def test_me_current_task_shows_the_effective_delegation(seeder: Seeder) -> None:
+    seed_full(seeder)
+    worktree = Path(build_status(seeder.ctx("alice")).to_data()["me"]["current"]["worktree"])
+    template = worktree / IMPLEMENTER_PATH
+    template.parent.mkdir(parents=True, exist_ok=True)
+    template.write_text(
+        "---\nname: implementer\ndescription: d\ntier: standard\neffort: medium\n"
+        "tools: [read, edit, shell]\n---\nbody\n",
+        encoding="utf-8",
+    )
+    rendered = rendered_path("claude-code")
+    assert rendered is not None
+    (worktree / rendered).parent.mkdir(parents=True, exist_ok=True)
+    (worktree / rendered).write_text("x\n", encoding="utf-8")
+
+    profile = replace(profile_for("alice"), delegation="on")
+    data = build_status(seeder.ctx("alice", profile=profile)).to_data()
+    delegation = data["me"]["current"]["delegation"]
+    assert (delegation["mode"], delegation["source"], delegation["delegate"]) == (
+        "on",
+        "profile",
+        True,
+    )
+    assert delegation["model"] == "sonnet"
+
+
+def test_me_current_task_delegation_without_profile(seeder: Seeder) -> None:
+    seed_full(seeder)
+    data = build_status(seeder.ctx("alice", agent=None)).to_data()
+    delegation = data["me"]["current"]["delegation"]
+    assert (delegation["mode"], delegation["reason"]) == ("off", "no profile")

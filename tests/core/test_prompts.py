@@ -204,7 +204,7 @@ def test_shipped_prompts_are_complete() -> None:
 
 def test_shipped_agents_are_valid() -> None:
     texts = _shipped(".forge/agents")
-    assert sorted(p.stem for p in texts) == ["explorer", "reviewer", "test-writer"]
+    assert sorted(p.stem for p in texts) == ["explorer", "implementer", "reviewer", "test-writer"]
     agents = {p.stem: parse_agent(t, p) for p, t in texts.items()}
     for path, text in texts.items():
         data, _ = split_frontmatter(text, path)
@@ -212,11 +212,16 @@ def test_shipped_agents_are_valid() -> None:
     assert (agents["explorer"].tier, agents["explorer"].effort) == (Tier.LIGHT, Effort.LOW)
     assert (agents["test-writer"].tier, agents["test-writer"].effort) == ("task", Effort.MEDIUM)
     assert (agents["reviewer"].tier, agents["reviewer"].effort) == (Tier.STRONG, Effort.HIGH)
+    assert (agents["implementer"].tier, agents["implementer"].effort) == (
+        Tier.STANDARD,
+        Effort.MEDIUM,
+    )
+    assert agents["implementer"].tools == ("read", "edit", "shell")
 
 
 def test_shipped_prompts_reference_rendered_subagent_names() -> None:
     for path, text in _shipped(".forge/prompts").items():
-        for name in ("explorer", "test-writer", "reviewer"):
+        for name in ("explorer", "test-writer", "reviewer", "implementer"):
             # A bare `explorer` reference in code must use the rendered `forge-` name.
             assert f"`{name}`" not in text, f"{path}: use `forge-{name}`"
 

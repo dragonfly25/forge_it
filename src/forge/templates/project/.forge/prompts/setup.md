@@ -18,15 +18,17 @@ Make this machine ready to work on the project: prerequisites installed, `gh` lo
 3. Show the user what setup will do, before it does anything:
    - The tools it looks for: Claude Code (`claude`), Codex (`codex`) and a local runtime (`ollama`). Say which of these you can see on this machine.
    - For each tool: the preset model for each tier (`strong`, `standard`, `light`) and the project's recommended models. Read the recommended models from `models.recommended` in `.forge/config.yml` (read only). With an existing profile, also run `forge profile show --json` and show the current tier to model map.
+   - The delegation mode: whether the code of a task is written by your main agent (`off`), delegated to the `forge-implementer` subagent when the task is big (`auto`), or always delegated (`on`). Read the project default and the allowed modes from the `delegation` section of `.forge/config.yml` (read only; the defaults are `auto` and all three modes). Delegation costs more tokens in total and saves context and cost per token on long tasks. `off` spends the fewest tokens. It only works with Claude Code or Codex.
    - The project setup commands: the `setup.commands` list in `.forge/config.yml`. Setup runs them in the repository root.
    - That setup turns on git rerere and writes the machine-level agent files, which git ignores.
-4. Create or update the profile and run the project setup. Preferred: ask the user to run `forge setup` in their own terminal. It is interactive: the user accepts or edits each tier, effort and the default agent, and confirms each setup command. Wait for them to say it is done.
+4. Create or update the profile and run the project setup. Preferred: ask the user to run `forge setup` in their own terminal. It is interactive: the user accepts or edits each tier, effort and the default agent, picks the delegation mode (the project default is preselected), and confirms each setup command. Wait for them to say it is done.
    Only when the user has explicitly accepted both the defaults and the setup commands, run:
    `forge setup --yes --json`
    `--yes` accepts every default and runs every setup command without asking.
 5. Apply small profile changes the user asks for:
    `forge profile set <agent>.<tier>=<value> --json` (for example `claude-pro-1.strong=opus`)
    `forge profile set <agent>.effort.<level>=<value> --json`
+   `forge profile set delegation=<mode> --json` (`off`, `auto` or `on`; for example `delegation=off` to spend fewer tokens)
 6. Re-render the machine-level files when the profile changed outside `forge setup`:
    `forge adapters generate --local --json`
 7. Check again:
@@ -43,7 +45,7 @@ Make this machine ready to work on the project: prerequisites installed, `gh` lo
   - Machine prerequisites (git, `gh` missing or not logged in, Python, gitignore patterns, invalid `.forge/config.yml`): stop and fix them. Run `forge setup --check --json` again. Do not go on to the profile step until they pass.
   - A missing or invalid profile: not a stop. Create or repair it in step 4. Then run `forge setup --check --json` again. It must exit 0.
   - After `forge setup`: exit 5 means the profile was written but a prerequisite is still missing. Fix it and run `forge setup --check --json`.
-- For `forge profile set`: `1` means an unknown agent, tier or value. Run `forge profile show --json` and correct the key.
+- For `forge profile set`: `1` means an unknown agent, tier, delegation mode or value. Run `forge profile show --json` and correct the key.
 - For `forge adapters generate --local`: `5` usually means a rendered file would not be ignored by git. Add the missing pattern from `messages` to `.gitignore`, then run it again.
 
 ## Guardrails
@@ -60,6 +62,6 @@ None. Do this work yourself.
 ## Final report
 Tell the user:
 - which checks passed, which warnings remain and what each means;
-- the active profile: agent ids, tier to model map, default agent;
+- the active profile: agent ids, tier to model map, default agent, delegation mode;
 - whether the app started locally, and the command that works;
 - what is still manual (logins, edits) and the next step: `/forge-status`, then `/forge-next`.

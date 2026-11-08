@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from forge.core.config import ForgeConfig, parse_config
+from forge.core.config import DelegationConfig, ForgeConfig, parse_config
 from forge.core.errors import ConfigError, ExitCode, ForgeError, PreconditionError
 from forge.core.git import Git, GitError
 from forge.core.github_fake import FakeGitHub
@@ -30,6 +30,7 @@ from forge.core.setup import (
     DetectedTool,
     MachineEnv,
     SetupTarget,
+    ask_delegation,
     blocking,
     build_profile,
     default_agent_id,
@@ -827,3 +828,112 @@ def test_edit_profile_editor_failure_and_no_change(tmp_path: Path) -> None:
 def test_edit_profile_missing(tmp_path: Path) -> None:
     with pytest.raises(PreconditionError):
         edit_profile(tmp_path / "none.yml", ["ed"], fake_editor(None))
+
+
+# --------------------------------------------------------------------------- delegation
+
+
+def test_wizard_yes_keeps_the_project_default_and_writes_nothing() -> None:
+    io = DefaultsIO()
+    policy = DelegationConfig(default="off")
+    profile = build_profile(io, tools=[CLAUDE], presets=PRESETS, login="alice", delegation=policy)
+    assert profile.delegation is None
+    assert any("project default: off" in line for line in io.lines)
+
+
+def test_wizard_asks_delegation_with_project_default_preselected() -> None:
+    seen: list[tuple[str, list[str], str]] = []
+
+    class Recording(ScriptedIO):
+        def choose(self, prompt: str, choices: Sequence[str], default: str) -> str:
+            seen.append((prompt, list(choices), default))
+            return super().choose(prompt, choices, default)
+
+    io = Recording({"Delegation mode": ["on"]})
+    policy = DelegationConfig(default="off", allowed=("off", "on"))
+    profile = build_profile(io, tools=[CLAUDE], presets=PRESETS, login="alice", delegation=policy)
+    assert seen == [("Delegation mode", ["off", "on"], "off")]
+    assert profile.delegation == "on"
+
+
+def test_wizard_rerun_keeps_an_explicit_delegation() -> None:
+    first = build_profile(
+        ScriptedIO({"Delegation mode": ["auto"]}),
+        tools=[CLAUDE],
+        presets=PRESETS,
+        login="alice",
+    )
+    assert first.delegation is None  # equal to the (built-in) project default
+    explicit = replace(first, delegation="auto")
+    again = build_profile(DefaultsIO(), tools=[CLAUDE], presets=PRESETS, existing=explicit)
+    assert again.delegation == "auto"
+    off = replace(first, delegation="off")
+    assert build_profile(DefaultsIO(), tools=[CLAUDE], presets=PRESETS, existing=off) == off
+
+
+def test_wizard_keeps_a_stored_mode_the_project_does_not_allow() -> None:
+    existing = replace(
+        build_profile(DefaultsIO(), tools=[CLAUDE], presets=PRESETS, login="alice"),
+        delegation="on",
+    )
+    policy = DelegationConfig(default="auto", allowed=("off", "auto"))
+    io = ScriptedIO()
+    profile = build_profile(
+        io, tools=[CLAUDE], presets=PRESETS, existing=existing, delegation=policy
+    )
+    assert profile.delegation == "on"
+    assert not any("Delegation mode" in p for p in io.prompts)
+    assert any("not allowed by this project" in line for line in io.lines)
+    # --yes keeps it too
+    again = build_profile(
+        DefaultsIO(), tools=[CLAUDE], presets=PRESETS, existing=existing, delegation=policy
+    )
+    assert again.delegation == "on"
+
+
+def test_wizard_single_allowed_mode_keeps_the_stored_choice() -> None:
+    existing = replace(
+        build_profile(DefaultsIO(), tools=[CLAUDE], presets=PRESETS, login="alice"),
+        delegation="on",
+    )
+    policy = DelegationConfig(default="off", allowed=("off",))
+    for io in (DefaultsIO(), ScriptedIO()):
+        profile = build_profile(
+            io, tools=[CLAUDE], presets=PRESETS, existing=existing, delegation=policy
+        )
+        assert profile.delegation == "on"
+
+
+def test_wizard_single_allowed_mode_is_not_asked() -> None:
+    io = ScriptedIO()
+    policy = DelegationConfig(default="off", allowed=("off",))
+    profile = build_profile(io, tools=[CLAUDE], presets=PRESETS, login="alice", delegation=policy)
+    assert not any("Delegation" in p for p in io.prompts)
+    assert profile.delegation is None
+
+
+def test_wizard_without_subagent_tools_does_not_ask_delegation() -> None:
+    io = ScriptedIO()
+    profile = build_profile(io, tools=[OLLAMA], presets=PRESETS, login="alice")
+    assert not any("Delegation" in p for p in io.prompts)
+    assert profile.delegation is None
+
+
+def test_ask_delegation_returns_choice() -> None:
+    io = ScriptedIO({"Delegation mode": ["off"]})
+    assert ask_delegation(io, DelegationConfig(), None, tools=["codex"]) == "off"
+
+
+def test_run_setup_uses_the_project_delegation_policy(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    target = replace(
+        project_target(repo, FakeAdapters()),
+        config=replace(make_config(), delegation=DelegationConfig(default="on")),
+    )
+    path = tmp_path / "cfg" / "profile.yml"
+    io = ScriptedIO({"Delegation mode": ["off"]})
+    result = run_setup(io, make_env(), target, path, PRESETS)
+    assert result.code == ExitCode.OK, result.messages
+    assert load_profile(path).delegation == "off"
+    assert result.data["profile"]["delegation"] == "off"

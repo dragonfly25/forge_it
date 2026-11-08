@@ -142,6 +142,7 @@ Select and claim a task (spec §8.1).
 | `--any-tier` | flag | no | - | Include tasks whose tier the agent cannot serve. |
 | `--no-worktree` | flag | no | - | Check the branch out here instead of in a worktree. |
 | `--dry-run` | flag | no | - | Print the ordered candidates; push nothing. |
+| `--delegation` | choice | no | - | Delegation mode for this task (saved locally until release or handoff): off, auto or on. Choices: `off`, `auto`, `on`. |
 
 <a id="forge-plan"></a>
 
@@ -233,7 +234,7 @@ Set <agent>.<tier|effort.level>=<value>.
 
 | Argument | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `SETTING` | str | yes | - | <agent>.<tier>=<model>, <agent>.effort.<level>=<value> or default_agent=<id>. |
+| `SETTING` | str | yes | - | <agent>.<tier>=<model>, <agent>.effort.<level>=<value>, default_agent=<id> or delegation=<off\|auto\|on>. |
 
 <a id="forge-profile-show"></a>
 
@@ -429,6 +430,10 @@ Print the task context: metadata, body, criteria, zones, dependencies, lease, AD
 | --- | --- | --- | --- | --- |
 | `TASK` | str | no | - | M1-T07, #42 or 42 (default: the current task). |
 
+| Option | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `--delegation` | choice | no | - | Delegation mode for this task (saved locally until release or handoff): off, auto or on. Choices: `off`, `auto`, `on`. |
+
 ## Prompts
 
 | Prompt | Description | Args | Roles |
@@ -436,7 +441,7 @@ Print the task context: metadata, body, criteria, zones, dependencies, lease, AD
 | `setup` | Check this machine, create or update your personal profile, and run the project setup | `[--check]` | dev, lead |
 | `plan` | Turn a project spec into a roadmap, or a milestone's specs into a validated task plan, and open a PR | `roadmap <spec-file> \| <milestone> [--update] [--agent <id>]` | lead |
 | `next` | Pick and claim the next available task, then load its context | `[task-id] [--reclaim] [--agent <id>]` | dev |
-| `dev` | Implement the current task inside its zones, with tests, small commits and heartbeats | - | dev |
+| `dev` | Implement the current task inside its zones, with tests, small commits and heartbeats | `[--solo\|--delegate]` | dev |
 | `sync` | Rebase the current task on the default branch, resolve conflicts safely and push | `[--abort]` | dev |
 | `ship` | Sync, run the checks, and open or update the task's pull request | `[--draft]` | dev |
 | `review` | Review a task's pull request against its acceptance criteria, zones, contracts and tests | `<pr-number> [--force]` | dev, lead |

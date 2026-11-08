@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Development agent and delegation switch** (ADR 0017):
+  - **`implementer` subagent**: a fourth subagent, rendered as `forge-implementer` for Claude Code and Codex. It writes the code of a task from a brief written by the main session, which acts as lead.
+  - **Delegation modes**: `off`, `auto` (default) or `on`. `auto` delegates tasks of size M or with two or more zones.
+  - **Who decides**, most specific first:
+    - the task: `forge next`/`forge task show --delegation`, or `/forge-dev --solo` and `--delegate`, saved for the task;
+    - the person: the profile field `delegation`, set by `forge setup` or `forge profile set delegation=<mode>`;
+    - the project: a `delegation:` policy in `.forge/config.yml`.
+  - **Fallback**: tools without native subagents fall back to `off`.
+  - **Where it shows**: the task context, the PR body and `forge status` all show the decision.
+
 ## [0.1.0] - 2026-11-03
 
 ### Added

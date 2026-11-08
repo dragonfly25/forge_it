@@ -54,6 +54,8 @@ Why skills and the `forge-` prefix: the Claude Code docs prefer skills to `.clau
 
 ### Subagent rendering
 
+The template set has four subagents: `explorer`, `test-writer`, `implementer` and `reviewer`. `implementer` (tier `standard`, effort `medium`, tools `read`, `edit`, `shell`) is rendered like the others, as `forge-implementer`: `.claude/agents/forge-implementer.md` for Claude and `.codex/agents/forge-implementer.toml` for Codex. Its model comes from the same resolution, so `config.models.min_tier_for: {implementer: strong}` raises it. The `/forge-dev` prompt uses it only when the delegation decision says so ([ADR 0017](decisions/0017-implementer-subagent-and-delegation.md)).
+
 For each tool present in your profile, Forge renders with one agent of that tool: the `default_agent` if it uses the tool, else the first one. The model comes from model resolution (ADR 0005): the declared tier, raised by `config.models.min_tier_for`, then mapped through the agent's `tiers`.
 
 - `tier: task` renders as `model: inherit` for Claude and leaves `model` out for Codex, because the main session already runs the task's tier.

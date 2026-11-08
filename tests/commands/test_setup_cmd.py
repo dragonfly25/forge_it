@@ -348,10 +348,12 @@ def test_setup_interactive_edit_tier_and_decline_command(
         "",
         "",
         "",  # efforts
+        "off",  # delegation mode (ADR 0017)
         "n",  # run make deps?
     ]
     result = invoke(["--repo", str(root), "setup"], input="\n".join(answers) + "\n")
     assert result.exit_code == 0, result.output
+    assert load_profile(config_home).delegation == "off"
     agent = load_profile(config_home).agents[0]
     assert {str(k): v for k, v in agent.tiers.items()} == {"strong": "fable", "standard": "sonnet"}
     assert machine.shell_log == []
