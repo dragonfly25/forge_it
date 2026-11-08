@@ -252,8 +252,9 @@ class InitReport:
 
 
 NEXT_STEPS = (
-    "Review .forge/config.yml (checks, models; github.repo if it was not detected), "
-    ".forge/team.yml and .forge/zones.yml.",
+    "Lead: run `/forge-configure` (Codex: `$forge-configure`) to fill .forge/config.yml, "
+    ".forge/team.yml and .forge/zones.yml, or edit them by hand; then run "
+    "`forge config validate` until it reports no errors.",
     "Run `forge adapters generate` (and `forge docs` for .forge/prompts/) after editing "
     ".forge/config.yml or .forge/prompts/.",
     "Review the files, then commit them (forge init never commits).",

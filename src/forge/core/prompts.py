@@ -35,6 +35,7 @@ REQUIRED_SECTIONS = ("Goal", "Steps", "Exit codes", "Guardrails", "Subagents", "
 
 COMMAND_ORDER = (
     "setup",
+    "configure",
     "plan",
     "next",
     "dev",
@@ -45,7 +46,8 @@ COMMAND_ORDER = (
     "handoff",
     "release",
 )
-"""Display order of the v0 prompts (spec §12); other prompts follow alphabetically."""
+"""Display order of the v0 prompts (spec §12) plus ``configure`` (ADR 0018); other prompts
+follow alphabetically."""
 
 _NAME_RE = r"[a-z][a-z0-9-]*"
 _FRONT_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)^---[ \t]*(?:\r?\n|\Z)", re.DOTALL | re.MULTILINE)

@@ -151,7 +151,7 @@ Project scaffolding and tool files:
 ### Other directories
 
 - `src/forge/presets/`: tier to model presets per tool (`claude-code.yml`, `codex.yml`, `ollama.yml`). They change with Forge releases.
-- `src/forge/templates/project/`: the files `forge init` copies, loaded with `importlib.resources`. This tree includes the ten prompts in `.forge/prompts/`.
+- `src/forge/templates/project/`: the files `forge init` copies, loaded with `importlib.resources`. This tree includes the eleven prompts in `.forge/prompts/`.
 - `tests/`: unit tests per core module, command tests, shared test worlds in `tests/support/`, snapshots in `tests/snapshots/`.
 
 ## The Git boundary

@@ -4,7 +4,7 @@ This guide takes you from a fresh machine to a merged pull request. It works wit
 
 ## How you talk to Forge
 
-Forge has ten commands for your agent. You can invoke each one in three ways:
+Forge has eleven commands for your agent. You can invoke each one in three ways:
 
 | Where | How | Example |
 |---|---|---|
@@ -119,19 +119,24 @@ Then run `/forge-next` again.
 ## For the lead: adopt Forge in a new project
 
 The lead runs `forge init` once, then:
-1. Edits `.forge/config.yml`: repository, checks, setup commands, model constraints.
-2. Edits `.forge/team.yml`: one entry per person.
-3. Edits `.forge/zones.yml`: the areas of the codebase, with contract zones for shared interfaces.
-4. Commits and pushes these files, with `AGENTS.md` and the generated adapter files.
-5. Writes the roadmap with `/forge-plan roadmap <spec-file>`, then plans the first milestone with `/forge-plan M1`. Both arrive as pull requests. When a plan merges, a workflow creates the task issues.
+1. Runs `/forge-configure` (Codex: `$forge-configure`). The agent reads the codebase and proposes the three project files. After the lead agrees, it writes them, runs `forge config validate`, goes through the warnings with the lead and opens a PR.
+   - `.forge/config.yml`: repository, checks, setup commands, model constraints.
+   - `.forge/team.yml`: one entry per person.
+   - `.forge/zones.yml`: the areas of the codebase, with contract zones for shared interfaces.
 
-See `roles.md` for what the lead does through the project.
+   The lead can also edit these files by hand. Run `forge config validate` afterwards. It checks the three files together and warns about placeholders, files that match no zone and zones that match no file.
+2. Merges the PR (or commits and pushes the files, with `AGENTS.md` and the generated adapter files).
+3. Runs `forge setup` on their own machine.
+4. Writes the roadmap with `/forge-plan roadmap <spec-file>`, then plans the first milestone with `/forge-plan M1`. Both arrive as pull requests. When a plan merges, a workflow creates the task issues.
+
+Run `/forge-configure --update` later, for example after a refactor that moves directories. It changes only what drifted. See `roles.md` for what the lead does through the project.
 
 ## Command reference
 
 | Command | What it does |
 |---|---|
 | `/forge-setup` | Check the machine, create the profile |
+| `/forge-configure` | Lead only. Fill and validate the config, team and zones |
 | `/forge-plan` | Lead only. Roadmap and milestone plans |
 | `/forge-next` | Claim the next task and load its context |
 | `/forge-dev` | Implement the current task |

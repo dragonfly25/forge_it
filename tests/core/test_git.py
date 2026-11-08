@@ -110,6 +110,17 @@ def test_is_dirty(git_world: GitWorld) -> None:
     assert alice.is_dirty(include_untracked=False)
 
 
+def test_tracked_files(git_world: GitWorld) -> None:
+    alice = git_world.clone("alice")
+    git_world.commit_file(alice, "src/a b.py", "x\n", "feat: a")
+    (alice.cwd / "untracked.txt").write_text("u\n")
+    (alice.cwd / "staged.txt").write_text("s\n")
+    alice.add(["staged.txt"])
+    expected = ["README.md", "src/a b.py", "staged.txt"]
+    assert alice.tracked_files() == expected
+    assert Git(alice.cwd / "src").tracked_files() == expected
+
+
 def test_commit_with_trailers_and_commits(git_world: GitWorld) -> None:
     alice = git_world.clone("alice")
     sha = alice.commit(

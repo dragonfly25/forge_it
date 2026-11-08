@@ -23,9 +23,10 @@ A dev does not change the plan, the zones or the project config on their own.
 
 The lead is the person responsible for one milestone. The role rotates between milestones.
 
+- **Configure**: fill `.forge/config.yml`, `team.yml` and `zones.yml` with `/forge-configure`, then check them with `forge config validate`. Run `/forge-configure --update` when the codebase changes shape. The agent proposes, and writes only after the lead agrees. The changes arrive as a pull request.
 - **Plan**: turn specs into a roadmap and a task plan with `/forge-plan`. Plans arrive as pull requests for the team to read.
 - **Approve the plan**: merging the plan pull request makes the `forge-plan-apply` workflow create the task issues. The lead can run `forge plan apply <milestone>` by hand if needed.
-- **Own the zones**: add or change zones in `.forge/zones.yml` when the codebase grows. Mark interface areas as contract zones.
+- **Own the zones**: add or change zones in `.forge/zones.yml` when the codebase grows (`/forge-configure --update` helps). Mark interface areas as contract zones.
 - **Triage proposals**: each proposal is an issue labeled `status:proposed`. The lead accepts it by adding a task with `proposal: <issue number>` to the plan, or rejects it by closing the issue with a comment.
 - **Decide escalations**: when a task is labeled `blocked:conflict`, the lead helps decide who changes what.
 - **Watch the health**: `/forge-status` shows stale claims, proposals waiting, version mismatches and profile problems.

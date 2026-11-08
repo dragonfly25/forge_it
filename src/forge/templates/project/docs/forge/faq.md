@@ -51,12 +51,13 @@ If the Forge repository is private, the workflows cannot install it with the def
 
 ## How do I add a zone?
 
-Zones are owned by the lead. Open a pull request that edits `.forge/zones.yml`:
+Zones are owned by the lead. The lead can run `/forge-configure --update`: the agent reads the codebase, proposes the zone changes and opens the pull request. Or edit by hand. Open a pull request that edits `.forge/zones.yml`:
 
 1. Add the zone under `zones:` with its `paths` (globs relative to the repository root). Names use lowercase letters, digits, `-` and `_`, with `/` between parts.
 2. Mark it `contract: true` if it holds interfaces others depend on (API schemas, database schema, shared types).
 3. If two zones must never run in parallel although their paths differ, list them under `conflicts:`.
-4. Merge it. New tasks can use the zone from then on.
+4. Run `forge config validate`. It reports zones that match no file (often a typo in a glob) and files that match no zone.
+5. Merge it. New tasks can use the zone from then on.
 
 `/forge-ship` warns about files that match no zone. `unzoned: error` in the same file turns that warning into a failure.
 

@@ -45,6 +45,7 @@ TEMPLATE_PATHS = sorted(
             f".forge/prompts/{n}.md"
             for n in (
                 "setup",
+                "configure",
                 "plan",
                 "next",
                 "dev",
@@ -75,6 +76,7 @@ TEMPLATE_PATHS = sorted(
 )
 COMMANDS = (
     "setup",
+    "configure",
     "plan",
     "next",
     "dev",

@@ -139,3 +139,16 @@ Progress notes:
 - the PR body records the decision;
 - the `dev` prompt has both paths and passes the prompt checks;
 - with `delegation: off` the output equals v0.1.0's apart from the new `delegation` field.
+
+## [x] Phase 12 — Guided project configuration
+- [x] `forge config validate [--json]`: offline check of `config.yml`, `team.yml` and `zones.yml` together, with placeholder, lead, unzoned-file and empty-zone warnings (`core/config_check.py`).
+- [x] `configure` prompt (role `lead`), rendered as `/forge-configure` and `$forge-configure`.
+- [x] `forge init` next steps point to `/forge-configure`; README, project docs and CHANGELOG updated.
+
+See ADR 0018.
+
+**Done when:**
+- every error and warning of `forge config validate` has a test, and a broken file does not hide the results of the others;
+- `forge init` writes `configure.md` and the adapters render the `forge-configure` skill;
+- the `configure` prompt passes the prompt checks;
+- `forge docs --check` passes.
