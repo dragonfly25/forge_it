@@ -264,6 +264,41 @@ Validation is offline. It never reads GitHub, so it runs in CI and on a fresh cl
 
 The `min_tier_for.plan` rule applies to validate and apply when a profile exists and `GITHUB_ACTIONS` is not set. An agent below the tier gets exit 5 unless `--force`. `forge arch validate` applies the same rule with `min_tier_for.architecture`.
 
+`forge plan validate <milestone> --skeleton` skips only the `missing_field` errors for `description`, `done_when` and `tier`. Every other check runs in full, and a detail field that is present is still checked. `forge plan apply` has no such flag.
+
+### Multi-agent planning
+
+([ADR 0020](decisions/0020-multi-agent-planning.md))
+
+Large milestones are planned by several agents in parallel. The CLI does the grouping and the merging. The agents do the reasoning. `forge plan split`, `forge plan assemble` and `forge arch split` are offline: they never call GitHub.
+
+**Thresholds.** `planning.max_tasks_per_agent` (default 10) and `planning.max_components_per_agent` (default 3) in `.forge/config.yml`. Up to the threshold, one session does the detail. Above it, `ceil(N / max)` agents get balanced groups of contiguous items: 12 tasks give 6 + 6, 21 give 7 + 7 + 7, 25 give 9 + 8 + 8. Plans count tasks. Architectures count components. Tasks are sorted by component, then wave, then id. Components are sorted by id. The same input always gives the same groups.
+
+**Plan, four phases** (`/forge-plan <M>`):
+
+1. **Exploration.** In parallel, one `forge-explorer` per milestone spec and one per component involved.
+2. **Skeleton.** The main session writes `plans/<M>.yml` with the skeleton fields only: `id`, `title`, `type`, `spec`, `covers`, `depends_on`, `zones`, `size`, `allow_contract_change`, `proposal`, `component`, `implements`, `uses`. It puts no comments in the file. It runs `forge plan validate <M> --skeleton` until there are no errors.
+3. **Detail.** `forge plan split <M>` refuses a skeleton with errors, writes `.forge/local/plan/<M>/batches.json` and deletes fragments of an earlier split. With one agent, the main session writes `description`, `done_when` and `tier` into the plan itself. With more, it spawns one `forge-planner` per group, in parallel. Each writes `part-<k>.yml` and nothing else. Then `forge plan assemble <M>`.
+4. **Review.** In parallel, one `forge-reviewer` per group. The main session then checks the whole plan, edits `plans/<M>.yml` directly and runs `forge plan validate <M>` until there are no errors.
+
+**Architecture, four phases** (`/forge-architect <M>`):
+
+1. **Exploration.** In parallel, one `forge-explorer` per spec and one per code area.
+2. **Structure.** The main session proposes the frontmatter and waits for the lead's go. Then it writes it.
+3. **Detail.** `forge arch split <M>` groups the components and assigns each interface to its producer's group. An interface whose producer is only in `overview.md` goes to `unassigned_interfaces`, and the main session writes it. One `forge-arch-writer` per group writes `.forge/local/arch/<M>/part-<k>.md`. The main session integrates the fragments into `<M>.md` and `overview.md`. There is no `arch assemble`.
+4. **Review.** Two `forge-reviewer` subagents in parallel: spec coverage, and consistency with the code, the ADRs and `overview.md`. Then `forge arch validate <M>` until there are no errors.
+
+**Rules.**
+
+- **Disjoint writes.** Every parallel writer writes only its own fragment. It never edits `plans/`, `docs/`, `specs/` or `.forge/`, and the planner never sets a skeleton field. Claude Code does not resolve conflicts between subagents that write to the same file, and Codex subagents inherit the parent's sandbox, so the disjoint paths are the safeguard.
+- **Local directories.** The fragments live in `.forge/local/plan/<M>/` and `.forge/local/arch/<M>/`. Both commands exit 5 if git would not ignore the directory.
+- **`split` is deterministic.** It writes `batches.json` with sorted keys. It stores `skeleton_sha256`, a hash of the skeleton fields only. Comments, formatting and detail fields do not change it. There is no `--max-per-agent` flag.
+- **`assemble` is atomic.** It refuses with exit 1 when the skeleton changed since `split` (`skeleton_changed`), when a fragment is missing or invalid, or when the merged plan fails validation. On any error it writes nothing. Otherwise it renders the plan to a temporary file and moves it over `plans/<M>.yml`. Running it again gives the same bytes.
+- **Comments are lost.** `assemble` rewrites `plans/<M>.yml` from data, in a fixed key order, so YAML comments are lost.
+- **Fallback.** Without subagents, or when spawning fails, the main session runs the same phases one group at a time, using the same `split` groups. `split` and `arch split` report `subagent.available` for `forge-planner` and `forge-arch-writer`. The final report says that the fallback ran.
+- **`--update` stays single-session.**
+- **Exit codes** for `split` and `assemble`: `0` done, `1` errors in the skeleton, the fragments or the merged plan, `5` a precondition failed (no config, no skeleton, no `batches.json`, directory not ignored). `arch split` uses `0`, `1` and `5` in the same way. None of them uses `2`, `3` or `4`.
+
 ### `forge plan apply <milestone> [--dry-run]`
 
 Apply validates first, then makes GitHub match the plan. It is idempotent. Applying the same plan twice writes nothing.

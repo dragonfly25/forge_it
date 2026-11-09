@@ -1110,3 +1110,180 @@ def test_architecture_fields_format(
     result = project.validate(planning=OPTIONAL)
     issue = only(result.errors, "invalid_field")
     assert (issue.task, issue.field) == ("M1-T01", field)
+
+
+# --------------------------------------------------------------------------- skeleton (ADR 0020)
+
+DETAIL = ("description", "done_when", "tier")
+
+
+def skeleton_tasks() -> list[dict[str, Any]]:
+    """The clean plan without any detail field."""
+    return [{k: v for k, v in t.items() if k not in DETAIL} for t in clean_tasks()]
+
+
+def test_detail_key_constants() -> None:
+    from forge.core.plan import DETAIL_TASK_KEYS, SKELETON_TASK_KEYS, TASK_KEYS
+
+    assert DETAIL_TASK_KEYS == DETAIL
+    assert set(SKELETON_TASK_KEYS) | set(DETAIL_TASK_KEYS) == set(TASK_KEYS)
+    assert SKELETON_TASK_KEYS == (
+        "id",
+        "title",
+        "type",
+        "spec",
+        "covers",
+        "depends_on",
+        "zones",
+        "size",
+        "allow_contract_change",
+        "proposal",
+        "component",
+        "implements",
+        "uses",
+    )
+
+
+def test_skeleton_without_detail_fields_is_ok(project: Project) -> None:
+    project.plan(skeleton_tasks())
+    result = validate_plan(project.root, "M1", zones=ZONES, skeleton=True)
+    assert result.ok, result.errors
+    assert result.skeleton is True
+    data = result.to_data()
+    assert data["skeleton"] is True
+    assert data["tasks"] == ["M1-T01", "M1-T02", "M1-T03"]
+    assert data["waves"] == [["M1-T01"], ["M1-T02", "M1-T03"]]
+    assert data["coverage"]["AC-2"] == ["M1-T02"]
+
+
+def test_without_flag_the_detail_fields_are_required(project: Project) -> None:
+    project.plan(skeleton_tasks())
+    result = project.validate()
+    assert result.skeleton is False and result.to_data()["skeleton"] is False
+    missing = sorted((i.task, i.field) for i in result.errors if i.code == "missing_field")
+    assert missing == sorted((f"M1-T0{n}", k) for n in (1, 2, 3) for k in DETAIL)
+
+
+@pytest.mark.parametrize("key", DETAIL)
+def test_skeleton_skips_each_missing_detail_field(project: Project, key: str) -> None:
+    project.plan([task(1, type="contract", zones=["shared"], **{key: None})])
+    assert validate_plan(project.root, "M1", zones=ZONES, skeleton=True).errors == ()
+
+
+@pytest.mark.parametrize("key", DETAIL)
+def test_skeleton_tolerates_null_detail_field(project: Project, key: str) -> None:
+    data = task(1, type="contract", zones=["shared"])
+    data[key] = None
+    project.plan([data])
+    assert validate_plan(project.root, "M1", zones=ZONES, skeleton=True).errors == ()
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("tier", "huge"),
+        ("done_when", []),
+        ("done_when", [""]),
+        ("description", 42),
+        ("description", "intro\n<!-- forge:begin -->\nmore\n"),
+    ],
+)
+def test_skeleton_still_checks_present_detail_fields(
+    project: Project, key: str, value: Any
+) -> None:
+    project.plan([task(1, type="contract", zones=["shared"], **{key: value})])
+    result = validate_plan(project.root, "M1", zones=ZONES, skeleton=True)
+    issue = only(result.errors, "invalid_field")
+    assert issue.task == "M1-T01" and key in (issue.field or "")
+
+
+@pytest.mark.parametrize("key", ["title", "type", "spec", "covers", "depends_on", "zones", "size"])
+def test_skeleton_still_requires_skeleton_fields(project: Project, key: str) -> None:
+    tasks = skeleton_tasks()
+    del tasks[0][key]
+    project.plan(tasks)
+    result = validate_plan(project.root, "M1", zones=ZONES, skeleton=True)
+    issue = only(result.errors, "missing_field")
+    assert (issue.task, issue.field) == ("M1-T01", key)
+
+
+def test_skeleton_runs_every_other_check(project: Project) -> None:
+    tasks = skeleton_tasks()
+    tasks[0]["owner"] = "alice"  # unknown_field
+    tasks[1]["zones"] = ["nowhere"]  # unknown_zone
+    tasks[2]["zones"] = ["shared"]  # contract_zone
+    tasks[2]["depends_on"] = ["M1-T09"]  # unknown_dependency
+    tasks.append({**skeleton_tasks()[1], "id": "M1-T04", "size": "L"})  # size_too_large
+    tasks.append({**skeleton_tasks()[1], "id": "M1-T02"})  # duplicate_id
+    project.plan(tasks)
+    result = validate_plan(project.root, "M1", zones=ZONES, skeleton=True)
+    assert set(codes(result.errors)) >= {
+        "unknown_field",
+        "unknown_zone",
+        "contract_zone",
+        "unknown_dependency",
+        "size_too_large",
+        "duplicate_id",
+    }
+    assert "missing_field" not in codes(result.errors)
+
+
+def test_skeleton_still_detects_cycles(project: Project) -> None:
+    tasks = skeleton_tasks()
+    tasks[0]["depends_on"] = ["M1-T02"]
+    project.plan(tasks)
+    result = validate_plan(project.root, "M1", zones=ZONES, skeleton=True)
+    assert "dependency_cycle" in codes(result.errors)
+    assert result.waves == ()
+
+
+def test_skeleton_still_warns(project: Project) -> None:
+    tasks = skeleton_tasks()
+    tasks[2]["zones"] = ["api"]
+    project.plan(tasks)
+    result = validate_plan(project.root, "M1", zones=ZONES, skeleton=True)
+    assert result.ok and codes(result.warnings) == ["zone_overlap"]
+
+
+def test_skeleton_runs_architecture_checks(project: Project) -> None:
+    write_arch(project)
+    tasks = [{k: v for k, v in t.items() if k not in DETAIL} for t in arch_tasks()]
+    project.plan(tasks)
+    ok = validate_plan(project.root, "M1", zones=ZONES, planning=REQUIRED, skeleton=True)
+    assert ok.ok, ok.errors
+    assert ok.architecture.interfaces == {"IF-schema": "M1-T01"}
+
+    tasks[2]["component"] = "ghost"
+    project.plan(tasks)
+    bad = validate_plan(project.root, "M1", zones=ZONES, planning=REQUIRED, skeleton=True)
+    assert "missing_field" not in codes(bad.errors)
+    assert bad.errors and all(i.code != "missing_field" for i in bad.errors)
+
+
+def test_skeleton_cannot_pass_a_draft_architecture(project: Project) -> None:
+    write_arch(project, arch_front(status="draft"))
+    tasks = [{k: v for k, v in t.items() if k not in DETAIL} for t in arch_tasks()]
+    project.plan(tasks)
+    result = validate_plan(project.root, "M1", zones=ZONES, planning=REQUIRED, skeleton=True)
+    only(result.errors, "architecture_draft")
+
+
+def test_skeleton_required_architecture_missing(project: Project) -> None:
+    project.plan(skeleton_tasks())
+    result = validate_plan(project.root, "M1", zones=ZONES, planning=REQUIRED, skeleton=True)
+    assert codes(result.errors) == ["architecture_missing"]
+
+
+def test_skeleton_plan_missing_and_invalid_milestone(project: Project) -> None:
+    assert codes(validate_plan(project.root, "M7", zones=ZONES, skeleton=True).errors) == [
+        "plan_missing"
+    ]
+    bad = validate_plan(project.root, "first", zones=ZONES, skeleton=True)
+    assert codes(bad.errors) == ["invalid_milestone"] and bad.skeleton is True
+
+
+def test_skeleton_on_a_full_plan_matches_the_full_validation(project: Project) -> None:
+    project.plan(clean_tasks())
+    full = project.validate().to_data()
+    skel = validate_plan(project.root, "M1", zones=ZONES, skeleton=True).to_data()
+    assert {**skel, "skeleton": False} == full

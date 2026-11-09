@@ -181,5 +181,30 @@ Progress notes:
 - the ADR 0017 golden test passes with only the `architecture` field added;
 - `forge docs --check` passes.
 
-## [ ] Phase 14 — Multi-agent planning
-Placeholder. This phase will let several agents plan one milestone in parallel. The batches will be bounded by `planning.max_tasks_per_agent` and `planning.max_components_per_agent`, which phase 13 already validates. ADR 0020 will specify the scope, the steps and the definition of done before work starts.
+## [x] Phase 14 — Multi-agent planning
+- [x] `core/batching.py`: `balanced_batches(items, max_per_agent, key)`, pure and deterministic. One group up to the bound, else `ceil(N/max)` balanced contiguous groups after sorting by key.
+- [x] `forge plan validate <M> --skeleton`: does not require `description`, `done_when` or `tier`. Every other check runs.
+- [x] `forge plan split <M> [--json]`: checks the skeleton, groups the tasks by `planning.max_tasks_per_agent`, writes `.forge/local/plan/<M>/batches.json` with the skeleton hash, clears stale fragments and reports whether `forge-planner` is available.
+- [x] `forge plan assemble <M> [--json]`: checks every fragment (`part-<k>.yml`: `id`, `description`, `done_when`, `tier` only), merges, runs the full validation, and writes `plans/<M>.yml` atomically and deterministically. It writes nothing on any error.
+- [x] `forge arch split <M> [--json]`: groups the components of `<M>.md` by `planning.max_components_per_agent`, assigns each interface to its producer's batch, and gives the fragment paths. There is no `arch assemble`.
+- [x] Subagents `planner` (standard / medium, read + edit) and `arch-writer` (strong / high, read + edit), rendered as `forge-planner` and `forge-arch-writer`. `reviewer` gains a paragraph for reviewing a plan or an architecture.
+- [x] Prompts `plan` and `architect`: the four phases (exploration, skeleton or structure, detail, review), parallel spawning, the planner brief, and the sequential fallback.
+- [x] Docs: README (one line at most), `docs/guides/lead.md` (multi-agent planning section), `docs/protocol.md`, `docs/adapters.md` (six subagents), CHANGELOG, spec notes in §5.3, §9, §12, §12.1 and §16, and a regenerated `docs/commands.md`.
+
+See ADR 0020.
+
+Progress notes:
+- **Tool check (2026-11-09)**: Claude Code and Codex both run subagents in parallel on a shared filesystem; fragments are disjoint files, so parallel planners are safe. Prompts ask explicitly for parallel spawning (Codex needs it) and fall back to sequential groups.
+- **Naming**: the architecture subagent is `arch-writer` (`forge-arch-writer`), so it is not confused with the `/forge-architect` skill.
+- **Amendment**: `arch split` also refuses when `.forge/local/` is not git-ignored, and reports `agents: 0` when there is nothing to distribute.
+- **Reviews**: one pass; every medium and low finding fixed.
+
+**Done when:**
+- `tests/core/test_batching.py` covers 0, 10, 11, 12, 20, 21, 25, 30 and 31 items, and a shuffled input gives the same output;
+- `--skeleton` has tests for the three skipped fields and for an error that still fires;
+- the split and assemble tests cover the happy path, every error code and exit code, atomicity (the plan is unchanged after any error), a changed skeleton, a re-run with `changed: false`, and identical output from two assembles of the same input;
+- the `arch split` tests cover grouping, interfaces without a producer in `<M>.md`, the refusal on frontmatter errors, and exit codes 0, 1 and 5;
+- `forge init` writes `planner.md` and `arch-writer.md`, the adapters render both, and the tests pinning the subagent set and the init snapshot pass;
+- the `plan` and `architect` prompts pass the prompt checks (12 prompts);
+- ADR 0020 records the Claude Code and Codex verification;
+- `forge docs --check` passes.

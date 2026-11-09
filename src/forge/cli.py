@@ -270,6 +270,12 @@ app.command("review", help="Print a pull request's review context, or submit a r
 app.command("handoff", help="Hand the current task off with a note (§8.3).")(handoff_cmd.handoff)
 app.command("propose", help="Propose new work as a status:proposed issue.")(propose_cmd.propose)
 plan_app.command("validate", help="Validate a milestone plan offline (§9.4).")(plan_cmd.validate)
+plan_app.command(
+    "split", help="Group a plan skeleton's tasks for parallel planners (offline, ADR 0020)."
+)(plan_cmd.split)
+plan_app.command(
+    "assemble", help="Merge the planners' fragments into the plan (offline, ADR 0020)."
+)(plan_cmd.assemble)
 plan_app.command("apply", help="Create or update the milestone's task issues (§9.5).")(
     plan_apply_cmd.apply
 )

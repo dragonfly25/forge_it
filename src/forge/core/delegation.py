@@ -35,6 +35,7 @@ from forge.core.errors import ForgeError
 from forge.core.presets import Preset
 from forge.core.profile import AgentProfile, Profile
 from forge.core.prompts import AGENTS_DIR, AgentDef, parse_agent, read_text
+from forge.core.subagents import GENERATE_LOCAL, SUBAGENT_TOOLS, rendered_subagent_path
 from forge.core.tasks import Size, TaskMetadata
 
 Source = Literal["invocation", "profile", "project"]
@@ -48,13 +49,8 @@ IMPLEMENTER = "implementer"
 IMPLEMENTER_PATH = AGENTS_DIR / f"{IMPLEMENTER}.md"
 """The implementer template, relative to the repository root."""
 
-SUBAGENT_TOOLS: tuple[str, ...] = (claude.TOOL, codex.TOOL)
-"""Agent tools with native subagents, so the only ones that can delegate."""
-
 AUTO_MIN_ZONES = 2
 """``auto`` delegates a task with at least this many zones (or with ``size: M``)."""
-
-GENERATE_LOCAL = "forge adapters generate --local"
 
 TEMPLATE_HINT = f"forge/templates/project/{IMPLEMENTER_PATH.as_posix()}"
 """Where the implementer template lives inside the installed ``forge`` package."""
@@ -313,11 +309,7 @@ def implementer_model(
 
 def rendered_path(tool: str) -> Path | None:
     """Repository-relative path of the rendered ``forge-implementer`` for ``tool``."""
-    if tool == claude.TOOL:
-        return claude.subagent_path(IMPLEMENTER)
-    if tool == codex.TOOL:
-        return codex.subagent_path(IMPLEMENTER)
-    return None
+    return rendered_subagent_path(tool, IMPLEMENTER)
 
 
 def delegation_for(

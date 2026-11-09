@@ -32,7 +32,6 @@ import yaml
 
 from forge.core import adapters
 from forge.core.config import DelegationConfig, DelegationMode, ForgeConfig, check_cli_version
-from forge.core.delegation import SUBAGENT_TOOLS
 from forge.core.errors import ConfigError, ExitCode, ForgeError, PreconditionError
 from forge.core.git import Git, GitError
 from forge.core.github import (
@@ -54,6 +53,7 @@ from forge.core.profile import (
     profile_to_data,
     save_profile,
 )
+from forge.core.subagents import SUBAGENT_TOOLS
 from forge.core.team import LOGIN_RE
 from forge.core.tiers import EFFORTS, TIERS, Effort, Tier
 from forge.core.validate import Fields

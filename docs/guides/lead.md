@@ -176,6 +176,66 @@ Errors stop the plan (exit 1). Warnings do not.
 
 With mode `optional` and no file, validate prints one info line: `no architecture for <M> (planning.architecture: optional)`.
 
+### Multi-agent planning
+
+A large milestone fills one agent's context, and the last tasks get worse. When a milestone is large, `/forge-plan <M>` and `/forge-architect <M>` share the detail work between several subagents that run in parallel. You run the same commands. The agent decides from the size. See [ADR 0020](../decisions/0020-multi-agent-planning.md) for the formats and the decisions.
+
+**When it starts.** Two keys in `.forge/config.yml` set the thresholds:
+
+```yaml
+planning:
+  max_tasks_per_agent: 10        # integer >= 1, default 10
+  max_components_per_agent: 3    # integer >= 1, default 3
+```
+
+- **Plan**: only tasks are counted. Up to `max_tasks_per_agent` tasks, one session writes the detail. Above it, `ceil(N / max)` agents each get a balanced group: 12 tasks → 6 + 6, 21 → 7 + 7 + 7, 25 → 9 + 8 + 8.
+- **Architecture**: the same formula, with components as the unit and `max_components_per_agent` as the threshold.
+- A project without a `planning` block uses the defaults. The bound comes only from the config, so a change goes through a PR. There is no command-line flag.
+- Tasks are grouped by component, then by wave, so a component's tasks stay together and contracts come before the work that depends on them.
+
+**The four phases of a plan.**
+
+1. **Exploration**: in parallel, one `forge-explorer` per spec and one per component involved. Each returns a short summary.
+2. **Skeleton**: the main session writes `plans/<M>.yml` with the skeleton fields only (ids, titles, types, specs, `covers`, dependencies, zones, sizes, `component`, `implements`, `uses`). It runs `forge plan validate <M> --skeleton` until there are no errors.
+3. **Detail**: `forge plan split <M>` makes the groups. One `forge-planner` per group writes `description`, `done_when` and `tier` for its tasks, into its own fragment. Then `forge plan assemble <M>` merges the fragments into `plans/<M>.yml`.
+4. **Review**: in parallel, one `forge-reviewer` per group checks its tasks against the specs and the architecture. The main session checks the whole plan, fixes `plans/<M>.yml` directly and runs `forge plan validate <M>` until there are no errors.
+
+**The four phases of an architecture.**
+
+1. **Exploration**: in parallel, one `forge-explorer` per spec and one per code area the specs touch.
+2. **Structure**: the main session proposes the frontmatter (components, interfaces, key decisions) and waits for your go. Then it writes the frontmatter of `<M>.md`.
+3. **Detail**: `forge arch split <M>` makes the groups of components. One `forge-arch-writer` per group writes the component and interface sections for its group, into its own fragment. The main session integrates the fragments into the body of `<M>.md`, writes the other sections and updates `overview.md`. There is no `arch assemble`: the body is free text under fixed sections, so a person or the main session has to make it one coherent document.
+4. **Review**: two `forge-reviewer` subagents in parallel. One checks that the specs are covered. The other checks consistency with the code, the ADRs and `overview.md`. The main session integrates the findings and runs `forge arch validate <M>` until there are no errors.
+
+Your go, the `status: ready` rule and the PRs `arch: <M>` and `plan: <M>` do not change. `--update` stays single-session.
+
+**Commands.** All are offline and print the envelope with `--json`. Exit codes: `0` done, `1` errors in the content, `5` a precondition failed.
+
+| Command | What it does | Main errors |
+|---|---|---|
+| `forge plan validate <M> --skeleton` | Same checks as `forge plan validate`, except the `missing_field` errors for `description`, `done_when` and `tier`. Fields that are present are still checked. | Exit 1: any other plan error. Exit 5: as for `plan validate` (`min_tier_for.plan`; `--force` overrides). |
+| `forge plan split <M>` | Checks the skeleton, groups the tasks, writes `batches.json` and deletes old fragments. Reports whether `forge-planner` is available. | Exit 1: skeleton errors, `plan_empty`. Exit 5: no config, `plan_missing`, `not_ignored` (`.forge/local/` is not in `.gitignore`). |
+| `forge plan assemble <M>` | Checks the fragments, merges them, validates the merged plan and rewrites `plans/<M>.yml`. Writes nothing on any error. | Exit 1: `skeleton_changed`, `fragment_missing`, `fragment_invalid`, `fragment_mismatch`, `unassigned_task`, `missing_task`, `duplicate_id`, `skeleton_field`, `unknown_field`, `missing_field`, `invalid_field`, and any error of the merged plan. Exit 5: no config, no plan, `split_missing`. |
+| `forge arch split <M>` | Checks the frontmatter, groups the components, assigns each interface to its producer's group and deletes old fragments. | Exit 1: frontmatter errors (a missing section is allowed at this point). Exit 5: no config, `architecture_missing`, `not_ignored`. |
+
+Every fragment error names the fragment file, the task and the field. If `assemble` says `skeleton_changed`, you or the agent edited the skeleton after `split`. Run `forge plan split <M>` again and redo the detail.
+
+**Working files.** They are git-ignored, in your worktree:
+
+| Path | Content |
+|---|---|
+| `.forge/local/plan/<M>/batches.json` | The groups, the hash of the skeleton and the fragment paths. |
+| `.forge/local/plan/<M>/part-<k>.yml` | The fragment of group `k`: `description`, `done_when` and `tier` per task. |
+| `.forge/local/arch/<M>/part-<k>.md` | The fragment of group `k`: component and interface sections, and notes for the main session. |
+
+Each writer writes only its own file, so parallel subagents never touch the same file. `split` and `arch split` refuse to run if `.forge/local/` is not ignored by git.
+
+**Without subagents.** If the tool has no subagents (the generic adapter, local models), or the agent cannot start them, the main session does the same phases one group at a time. It uses the same `split` groups, writes `part-1.yml`, `part-2.yml` and so on itself, and then runs `assemble`. The final report says that the sequential fallback ran, and why. `split` and `arch split` report whether the subagent is available. Existing projects get `planner.md` and `arch-writer.md` by running `forge init` again and then `forge adapters generate --local`. Until then the agent works sequentially.
+
+**`assemble` rewrites `plans/<M>.yml` without comments.** It builds the whole file from data, in a fixed key order, so YAML comments in the skeleton are lost and the formatting changes. The same input always gives the same bytes. Put your reasons in the PR body, not in the file. The first plan PR shows the rewritten form.
+
+To raise the tier of these subagents, use `models.min_tier_for.planner` or `models.min_tier_for.arch-writer`. The keys `plan` and `architecture` apply to the session that runs the validate command, not to them.
+
 ## 6. Apply
 
 Merging `plans/M1.yml` to the default branch runs the `forge-plan-apply` workflow. It runs `forge plan validate` and `forge plan apply`. It creates the GitHub milestone and one issue per task. You can run `forge plan apply M1 --dry-run` first, or `forge plan apply M1` by hand.
@@ -227,7 +287,7 @@ What is not enforced:
 | Workflows | `.github/workflows/forge-*.yml` | yes |
 | A developer's profile (tiers to models, agent labels, no credentials) | `~/.config/forge/profile.yml` | no |
 | Rendered subagents with the developer's models | `.claude/agents/forge-*.md`, `.codex/agents/forge-*.toml` | no (gitignored) |
-| Local task state | `<worktree>/.forge/local/` | no (gitignored) |
+| Local task state, and the planning fragments (`plan/<M>/`, `arch/<M>/`) | `<worktree>/.forge/local/` | no (gitignored) |
 | Worktrees | `<parent-of-repo>/<repo>-worktrees/task-<n>/` | no |
 
 Task state itself lives on GitHub: issues, milestones, labels, branches `task/<n>` and PRs.
@@ -244,4 +304,5 @@ Task state itself lives on GitHub: issues, milestones, labels, branches `task/<n
 - [Protocol](../protocol.md), section 9 for planning.
 - [ADR 0013](../decisions/0013-planning.md) for plan validate and apply.
 - [ADR 0019](../decisions/0019-milestone-architecture.md) for the architecture.
+- [ADR 0020](../decisions/0020-multi-agent-planning.md) for multi-agent planning.
 - [ADR 0018](../decisions/0018-guided-project-configuration.md) for `/forge-configure`.

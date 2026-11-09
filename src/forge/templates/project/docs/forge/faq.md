@@ -70,6 +70,18 @@ It depends on `planning.architecture` in `.forge/config.yml`:
 
 A project created before this setting has no `planning` block. A missing block, or a missing `architecture` key, means `optional`, so existing plans and the workflow keep working with no edit. To switch, the lead adds `planning: {architecture: required}` through a pull request. The next plan change then needs `/forge-architect <milestone>` first. `forge arch validate <milestone>` always checks the file, whatever the mode.
 
+## How does Forge plan a large milestone?
+
+`/forge-plan <milestone>` works in four phases:
+1. **Exploration**: `forge-explorer` subagents read the specs and the code in parallel.
+2. **Skeleton**: the lead's agent writes the tasks with ids, dependencies, zones and components, and checks them with `forge plan validate <milestone> --skeleton`.
+3. **Detail**: `forge plan split <milestone>` makes balanced batches of at most `planning.max_tasks_per_agent` tasks (default 10; 12 tasks give 6 + 6). One `forge-planner` per batch writes `description`, `done_when` and `tier` into its own file under `.forge/local/plan/<milestone>/`. `forge plan assemble <milestone>` merges them into `plans/<milestone>.yml`. With 10 tasks or fewer, one session does it all.
+4. **Review**: `forge-reviewer` subagents check each batch in parallel, then `forge plan validate <milestone>` checks the whole plan.
+
+`/forge-architect <milestone>` follows the same pattern with `forge arch split <milestone>`, `forge-arch-writer` and `planning.max_components_per_agent` (default 3). There the main agent merges the fragments by hand. If your tool has no subagents, the agent does the batches one at a time and says so. `--update` always runs in one session.
+
+`forge plan assemble` rewrites `plans/<milestone>.yml` in a fixed format and drops YAML comments. Put reasons in the PR body.
+
 ## Where is my profile, and does it hold secrets?
 
 Your profile is in `~/.config/forge/profile.yml` (or `$XDG_CONFIG_HOME/forge/profile.yml`). It maps tiers to models for each of your agents. It holds labels only. Forge never stores credentials. Your tools keep their own logins.

@@ -34,15 +34,17 @@ from __future__ import annotations
 
 import difflib
 import re
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal
 
 # A module import, not ``from forge.core.plan import PlanIssue``: plan.py will import this
 # module back for the architecture checks, and a module import tolerates the cycle.
 from forge.core import plan as _plan
+from forge.core.batching import balanced_batches, component_key
 from forge.core.errors import ConfigError
+from forge.core.graph import natural_key
 from forge.core.spec import (
     MILESTONE_RE,
     OpenQuestion,
@@ -974,11 +976,214 @@ def validate_architecture(
     )
 
 
+# --------------------------------------------------------------------------- split (ADR 0020)
+
+ARCH_WRITER = "arch-writer"
+"""Name of the architecture writer definition in ``.forge/agents/`` (``forge-arch-writer``)."""
+
+ARCH_LOCAL_DIR = Path(".forge/local/arch")
+"""Git-ignored directory of the architecture fragments, one sub-directory per milestone."""
+
+SPLIT_TOLERATED_CODES: frozenset[str] = frozenset({"missing_section"})
+"""Error codes ``forge arch split`` tolerates: the body is still being written."""
+
+SPLIT_PRECONDITION_CODES: frozenset[str] = frozenset({"architecture_missing", "not_ignored"})
+"""Error codes of ``forge arch split`` that are failed preconditions (exit 5)."""
+
+_FIRST_CODES: frozenset[str] = frozenset({"invalid_milestone", "architecture_missing"})
+"""Errors ``forge arch split`` reports before the ``not_ignored`` check."""
+
+
+def arch_split_dir(milestone: str) -> Path:
+    """Directory of the fragments of ``milestone``, relative to the repository root."""
+    return ARCH_LOCAL_DIR / milestone
+
+
+def arch_part_path(milestone: str, index: int) -> Path:
+    """Path of the fragment of batch ``index`` (from 1), relative to the repository root."""
+    return arch_split_dir(milestone) / f"part-{index}.md"
+
+
+@dataclass(frozen=True)
+class ArchBatch:
+    """One group of components for one ``forge-arch-writer``, with the interfaces they produce.
+
+    ``index`` starts at 1; ``part_path`` is repository-relative (posix).
+    """
+
+    index: int
+    component_ids: tuple[str, ...]
+    interface_ids: tuple[str, ...]
+    part_path: str
+
+    def to_data(self) -> dict[str, Any]:
+        """JSON view: ``{"index", "component_ids", "interface_ids", "part_path"}``."""
+        return {
+            "index": self.index,
+            "component_ids": list(self.component_ids),
+            "interface_ids": list(self.interface_ids),
+            "part_path": self.part_path,
+        }
+
+
+@dataclass(frozen=True)
+class ArchSplit:
+    """Result of :func:`split_architecture`.
+
+    ``errors`` are the blocking errors of :func:`validate_architecture` (every error except
+    :data:`SPLIT_TOLERATED_CODES`); when there are any, ``batches`` is empty.
+    ``unassigned_interfaces`` are the interfaces of ``<M>.md`` whose producer is declared only
+    in ``overview.md``: the main session writes them. ``removed_parts`` is filled by
+    :func:`write_arch_split`.
+    """
+
+    milestone: str
+    file: str
+    max_per_agent: int
+    batches: tuple[ArchBatch, ...] = ()
+    unassigned_interfaces: tuple[str, ...] = ()
+    errors: tuple[PlanIssue, ...] = ()
+    warnings: tuple[PlanIssue, ...] = ()
+    removed_parts: tuple[str, ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        """True when there are no blocking errors."""
+        return not self.errors
+
+    @property
+    def agents(self) -> int:
+        """Number of writer sessions (the number of batches)."""
+        return len(self.batches)
+
+    @property
+    def missing(self) -> bool:
+        """True when ``<M>.md`` does not exist (a precondition, exit 5)."""
+        return any(e.code == "architecture_missing" for e in self.errors)
+
+    @property
+    def precondition_failed(self) -> bool:
+        """True when an error is a failed precondition (exit 5)."""
+        return any(e.code in SPLIT_PRECONDITION_CODES for e in self.errors)
+
+    def to_data(self) -> dict[str, Any]:
+        """JSON ``data`` of ``forge arch split`` (without the ``subagent`` block)."""
+        return {
+            "milestone": self.milestone,
+            "file": self.file,
+            "agents": self.agents,
+            "max_per_agent": self.max_per_agent,
+            "batches": [b.to_data() for b in self.batches],
+            "unassigned_interfaces": list(self.unassigned_interfaces),
+            "removed_parts": list(self.removed_parts),
+            "errors": [i.to_data() for i in self.errors],
+            "warnings": [i.to_data() for i in self.warnings],
+        }
+
+
+def split_architecture(
+    repo_root: Path,
+    milestone: str,
+    *,
+    zones: ZonesConfig,
+    max_per_agent: int,
+    is_ignored: Callable[[Path], bool],
+) -> ArchSplit:
+    """Group the components of ``docs/architecture/<milestone>.md`` for the detail phase.
+
+    Runs :func:`validate_architecture`. An invalid milestone or a missing ``<M>.md`` is
+    reported first; then ``.forge/local/arch/<M>/`` not ignored by git per ``is_ignored``
+    (``not_ignored``, a precondition: fragments must never be committed); then any other
+    error except ``missing_section`` refuses (``errors`` set, no batches). Otherwise the
+    components are cut with :func:`~forge.core.batching.balanced_batches` (``max_per_agent`` is
+    ``planning.max_components_per_agent``, key: the component id). Each interface of
+    ``<M>.md`` goes to the batch of its ``producer``, or to ``unassigned_interfaces`` when the
+    producer is declared only in ``overview.md``. Interface ids are sorted in natural order
+    (``IF-2`` before ``IF-10``). No component to distribute gives no batch (``agents`` 0).
+    Reads files only; :func:`write_arch_split` does the writing. Raises :class:`ValueError`
+    when ``max_per_agent < 1``.
+    """
+    validation = validate_architecture(repo_root, milestone, zones=zones)
+    errors = tuple(e for e in validation.errors if e.code not in SPLIT_TOLERATED_CODES)
+    base = ArchSplit(
+        milestone=milestone,
+        file=validation.file,
+        max_per_agent=max_per_agent,
+        errors=errors,
+        warnings=validation.warnings,
+    )
+    if any(e.code in _FIRST_CODES for e in errors):
+        return replace(base, errors=tuple(e for e in errors if e.code in _FIRST_CODES))
+    local = arch_split_dir(milestone)
+    if not is_ignored(arch_part_path(milestone, 1)):
+        return replace(
+            base,
+            errors=(
+                _plan.PlanIssue(
+                    "error",
+                    "not_ignored",
+                    f"git would not ignore {local.as_posix()}/",
+                    file=".gitignore",
+                    hint="add `.forge/local/` to `.gitignore`",
+                ),
+            ),
+        )
+    if errors:
+        return base
+    architecture = validation.architecture
+    assert architecture is not None  # no error, so the frontmatter was read
+    groups = balanced_batches(architecture.components, max_per_agent, lambda c: component_key(c.id))
+    owner = {c.id: index for index, group in enumerate(groups, start=1) for c in group}
+    by_batch: dict[int, list[str]] = {}
+    unassigned: list[str] = []
+    for item in milestone_interfaces(architecture).values():
+        index = owner.get(item.producer)
+        if index is None:
+            unassigned.append(item.id)
+        else:
+            by_batch.setdefault(index, []).append(item.id)
+    batches = tuple(
+        ArchBatch(
+            index=index,
+            component_ids=tuple(c.id for c in group),
+            interface_ids=tuple(sorted(by_batch.get(index, []), key=natural_key)),
+            part_path=arch_part_path(milestone, index).as_posix(),
+        )
+        for index, group in enumerate(groups, start=1)
+    )
+    return replace(
+        base, batches=batches, unassigned_interfaces=tuple(sorted(unassigned, key=natural_key))
+    )
+
+
+def write_arch_split(repo_root: Path, split: ArchSplit) -> ArchSplit:
+    """Prepare ``.forge/local/arch/<M>/`` for the fragments of ``split``.
+
+    Creates the directory and deletes the stale ``part-*.md`` files left there by an earlier
+    split (old fragments would not match the new groups). Writes nothing else. Returns
+    ``split`` with ``removed_parts`` (repository-relative, sorted). Raises
+    :class:`ValueError` when ``split`` has errors.
+    """
+    if not split.ok:
+        raise ValueError("cannot write an architecture split with errors")
+    rel = arch_split_dir(split.milestone)
+    directory = repo_root / rel
+    directory.mkdir(parents=True, exist_ok=True)
+    removed: list[str] = []
+    for path in sorted(directory.glob("part-*.md")):
+        if path.is_file():
+            path.unlink()
+            removed.append((rel / path.name).as_posix())
+    return replace(split, removed_parts=tuple(removed))
+
+
 __all__ = [
     "ARCHITECTURE_DIR",
     "ARCHITECTURE_KEYS",
     "ARCHITECTURE_ROLE",
     "ARCHITECTURE_STATUSES",
+    "ARCH_LOCAL_DIR",
+    "ARCH_WRITER",
     "COMPONENT_ID_RE",
     "COMPONENT_KEYS",
     "INTERFACE_ID_RE",
@@ -986,13 +1191,19 @@ __all__ = [
     "OVERVIEW_KEYS",
     "OVERVIEW_PATH",
     "SECTIONS",
+    "SPLIT_PRECONDITION_CODES",
+    "SPLIT_TOLERATED_CODES",
     "STRUCTURAL_CODES",
+    "ArchBatch",
+    "ArchSplit",
     "Architecture",
     "ArchitectureStatus",
     "ArchitectureValidation",
     "Component",
     "Interface",
     "Overview",
+    "arch_part_path",
+    "arch_split_dir",
     "architecture_path",
     "component_zones",
     "existing_interfaces",
@@ -1002,5 +1213,7 @@ __all__ = [
     "milestone_interfaces",
     "resolve_component",
     "resolve_interface",
+    "split_architecture",
     "validate_architecture",
+    "write_arch_split",
 ]

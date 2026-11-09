@@ -64,11 +64,26 @@ Regenerate adapter files; --check fails on drift (§13).
 forge arch [OPTIONS] COMMAND [ARGS]...
 ```
 
-Validate milestone architectures (ADR 0019).
+Validate and split milestone architectures (ADR 0019, ADR 0020).
 
 Subcommands:
 
+- [`forge arch split`](#forge-arch-split)
 - [`forge arch validate`](#forge-arch-validate)
+
+<a id="forge-arch-split"></a>
+
+### `forge arch split`
+
+```text
+forge arch split [OPTIONS] {milestone}
+```
+
+Group a milestone's components for parallel writers (offline, ADR 0020).
+
+| Argument | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `MILESTONE` | str | yes | - | Milestone id, e.g. M1. |
 
 <a id="forge-arch-validate"></a>
 
@@ -208,11 +223,13 @@ Select and claim a task (spec §8.1).
 forge plan [OPTIONS] COMMAND [ARGS]...
 ```
 
-Validate and apply milestone plans (§9).
+Validate, split, assemble and apply milestone plans (§9, ADR 0020).
 
 Subcommands:
 
 - [`forge plan apply`](#forge-plan-apply)
+- [`forge plan assemble`](#forge-plan-assemble)
+- [`forge plan split`](#forge-plan-split)
 - [`forge plan validate`](#forge-plan-validate)
 
 <a id="forge-plan-apply"></a>
@@ -234,6 +251,34 @@ Create or update the milestone's task issues (§9.5).
 | `--dry-run` | flag | no | - | Print what would change on GitHub; write nothing. |
 | `--force` | flag | no | - | Apply even if the agent cannot serve models.min_tier_for.plan. |
 
+<a id="forge-plan-assemble"></a>
+
+### `forge plan assemble`
+
+```text
+forge plan assemble [OPTIONS] {milestone}
+```
+
+Merge the planners' fragments into the plan (offline, ADR 0020).
+
+| Argument | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `MILESTONE` | str | yes | - | Milestone id, e.g. M1. |
+
+<a id="forge-plan-split"></a>
+
+### `forge plan split`
+
+```text
+forge plan split [OPTIONS] {milestone}
+```
+
+Group a plan skeleton's tasks for parallel planners (offline, ADR 0020).
+
+| Argument | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `MILESTONE` | str | yes | - | Milestone id, e.g. M1. |
+
 <a id="forge-plan-validate"></a>
 
 ### `forge plan validate`
@@ -251,6 +296,7 @@ Validate a milestone plan offline (§9.4).
 | Option | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
 | `--force` | flag | no | - | Validate even if the agent cannot serve models.min_tier_for.plan. |
+| `--skeleton` | flag | no | - | Validate a plan skeleton: description, done_when and tier may be missing. |
 
 <a id="forge-profile"></a>
 

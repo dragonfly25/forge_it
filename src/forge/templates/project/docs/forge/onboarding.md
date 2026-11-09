@@ -133,6 +133,8 @@ The lead runs `forge init` once, then:
    3. Merge the `arch: M1` pull request.
    4. `/forge-plan M1` turns the architecture into tasks. It never invents a component or an interface. When a plan merges, a workflow creates the task issues.
 
+   A large milestone is planned by several agents. The lead's agent writes the plan's skeleton (ids, dependencies, zones, components) and checks it with `forge plan validate M1 --skeleton`. `forge plan split M1` then cuts the tasks into batches of at most `planning.max_tasks_per_agent` (default 10). One `forge-planner` subagent per batch writes the description, `done_when` and tier in parallel, and `forge plan assemble M1` merges their work into `plans/M1.yml`. `/forge-architect` does the same with `forge arch split M1` and one `forge-arch-writer` per batch of at most `planning.max_components_per_agent` components (default 3). Without subagents, the agent does the batches one at a time.
+
    Repeat steps 2 to 4 for each milestone. When specs or code change the design, run `/forge-architect M1 --update`, then `/forge-plan M1 --update`. The `planning.architecture` key in `.forge/config.yml` decides whether the architecture is `required` (the default for new projects) or `optional`. See the FAQ.
 
 Run `/forge-configure --update` later, for example after a refactor that moves directories. It changes only what drifted. See `roles.md` for what the lead does through the project.

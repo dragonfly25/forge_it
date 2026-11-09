@@ -46,7 +46,7 @@ You adopt Forge in a product repository once. Everything below runs in a clone o
 5. **Write the specs.** Put the full project description in a Markdown file.
 6. **Roadmap**: `/forge-plan roadmap <spec-file>`. Merge the PR.
 7. **Architecture**: `/forge-architect M1`. Review and merge the `arch: M1` PR.
-8. **Task plan**: `/forge-plan M1`. Merge the plan PR. The `forge-plan-apply` workflow then creates the GitHub milestone and one issue per task.
+8. **Task plan**: `/forge-plan M1`. Large milestones are planned by several agents in parallel ([multi-agent planning](docs/guides/lead.md#multi-agent-planning)). Merge the plan PR. The `forge-plan-apply` workflow then creates the GitHub milestone and one issue per task.
 9. Developers can now run `/forge-next`. When every task of M1 is closed, run `/forge-release M1`.
 
 Details for each step: [guide for the lead](docs/guides/lead.md).

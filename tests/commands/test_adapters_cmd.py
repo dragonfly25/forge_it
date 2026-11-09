@@ -120,6 +120,11 @@ def test_local_renders_gitignored_subagents(repo: Path) -> None:
     assert ".codex/agents/forge-reviewer.toml" in env["data"]["files"]
     text = (repo / ".claude/agents/forge-reviewer.md").read_text()
     assert "model: opus" in text
+    for name in ("forge-planner", "forge-arch-writer"):
+        assert f".claude/agents/{name}.md" in env["data"]["written"]
+        assert f".codex/agents/{name}.toml" in env["data"]["files"]
+    assert "name: forge-planner" in (repo / ".claude/agents/forge-planner.md").read_text()
+    assert "effort: high" in (repo / ".claude/agents/forge-arch-writer.md").read_text()
     status = Git(repo).run("status", "--porcelain", "--untracked-files=all").stdout
     assert "forge-reviewer" not in status
 

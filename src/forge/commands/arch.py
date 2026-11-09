@@ -1,8 +1,10 @@
-"""`forge arch validate <milestone> [--force]` (ADR 0019). Offline: no GitHub, no git.
+"""`forge arch validate <milestone> [--force]` (ADR 0019) and `forge arch split <milestone>`
+(ADR 0020). Offline: no GitHub; ``split`` runs one ``git check-ignore``.
 
-The validation itself is :func:`forge.core.architecture.validate_architecture`; this module
-loads the inputs (config, zones, profile), applies the ``models.min_tier_for.architecture``
-check and renders the result.
+The validation itself is :func:`forge.core.architecture.validate_architecture` and the
+grouping :func:`forge.core.architecture.split_architecture`; this module loads the inputs
+(config, zones, profile), applies the ``models.min_tier_for.architecture`` check (validate
+only) and renders the result.
 """
 
 from __future__ import annotations
@@ -19,14 +21,24 @@ from forge.commands import _claims
 from forge.commands._context import AppContext, find_repo_root, load_context
 from forge.commands._output import GlobalOptions, get_options, run_command
 from forge.commands.plan import in_ci, plain_console
-from forge.core.architecture import ARCHITECTURE_ROLE, validate_architecture
+from forge.core.adapters import is_ignored
+from forge.core.architecture import (
+    ARCH_WRITER,
+    ARCHITECTURE_ROLE,
+    split_architecture,
+    validate_architecture,
+    write_arch_split,
+)
 from forge.core.config import CONFIG_PATH
 from forge.core.errors import ExitCode, PreconditionError
 from forge.core.models import check_min_tier
 from forge.core.output import Level, Message, Result
+from forge.core.subagents import rendered_subagent_path, subagent_availability
 from forge.core.zones import load_zones
 
-arch_app = typer.Typer(help="Validate milestone architectures (ADR 0019).", no_args_is_help=True)
+arch_app = typer.Typer(
+    help="Validate and split milestone architectures (ADR 0019, ADR 0020).", no_args_is_help=True
+)
 
 
 def arch_tier_messages(opts: GlobalOptions, app: AppContext, *, force: bool) -> list[Message]:
@@ -96,6 +108,69 @@ def validate(
         return result
 
     run_command(opts, run, lambda result: render_validation(result.data))
+
+
+def split(
+    ctx: typer.Context,
+    milestone: Annotated[str, typer.Argument(help="Milestone id, e.g. M1.")],
+) -> None:
+    """Group the components of docs/architecture/<milestone>.md for the writers (offline)."""
+    opts = get_options(ctx)
+
+    def run() -> Result:
+        root = find_repo_root(opts)
+        if not (root / CONFIG_PATH).is_file():
+            raise PreconditionError(
+                f"{CONFIG_PATH.as_posix()} not found in {root}",
+                hint="run `forge init` to create it",
+            )
+        app = load_context(opts)
+        problem = _claims.version_problem(app.config)
+        zones = load_zones(app.root)
+        outcome = split_architecture(
+            app.root,
+            milestone,
+            zones=zones,
+            max_per_agent=app.config.planning.max_components_per_agent,
+            is_ignored=lambda rel: is_ignored(app.git, rel),
+        )
+        if outcome.ok:
+            outcome = write_arch_split(app.root, outcome)
+        notes: list[str] = []
+        _, agent = _claims.load_optional_profile(opts, notes)
+        tool = None if agent is None else agent.tool
+        path = rendered_subagent_path(tool, ARCH_WRITER)
+        rendered = path is not None and (app.root / path).is_file()
+        subagent = subagent_availability(ARCH_WRITER, tool=tool, rendered=rendered)
+        result = Result(data={**outcome.to_data(), "subagent": subagent.to_data()})
+        if problem is not None:
+            result.warn(problem, _claims.VERSION_HINT)
+        for note in notes:
+            result.warn(note)
+        if outcome.missing:
+            result.code = ExitCode.PRECONDITION
+            result.error(
+                f"{outcome.file} not found",
+                f"write the frontmatter first (`/forge-architect {milestone}`)",
+            )
+        elif outcome.precondition_failed:
+            result.code = ExitCode.PRECONDITION
+            first = outcome.errors[0]
+            result.error(f"{first.message} ({first.file})", first.hint)
+        elif not outcome.ok:
+            result.code = ExitCode.ERROR
+            result.error(
+                f"architecture {milestone} has {len(outcome.errors)} error(s); not split",
+                "fix the errors listed above and run `forge arch split` again",
+            )
+        return result
+
+    run_command(opts, run, lambda result: render_split(result.data))
+
+
+arch_app.command(
+    "split", help="Group a milestone's components for parallel writers (offline, ADR 0020)."
+)(split)
 
 
 # --------------------------------------------------------------------------- rendering
@@ -170,4 +245,46 @@ def render_validation(data: dict[str, Any], *, width: int | None = None) -> str:
     else:
         line.append(f"  does not list {data['milestone']}", style="yellow")
     console.print(line)
+    return buffer.getvalue()
+
+
+def render_split(data: dict[str, Any], *, width: int | None = None) -> str:
+    """Human view of the ``forge arch split`` data.
+
+    Ids, messages and paths come from users, so nothing is read as rich markup.
+    """
+    buffer = io.StringIO()
+    console = plain_console(buffer, width)
+    head = Text(f"Architecture split {data['milestone']}", style="bold")
+    if data.get("file"):
+        head.append(f"  {data['file']}")
+    head.append(f"  {data['agents']} agent(s), at most {data['max_per_agent']} component(s) each")
+    console.print(head)
+    if data["errors"]:
+        console.print()
+        _issues(console, "Errors", data["errors"], "bold red")
+    if data["warnings"]:
+        console.print()
+        _issues(console, "Warnings", data["warnings"], "yellow")
+    if data["batches"]:
+        console.print()
+        console.print(Text("Batches", style="bold"))
+        for batch in data["batches"]:
+            line = Text(f"  {batch['index']}: {', '.join(batch['component_ids'])}")
+            if batch["interface_ids"]:
+                line.append(f"  interfaces {', '.join(batch['interface_ids'])}")
+            line.append(f"  -> {batch['part_path']}", style="dim")
+            console.print(line)
+        console.print()
+        _ids(console, "Unassigned interfaces (main session)", data["unassigned_interfaces"])
+    if data.get("removed_parts"):
+        console.print()
+        _ids(console, "Removed stale fragments", data["removed_parts"])
+    subagent = data.get("subagent")
+    if subagent:
+        console.print()
+        line = Text("Subagent", style="bold")
+        state = "available" if subagent["available"] else "not available"
+        line.append(f"  {subagent['name']} {state}: {subagent['reason']}")
+        console.print(line)
     return buffer.getvalue()
