@@ -454,3 +454,87 @@ def test_human_output_architecture_line(repo: Path) -> None:
         "Architecture  docs/architecture/M1.md  ready, 1/1 interface(s) implemented (required)"
         in out
     )
+
+
+# --------------------------------------------------------------------------- --skeleton (ADR 0020)
+
+DETAIL = ("description", "done_when", "tier")
+
+
+def _skeleton() -> list[dict[str, Any]]:
+    return [{k: v for k, v in t.items() if k not in DETAIL} for t in CLEAN]
+
+
+def test_skeleton_flag_skips_missing_detail_fields(repo: Path) -> None:
+    set_profile(PROFILE_STRONG)
+    write_plan(repo, _skeleton())
+    code, env = envelope(repo, "M1", "--skeleton")
+    assert code == 0, env["data"]["errors"]
+    assert env["data"]["skeleton"] is True
+    assert env["data"]["waves"] == [["M1-T01"], ["M1-T02", "M1-T03"]]
+    assert env["messages"] == [NO_ARCH_INFO]
+
+
+def test_without_flag_a_skeleton_fails(repo: Path) -> None:
+    set_profile(PROFILE_STRONG)
+    write_plan(repo, _skeleton())
+    code, env = envelope(repo, "M1")
+    assert code == 1
+    assert env["data"]["skeleton"] is False
+    assert {e["code"] for e in env["data"]["errors"]} == {"missing_field"}
+    assert {e["field"] for e in env["data"]["errors"]} == set(DETAIL)
+
+
+def test_skeleton_flag_still_checks_present_detail_fields(repo: Path) -> None:
+    set_profile(PROFILE_STRONG)
+    tasks = _skeleton()
+    tasks[0]["tier"] = "huge"
+    write_plan(repo, tasks)
+    code, env = envelope(repo, "M1", "--skeleton")
+    assert code == 1
+    [error] = env["data"]["errors"]
+    assert (error["code"], error["task"], error["field"]) == ("invalid_field", "M1-T01", "tier")
+
+
+def test_skeleton_flag_still_reports_other_errors(repo: Path) -> None:
+    set_profile(PROFILE_STRONG)
+    tasks = _skeleton()
+    tasks[1]["size"] = "L"
+    tasks[2]["zones"] = ["nowhere"]
+    write_plan(repo, tasks)
+    code, env = envelope(repo, "M1", "--skeleton")
+    assert code == 1
+    assert sorted(e["code"] for e in env["data"]["errors"]) == ["size_too_large", "unknown_zone"]
+
+
+def test_skeleton_flag_still_runs_architecture_checks(repo: Path) -> None:
+    set_profile(PROFILE_STRONG)
+    set_mode(repo, "required")
+    write_plan(repo, _skeleton())
+    code, env = envelope(repo, "M1", "--skeleton")
+    assert code == 1
+    assert [e["code"] for e in env["data"]["errors"]] == ["architecture_missing"]
+
+
+def test_skeleton_flag_keeps_the_tier_check(repo: Path) -> None:
+    set_profile(PROFILE_LIGHT)
+    write_plan(repo, _skeleton())
+    code, _ = envelope(repo, "M1", "--skeleton")
+    assert code == 5
+    code, env = envelope(repo, "M1", "--skeleton", "--force")
+    assert code == 0 and env["data"]["skeleton"] is True
+
+
+def test_skeleton_human_output(repo: Path) -> None:
+    set_profile(PROFILE_STRONG)
+    write_plan(repo, _skeleton())
+    out = invoke(repo, "plan", "validate", "M1", "--skeleton").stdout
+    assert out.splitlines()[0].startswith("Plan M1  plans/M1.yml  (skeleton)  3 task(s)")
+
+
+def test_plan_apply_has_no_skeleton_flag(repo: Path) -> None:
+    set_profile(PROFILE_STRONG)
+    result = invoke(repo, "plan", "apply", "M1", "--skeleton", "--dry-run")
+    # Usage errors exit 1 in Forge (ADR 0004).
+    assert result.exit_code == 1
+    assert "No such option: --skeleton" in result.output

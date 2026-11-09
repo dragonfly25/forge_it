@@ -153,6 +153,8 @@ docs/forge/                        # onboarding.md, commands.md, roles.md, faq.m
 
 Note: the paths under `docs/architecture/` and the prompt count of 12 are added by [ADR 0019](decisions/0019-milestone-architecture.md). The `docs/architecture/` folder is in the project repository. The framework's own `docs/architecture.md` describes the Forge CLI.
 
+Note: [ADR 0020](decisions/0020-multi-agent-planning.md) adds the git-ignored working directories `<worktree>/.forge/local/plan/<M>/` (`batches.json` and the fragments `part-<k>.yml`, written by `forge plan split` and the planner subagents) and `<worktree>/.forge/local/arch/<M>/` (the fragments `part-<k>.md`, written by `forge arch split` and the arch-writer subagents) to the local state.
+
 ---
 
 ## 6. Configuration files
@@ -198,8 +200,8 @@ models:                            # project constraints on model choices (decid
   allowed_providers: [anthropic, openai, local]   # warn when a profile uses others
 planning:
   architecture: required           # required | optional (default when missing: optional)
-  max_tasks_per_agent: 10          # read from phase 14 (ADR 0020)
-  max_components_per_agent: 3      # read from phase 14 (ADR 0020)
+  max_tasks_per_agent: 10          # tasks per `forge-planner` in `forge plan split` (ADR 0020)
+  max_components_per_agent: 3      # components per `forge-arch-writer` in `forge arch split` (ADR 0020)
 ```
 
 Note: the `planning` block and `min_tier_for.architecture` are added by [ADR 0019](decisions/0019-milestone-architecture.md). `forge init` writes `planning.architecture: required`. A config without the block behaves as `optional`.
@@ -477,6 +479,8 @@ Warnings added:
 - `implementer_not_producer`: a contract task's component is not the producer of the interface;
 - `architecture_fields_unchecked`: unchecked mode, and tasks still set `component`, `implements` or `uses`.
 
+Note: [ADR 0020](decisions/0020-multi-agent-planning.md) adds `forge plan validate <milestone> --skeleton`. It skips only the `missing_field` errors for `description`, `done_when` and `tier`. Every other check runs in full. The plan is written in two steps: a skeleton, then the detail fields.
+
 ### 9.5 `forge plan apply <milestone>` (idempotent)
 
 - Ensures labels and the GitHub milestone exist.
@@ -494,6 +498,8 @@ Warnings added:
 - Proposals: during `/dev`, discovered work becomes `forge propose` (issue with `status:proposed`); the lead accepts it by adding it to the plan file.
 
 Note: [ADR 0019](decisions/0019-milestone-architecture.md) changes the sequence. The milestone architecture comes first: `/plan roadmap` → `/architect <M>` → merge the `arch: <M>` PR → `/plan <M>`. The `<milestone>` path reads `docs/architecture/overview.md` and `<M>.md` and assigns `component`, `implements` and `uses`. It never invents a component or an interface. When the architecture is missing, draft or insufficient, it stops and points to `/architect <M>` or `/architect <M> --update`. The roadmap (§9.2) and apply (§9.5) do not change.
+
+Note: [ADR 0020](decisions/0020-multi-agent-planning.md) splits the `<milestone>` path into four phases: exploration, skeleton, detail and review. In the detail phase `forge plan split` divides the tasks into balanced groups (`planning.max_tasks_per_agent`), one `planner` subagent per group writes a fragment, and `forge plan assemble` merges the fragments into `plans/<milestone>.yml`. Without subagents the main session writes the fragments one group at a time. `--update` stays single-session.
 
 ### 9.7 Architecture: `docs/architecture/`
 
@@ -530,6 +536,8 @@ interfaces:
 - `forge arch validate <M>` checks both files offline (§16). It ignores `planning.architecture`.
 - Each interface declared in `<M>.md` needs exactly one contract task in `plans/<M>.yml` (§9.3). An interface that is only in `overview.md` already exists: a plan may use it, not implement it.
 - The architecture is written by `/architect` and reviewed through its own PR `arch: <M>`.
+
+Note: [ADR 0020](decisions/0020-multi-agent-planning.md) gives `/architect` four phases: exploration, structure, detail and review. In the detail phase `forge arch split` divides the components into balanced groups (`planning.max_components_per_agent`), and one `arch-writer` subagent per group writes a fragment. The main session integrates the fragments by hand. There is no `forge arch assemble`.
 
 ---
 
@@ -629,6 +637,8 @@ Each prompt must: state its goal; list the exact `forge` calls with `--json`; de
 | `/handoff` | all | Write the handoff note (§8.3) from the session's work; `forge handoff --note-file` |
 | `/release` | lead | `forge release`; confirm version; report |
 
+Note: [ADR 0020](decisions/0020-multi-agent-planning.md) makes `/plan <milestone>` and `/architect` multi-agent for large milestones. Above the `planning` thresholds they split the detail work between several subagents running in parallel, and fall back to one session without subagents.
+
 Natural language must also work: `AGENTS.md` maps phrases like "take the next task" or "sync my branch" to the same prompts.
 
 ### 12.1 Subagents
@@ -658,6 +668,8 @@ v0 ships these subagents:
 Note: v0.1 shipped the first three. A fourth subagent, `implementer`, was added in v0.2 for delegation. The delegation switch (`off`, `auto`, `on`) is defined in ADR 0017, which amends this section.
 
 Note: [ADR 0019](decisions/0019-milestone-architecture.md) also amends this section. `/architect` uses `explorer` to read the specs and the code, and `reviewer` checks that a change stays inside the task's component and respects the interfaces it implements and uses.
+
+Note: [ADR 0020](decisions/0020-multi-agent-planning.md) adds two subagents, for six in total. `planner` (standard / medium, tools read and edit, used by `/plan`) writes `description`, `done_when` and `tier` for one group of tasks into its fragment. `arch-writer` (strong / high, tools read and edit, used by `/architect`) writes the component and interface sections for one group into its fragment. `explorer` is also used by `/plan`. `reviewer` is also used by `/plan` and `/architect`, to review a plan group or an architecture.
 
 Rules:
 - Every command must work **without** subagents (tools/models that do not support them): prompts say "if subagents are available, delegate X to `<name>`; otherwise do it yourself".
@@ -719,7 +731,10 @@ Global options: `--json`, `--agent <id>`, `--repo <path>`, `--verbose`, `--yes`.
 | `forge refresh` | Recompute labels, unblock dependents |
 | `forge config validate` | Check `config.yml`, `team.yml` and `zones.yml` together, offline; errors name file, key and fix ([ADR 0018](decisions/0018-guided-project-configuration.md)) |
 | `forge arch validate <M> [--force]` | Validate the milestone architecture (§9.7), offline; `--force` overrides the `min_tier_for.architecture` refusal ([ADR 0019](decisions/0019-milestone-architecture.md)) |
-| `forge plan validate <M>` / `forge plan apply <M>` | §9 |
+| `forge plan validate <M> [--skeleton] [--force]` / `forge plan apply <M>` | §9 (`--skeleton`: [ADR 0020](decisions/0020-multi-agent-planning.md)) |
+| `forge plan split <M>` | Divide the skeleton into balanced groups for parallel planners; write `.forge/local/plan/<M>/batches.json`; offline ([ADR 0020](decisions/0020-multi-agent-planning.md)) |
+| `forge plan assemble <M>` | Merge the planners' fragments into `plans/<M>.yml`, atomically; offline ([ADR 0020](decisions/0020-multi-agent-planning.md)) |
+| `forge arch split <M>` | Divide the components of `<M>.md` into balanced groups for parallel arch-writers; offline ([ADR 0020](decisions/0020-multi-agent-planning.md)) |
 | `forge release <M> [--version V]` | §11.4 |
 | `forge adapters generate [--check] [--local]` | §13 |
 | `forge docs [--check]` | Generate `docs/forge/commands.md` from CLI help + prompt frontmatter |

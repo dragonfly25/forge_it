@@ -54,7 +54,25 @@ Why skills and the `forge-` prefix: the Claude Code docs prefer skills to `.clau
 
 ### Subagent rendering
 
-The template set has four subagents: `explorer`, `test-writer`, `implementer` and `reviewer`. `implementer` (tier `standard`, effort `medium`, tools `read`, `edit`, `shell`) is rendered like the others, as `forge-implementer`: `.claude/agents/forge-implementer.md` for Claude and `.codex/agents/forge-implementer.toml` for Codex. Its model comes from the same resolution, so `config.models.min_tier_for: {implementer: strong}` raises it. The `/forge-dev` prompt uses it only when the delegation decision says so ([ADR 0017](decisions/0017-implementer-subagent-and-delegation.md)).
+The template set has six subagents in `.forge/agents/`:
+
+| Source | Rendered as | Tier / effort | Tools | Used by |
+|---|---|---|---|---|
+| `explorer.md` | `forge-explorer` | light / low | read | `/forge-next`, `/forge-dev`, `/forge-plan`, `/forge-architect` |
+| `test-writer.md` | `forge-test-writer` | task / medium | read, edit, shell | `/forge-dev` |
+| `reviewer.md` | `forge-reviewer` | strong / high | read, shell | `/forge-review`, `/forge-ship` (self-check), `/forge-plan`, `/forge-architect` |
+| `implementer.md` | `forge-implementer` | standard / medium | read, edit, shell | `/forge-dev`, when delegation is on |
+| `planner.md` | `forge-planner` | standard / medium | read, edit | `/forge-plan` |
+| `arch-writer.md` | `forge-arch-writer` | strong / high | read, edit | `/forge-architect` |
+
+Each one is rendered as `.claude/agents/forge-<name>.md` for Claude and `.codex/agents/forge-<name>.toml` for Codex. The generic adapter lists all six in the managed region of each project's `AGENTS.md`, so the list follows the files in `.forge/agents/`. The framework repository has no `AGENTS.md` of its own. The tier, effort and tools of the table are the template values. The files in `.forge/agents/` are the source of truth. The "Used by" column follows spec §12.1 and ADR 0020; the prompts may call a subagent in more places.
+
+The model comes from the same resolution for every subagent, and the subagent's own name is its role. So `config.models.min_tier_for: {implementer: strong}` raises `implementer`, and `min_tier_for: {planner: strong}` raises `planner`. The same holds for `arch-writer`. The keys `plan` and `architecture` do not raise them: they gate the session that runs `forge plan validate` or `forge arch validate`, which is the main session.
+
+- `implementer` is used by `/forge-dev` only when the delegation decision says so ([ADR 0017](decisions/0017-implementer-subagent-and-delegation.md)).
+- `planner` and `arch-writer` are used for multi-agent planning ([ADR 0020](decisions/0020-multi-agent-planning.md)). They have no `shell` tool: they never run `forge`, `git` or tests. Each writes only its own fragment in `.forge/local/plan/<M>/` or `.forge/local/arch/<M>/`. With Claude the `read` and `edit` tools become `Read, Grep, Glob, Edit, Write`. Codex has no per-agent tool list and no per-agent read-only sandbox, so "write only your fragment" is an instruction in the subagent's text, not a limit the tool enforces. With the generic adapter the main session does the work itself.
+- `reviewer` also reviews a plan group or an architecture, with no branch or PR involved. It checks the given files against the specs, the architecture and the rules.
+- A project made before version 0.2.0 ([ADR 0020](decisions/0020-multi-agent-planning.md)) has no `planner.md` or `arch-writer.md`. Run `forge init` again, then `forge adapters generate --local`. Without them, `forge plan split` and `forge arch split` report the subagent as unavailable and the prompts work sequentially.
 
 For each tool present in your profile, Forge renders with one agent of that tool: the `default_agent` if it uses the tool, else the first one. The model comes from model resolution (ADR 0005): the declared tier, raised by `config.models.min_tier_for`, then mapped through the agent's `tiers`.
 
@@ -99,6 +117,16 @@ These are the formats the adapters target, as recorded in ADR 0014. Check the pa
 - Custom prompts in `~/.codex/prompts` are deprecated in favor of skills, and are user-level only.
 - Skills live in `.agents/skills/<name>/SKILL.md` (project, and parent directories up to the repository root) or `~/.agents/skills` (user). `name` and `description` are required. A skill is invoked with `$name` or `/skills`, or implicitly from its description.
 - Subagents are one TOML file per agent in `.codex/agents/` (project) or `~/.codex/agents/`. `name`, `description` and `developer_instructions` are required. `model` and `model_reasoning_effort` are optional. `low`, `medium`, `high` and `xhigh` are safe effort values. The page also lists `max` and `ultra`, depending on the model.
+
+## Subagents in parallel (verified 2026-11-09)
+
+Multi-agent planning ([ADR 0020](decisions/0020-multi-agent-planning.md)) spawns several subagents at once. ADR 0020 records the check of both tools on 2026-11-09. In short:
+
+- **Claude Code.** Several subagents can run in parallel when the prompt asks for it, up to 20 at once (`CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` changes the cap). A subagent starts in the parent's working directory and shares its filesystem. Claude Code does not resolve conflicts between subagents that write, so parallel writers must write disjoint files. The optional `isolation: worktree` branches from the default branch, not from `HEAD`, so a subagent would not see the `plan/<M>` branch. Forge does not render `isolation`. The fields Forge renders (`name`, `description`, `tools`, `model`, `effort`) match the documentation.
+- **Codex.** Subagents are on by default. Codex spawns them only when asked explicitly, for example "spawn one subagent per group", or when a skill or `AGENTS.md` says so. The `plan` and `architect` prompts say it. Spawned subagents run in parallel, up to `agents.max_concurrent_threads_per_session`. They inherit the parent's sandbox.
+- **Generic.** No subagents are assumed. The main session works one group at a time.
+
+Each parallel writer writes its own fragment file, so the files are disjoint in every tool. When a tool caps the concurrency, the prompt spawns the rest as earlier subagents finish.
 
 ## How to add an adapter
 

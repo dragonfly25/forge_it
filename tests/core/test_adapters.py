@@ -104,7 +104,14 @@ def test_agents_md_region_content() -> None:
     )
     for prompt in project.prompts:
         assert f"| `/{prompt.name}` | `.forge/prompts/{prompt.name}.md` |" in text
-    for agent in ("forge-explorer", "forge-test-writer", "forge-reviewer", "forge-implementer"):
+    for agent in (
+        "forge-explorer",
+        "forge-test-writer",
+        "forge-reviewer",
+        "forge-implementer",
+        "forge-planner",
+        "forge-arch-writer",
+    ):
         assert f"`{agent}`" in text
     # Rules are inlined (headings shifted under "## Rules"), prompt bodies are not.
     rules_line = next(
@@ -377,6 +384,42 @@ def test_local_render_implementer_for_claude_and_codex() -> None:
     assert "tools" not in data
 
 
+def test_local_render_planner_and_arch_writer_for_claude_and_codex() -> None:
+    files = {f.path.as_posix(): f.content for f in local(config()).files}
+    meta, body = meta_and_body(files[".claude/agents/forge-planner.md"])
+    assert meta == {
+        "name": "forge-planner",
+        "description": meta["description"],
+        "tools": "Read, Grep, Glob, Edit, Write",
+        "model": "sonnet",
+        "effort": "medium",
+    }
+    assert "planner.md" in body.splitlines()[0]
+    meta, body = meta_and_body(files[".claude/agents/forge-arch-writer.md"])
+    assert meta == {
+        "name": "forge-arch-writer",
+        "description": meta["description"],
+        "tools": "Read, Grep, Glob, Edit, Write",
+        "model": "opus",
+        "effort": "high",
+    }
+    assert "arch-writer.md" in body.splitlines()[0]
+    planner = tomllib.loads(files[".codex/agents/forge-planner.toml"])
+    assert planner["name"] == "forge-planner"
+    # The Codex agent serves no standard tier, so the next tier up is used.
+    assert (planner["model"], planner["model_reasoning_effort"]) == ("gpt-6-astra", "medium")
+    assert planner["developer_instructions"].strip() and "tools" not in planner
+    arch = tomllib.loads(files[".codex/agents/forge-arch-writer.toml"])
+    assert arch["name"] == "forge-arch-writer"
+    assert (arch["model"], arch["model_reasoning_effort"]) == ("gpt-6-astra", "xhigh")
+    assert arch["developer_instructions"].strip() and "tools" not in arch
+
+
+def test_min_tier_for_raises_the_planner() -> None:
+    files = {f.path.as_posix(): f.content for f in local(config({"planner": Tier.STRONG})).files}
+    assert meta_and_body(files[".claude/agents/forge-planner.md"])[0]["model"] == "opus"
+
+
 def test_min_tier_for_raises_the_implementer() -> None:
     cfg = config({"implementer": Tier.STRONG})
     files = {f.path.as_posix(): f.content for f in local(cfg).files}
@@ -478,7 +521,11 @@ def test_write_local_files_are_gitignored(repo: Path) -> None:
     # A profile change makes the files outdated until re-rendered.
     changed = replace(CLAUDE_AGENT, tiers={**CLAUDE_AGENT.tiers, Tier.STRONG: "fable"})
     profile = replace(PROFILE, agents=(changed, CODEX_AGENT))
-    assert A.local_status(repo, profile, cfg, git) == ["outdated: .claude/agents/forge-reviewer.md"]
+    # Both strong-tier agents (arch-writer and reviewer) change model.
+    assert A.local_status(repo, profile, cfg, git) == [
+        "outdated: .claude/agents/forge-arch-writer.md",
+        "outdated: .claude/agents/forge-reviewer.md",
+    ]
     A.write_local(repo, A.render_local(repo, profile, cfg), git)
     assert A.local_status(repo, profile, cfg, git) == []
 

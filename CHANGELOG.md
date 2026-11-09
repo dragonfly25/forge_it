@@ -8,13 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Multi-agent planning** (ADR 0020):
+  - **Thresholds**: `planning.max_tasks_per_agent` (default 10) and `planning.max_components_per_agent` (default 3) now take effect. Above the threshold, `ceil(N / max)` agents get balanced groups (12 tasks → 6 + 6, 21 → 7 + 7 + 7). The grouping is deterministic.
+  - **`forge plan validate <M> --skeleton`**: skips only the `missing_field` errors for `description`, `done_when` and `tier`. Every other check runs in full.
+  - **`forge plan split <M>`**: offline. Checks the skeleton, groups the tasks by component and wave, writes `.forge/local/plan/<M>/batches.json` and deletes stale fragments. Reports whether `forge-planner` is available. Exits 0, 1 and 5.
+  - **`forge plan assemble <M>`**: offline and atomic. Checks the fragments `part-<k>.yml`, merges `description`, `done_when` and `tier` into the skeleton, validates the merged plan and rewrites `plans/<M>.yml`. Errors name the fragment, the task and the field. It rewrites the file from data, so YAML comments are lost. Exits 0, 1 and 5.
+  - **`forge arch split <M>`**: offline. Groups the components of `<M>.md`, assigns each interface to its producer's group and writes the fragment directory `.forge/local/arch/<M>/`. There is no `arch assemble`: the main session integrates the fragments. Exits 0, 1 and 5.
+  - **Two subagents**: `planner` (`forge-planner`) writes the detail fields of one group of tasks. `arch-writer` (`forge-arch-writer`) writes the component and interface sections of one group. There are now six subagents. `reviewer` also reviews a plan group or an architecture.
+  - **Prompts**: `/forge-plan` and `/forge-architect` work in four phases (exploration, skeleton or structure, detail, review) and spawn subagents in parallel. Without subagents they do the same work one group at a time. `--update` stays single-session. The prompt count stays 12.
 - **Milestone architecture** (ADR 0019):
   - **`docs/architecture/`** in the project: `overview.md` maps the system, and `<M>.md` describes what one milestone adds or changes (components with zones, interfaces in contract zones, decisions, risks, open questions). `forge init` writes `_template.md` and an empty `overview.md`.
   - **`/forge-architect <M>` prompt** (`$forge-architect` in Codex): the lead's agent reads the specs and the code, proposes components and interfaces, writes `<M>.md`, updates `overview.md` and opens the PR `arch: <M>`. With `--update` it changes only what moved. This is the twelfth prompt.
   - **`forge arch validate <M> [--force]`**: checks `<M>.md` and `overview.md` offline. It ignores `planning.architecture`. It enforces `min_tier_for.architecture` unless `--force` or CI. Exits 0, 1 and 5.
   - **Plan fields `component`, `implements`, `uses`**: plan-only, like `proposal`. `plan apply` does not write them to issues.
   - **`forge plan validate` architecture checks**: errors `architecture_missing`, `architecture_invalid`, `architecture_draft`, `unknown_component`, `unknown_interface`, `interface_unimplemented`, `interface_multiply_implemented`, `contract_without_interface` and `uses_without_dependency`. Warnings `zone_outside_component`, `implementer_not_producer` and `architecture_fields_unchecked`.
-  - **`planning` block in `.forge/config.yml`**: `architecture: required | optional`, plus `max_tasks_per_agent` and `max_components_per_agent` (validated now, used in phase 14). `min_tier_for` accepts `architecture`.
+  - **`planning` block in `.forge/config.yml`**: `architecture: required | optional`, plus `max_tasks_per_agent` and `max_components_per_agent` (the group bounds of `forge plan split` and `forge arch split`). `min_tier_for` accepts `architecture`.
   - **Task context**: `forge task show` and `forge next` gain an `architecture` object (`path`, `component`, `implements`, `uses`) and a matching `## Architecture` block.
 - **Guided project configuration** (ADR 0018):
   - **`forge config validate`**: checks `config.yml`, `team.yml` and `zones.yml` together, offline. Each file that is missing or invalid gives one error that names the file, the key and the fix (exit 1). Warnings cover init placeholders, a team without a lead, files that match no zone, zones that match no file and a CLI outside `forge_version`.
@@ -31,6 +39,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Multi-agent planning** (ADR 0020): `forge plan assemble` rewrites `plans/<M>.yml` in a fixed format and drops its comments. Existing projects get `planner.md` and `arch-writer.md` by running `forge init` again, then `forge adapters generate --local`. Without them the prompts fall back to sequential work. Old CLIs do not know `split`, `assemble`, `arch split` or `--skeleton`, so the new prompts need the new CLI version in `forge_version`.
 - **The plan follows the architecture** (ADR 0019). The documented sequence is now `/forge-plan roadmap` → `/forge-architect M1` → merge the `arch: M1` PR → `/forge-plan M1`. `/forge-plan <M>` assigns `component`, `implements` and `uses` from the architecture and never adds a component or an interface. `/forge-dev`, `/forge-review` and the `explorer` and `reviewer` subagents read the architecture, and the reviewer checks that a change stays inside the task's component.
 - **Existing projects**: a `config.yml` without a `planning` block defaults to `architecture: optional`, so existing plans and the `forge-plan-apply` workflow keep working with no edit. New projects get `required` from `forge init`.
 - **Upgrade note**: v0.1.0 rejects the `planning` key and the new plan fields as unknown. The release that ships this change needs a minor version bump (0.2.0), and projects that use the new fields must pin `forge_version` to it.

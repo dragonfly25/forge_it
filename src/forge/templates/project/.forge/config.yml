@@ -52,10 +52,13 @@ resolvers:
 # Milestone planning. `/forge-architect <milestone>` writes docs/architecture/<milestone>.md
 # before `/forge-plan <milestone>`. With `optional`, a milestone may be planned without it,
 # but an existing file is still checked. Without this block the mode is `optional`.
+# The two bounds split the detail work between subagents. Up to the bound, one session
+# writes it; above it, `forge plan split` / `forge arch split` make ceil(N / bound)
+# balanced batches (for example 12 tasks with bound 10 give 6 + 6), one subagent each.
 planning:
   architecture: required           # required | optional
-  max_tasks_per_agent: 10          # integer >= 1. Reserved for multi-agent planning; validated, not used yet.
-  max_components_per_agent: 3      # integer >= 1. Reserved for multi-agent planning; validated, not used yet.
+  max_tasks_per_agent: 10          # integer >= 1. Tasks per `forge-planner` (`forge plan split`). Default 10.
+  max_components_per_agent: 3      # integer >= 1. Components per `forge-arch-writer` (`forge arch split`). Default 3.
 
 review:
   cross_provider: true             # prefer a reviewer whose agent uses a different provider

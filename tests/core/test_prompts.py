@@ -204,7 +204,14 @@ def test_shipped_prompts_are_complete() -> None:
 
 def test_shipped_agents_are_valid() -> None:
     texts = _shipped(".forge/agents")
-    assert sorted(p.stem for p in texts) == ["explorer", "implementer", "reviewer", "test-writer"]
+    assert sorted(p.stem for p in texts) == [
+        "arch-writer",
+        "explorer",
+        "implementer",
+        "planner",
+        "reviewer",
+        "test-writer",
+    ]
     agents = {p.stem: parse_agent(t, p) for p, t in texts.items()}
     for path, text in texts.items():
         data, _ = split_frontmatter(text, path)
@@ -217,11 +224,23 @@ def test_shipped_agents_are_valid() -> None:
         Effort.MEDIUM,
     )
     assert agents["implementer"].tools == ("read", "edit", "shell")
+    assert (agents["planner"].tier, agents["planner"].effort) == (Tier.STANDARD, Effort.MEDIUM)
+    assert (agents["arch-writer"].tier, agents["arch-writer"].effort) == (Tier.STRONG, Effort.HIGH)
+    # The detail writers only read and write their own fragment: no shell.
+    assert agents["planner"].tools == ("read", "edit")
+    assert agents["arch-writer"].tools == ("read", "edit")
 
 
 def test_shipped_prompts_reference_rendered_subagent_names() -> None:
     for path, text in _shipped(".forge/prompts").items():
-        for name in ("explorer", "test-writer", "reviewer", "implementer"):
+        for name in (
+            "explorer",
+            "test-writer",
+            "reviewer",
+            "implementer",
+            "planner",
+            "arch-writer",
+        ):
             # A bare `explorer` reference in code must use the rendered `forge-` name.
             assert f"`{name}`" not in text, f"{path}: use `forge-{name}`"
 

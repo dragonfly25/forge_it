@@ -84,6 +84,22 @@ OPTIONAL_TASK_KEYS: tuple[str, ...] = (
 
 REQUIRED_TASK_KEYS: tuple[str, ...] = tuple(k for k in TASK_KEYS if k not in OPTIONAL_TASK_KEYS)
 
+DETAIL_TASK_KEYS: tuple[str, ...] = ("description", "done_when", "tier")
+"""The detail fields of a task (ADR 0020): written by the planners in the detail phase. Only
+their ``missing_field`` errors are skipped by ``forge plan validate --skeleton``."""
+
+SKELETON_TASK_KEYS: tuple[str, ...] = tuple(k for k in TASK_KEYS if k not in DETAIL_TASK_KEYS)
+"""The skeleton fields of a task (ADR 0020), in :data:`TASK_KEYS` order: every task field
+except the detail fields. The main session writes them in the skeleton phase."""
+
+# Internal placeholders for absent detail fields in skeleton mode (ADR 0020). They only let
+# :class:`TaskMetadata` be built; they are never written to a file and never reported.
+_SKELETON_PLACEHOLDERS: dict[str, Any] = {
+    "description": "",
+    "done_when": ["(detail pending)"],
+    "tier": "standard",
+}
+
 MAX_ISSUE_TITLE = 256
 """GitHub's limit on an issue title; ``[<id>] <title>`` must fit in it."""
 
@@ -254,6 +270,9 @@ class PlanValidation:
     architecture: PlanArchitecture = field(default_factory=PlanArchitecture)
     messages: tuple[Message, ...] = ()
     """Envelope messages (info level) the command adds, e.g. the unchecked architecture."""
+    skeleton: bool = False
+    """True when validated with ``skeleton=True`` (ADR 0020): absent detail fields were not
+    errors, and the tasks of :attr:`plan` may carry internal placeholders for them."""
 
     @property
     def ok(self) -> bool:
@@ -266,6 +285,7 @@ class PlanValidation:
         return {
             "milestone": self.milestone,
             "ok": self.ok,
+            "skeleton": self.skeleton,
             "file": self.file,
             "tasks": [] if self.plan is None else [t.meta.id for t in self.plan.tasks],
             "specs": list(self.specs),
@@ -409,12 +429,19 @@ def _unknown_key(f: Fields, key: str, allowed: tuple[str, ...]) -> ConfigError:
 
 
 def _task(
-    reader: Fields, index: int, milestone: str, issues: _Issues, declared: set[str]
+    reader: Fields,
+    index: int,
+    milestone: str,
+    issues: _Issues,
+    declared: set[str],
+    *,
+    skeleton: bool = False,
 ) -> PlanTask | None:
     """Parse one task mapping; record its problems and return the task when it is usable.
 
     Fields are named relative to the task when it has a string id, else with the
-    ``tasks[<index>]`` prefix.
+    ``tasks[<index>]`` prefix. With ``skeleton``, an absent (or null) detail field is not an
+    error: an internal placeholder stands in for it (ADR 0020).
     """
     raw_id = reader.raw("id")
     task_id = raw_id if isinstance(raw_id, str) else None
@@ -426,8 +453,12 @@ def _task(
         if key not in TASK_KEYS:
             issues.from_config("unknown_field", _unknown_key(f, key, TASK_KEYS), task=task_id)
             ok = False
+    placeholders: dict[str, Any] = {}
     for key in REQUIRED_TASK_KEYS:
         if f.raw(key) is None:
+            if skeleton and key in DETAIL_TASK_KEYS:
+                placeholders[key] = _SKELETON_PLACEHOLDERS[key]
+                continue
             issues.from_config("missing_field", _missing(f, key), task=task_id)
             ok = False
 
@@ -531,6 +562,9 @@ def _task(
         return None
     assert arch_fields is not None
     meta_data = {k: v for k, v in f.data.items() if k in METADATA_KEYS}
+    meta_data.update((k, v) for k, v in placeholders.items() if k in METADATA_KEYS)
+    if "description" in placeholders:
+        description = placeholders["description"]
     try:
         meta = parse_metadata_fields(Fields(meta_data, f.file, f.prefix), None)
     except ConfigError as exc:
@@ -624,10 +658,19 @@ def _architecture_fields(
     return component, implements, uses
 
 
-def _load_plan(root: Path, milestone: str, issues: _Issues) -> _Loaded | None:
+def _load_plan(
+    root: Path,
+    milestone: str,
+    issues: _Issues,
+    *,
+    skeleton: bool = False,
+    plan_data: Mapping[str, Any] | None = None,
+) -> _Loaded | None:
     rel = plan_path(milestone)
     full = root / rel
-    if not full.is_file():
+    if plan_data is not None:
+        data = dict(plan_data)
+    elif not full.is_file():
         issues.error(
             "plan_missing",
             "plan file not found",
@@ -635,11 +678,12 @@ def _load_plan(root: Path, milestone: str, issues: _Issues) -> _Loaded | None:
             hint=f"write the plan with `/plan {milestone}` or create {_rel(rel)}",
         )
         return None
-    try:
-        data = load_yaml_mapping(full)
-    except ConfigError as exc:
-        issues.error("plan_invalid", exc.problem, file=_rel(rel), hint=exc.hint)
-        return None
+    else:
+        try:
+            data = load_yaml_mapping(full)
+        except ConfigError as exc:
+            issues.error("plan_invalid", exc.problem, file=_rel(rel), hint=exc.hint)
+            return None
     f = Fields(data, _rel(rel))
     for key in data:
         if key not in _PLAN_KEYS:
@@ -678,7 +722,7 @@ def _load_plan(root: Path, milestone: str, issues: _Issues) -> _Loaded | None:
             continue
         if isinstance(raw_id, str):
             seen.add(raw_id)
-        task = _task(reader, index, milestone, issues, declared)
+        task = _task(reader, index, milestone, issues, declared, skeleton=skeleton)
         if task is not None:
             tasks.append(task)
     return _Loaded(PlanFile(milestone=milestone, tasks=tuple(tasks), path=full), declared)
@@ -1194,6 +1238,8 @@ def validate_plan(
     zones: ZonesConfig,
     team: Team | None = None,
     planning: PlanningConfig | None = None,
+    skeleton: bool = False,
+    plan_data: Mapping[str, Any] | None = None,
 ) -> PlanValidation:
     """Validate ``plans/<milestone>.yml`` under ``root`` offline (spec §9.4, ADR 0013).
 
@@ -1203,6 +1249,16 @@ def validate_plan(
     optional``) decides whether the milestone architecture is checked (ADR 0019). Never raises
     for content problems: they are returned as errors and warnings; the info message of an
     unchecked architecture is in :attr:`PlanValidation.messages`.
+
+    ``skeleton`` (``forge plan validate --skeleton``, ADR 0020) skips only the
+    ``missing_field`` errors of the detail fields :data:`DETAIL_TASK_KEYS`. Detail fields that
+    are present are checked as usual, and every other check runs in full. The tasks of the
+    returned plan then carry internal placeholders for absent detail fields: callers must not
+    write them anywhere.
+
+    ``plan_data`` (``forge plan assemble``, ADR 0020) validates that in-memory mapping as the
+    content of ``plans/<milestone>.yml`` instead of reading the file; everything else (specs,
+    zones, roadmap, other plans, architecture) is still read under ``root``.
     """
     issues = _Issues()
     planning = planning if planning is not None else PlanningConfig()
@@ -1229,6 +1285,7 @@ def validate_plan(
             specs=specs,
             architecture=state,
             messages=tuple(messages),
+            skeleton=skeleton,
         )
 
     if not file:
@@ -1267,7 +1324,7 @@ def validate_plan(
                 Level.INFO, f"no architecture for {milestone} (planning.architecture: optional)"
             )
         )
-    loaded = _load_plan(root, milestone, issues)
+    loaded = _load_plan(root, milestone, issues, skeleton=skeleton, plan_data=plan_data)
     if loaded is None:
         return result(roadmap=roadmap)
     plan = loaded.plan
@@ -1306,9 +1363,11 @@ def check_plan_tier(
 
 __all__ = [
     "ARCHITECTURE_TASK_KEYS",
+    "DETAIL_TASK_KEYS",
     "PLANS_DIR",
     "PLAN_ROLE",
     "ROADMAP_PATH",
+    "SKELETON_TASK_KEYS",
     "TASK_KEYS",
     "PlanArchitecture",
     "PlanFile",
