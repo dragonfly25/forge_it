@@ -5,23 +5,25 @@ args: "<pr-number> [--force]"
 roles: [dev, lead]
 ---
 ## Goal
-Give an honest, specific review of one pull request: do the changes meet the task's acceptance criteria and `done_when` items, stay inside the zones, respect the contracts, and carry tests that prove them?
+Give an honest, specific review of one pull request: do the changes meet the task's acceptance criteria and `done_when` items, stay inside the zones and the task's component, respect the contracts and the interfaces of the architecture, and carry tests that prove them?
 
 ## Steps
 1. Get the review context (PR metadata, linked task, spec excerpts, diff, zone check, CI, existing reviews):
    `forge review <pr> --json`
-2. Review the diff against the task. Check each item:
+2. Read the architecture. Find the task's entry in `plans/<milestone>.yml` (its `component`, `implements` and `uses`). If `docs/architecture/<milestone>.md` exists, read it and `docs/architecture/overview.md`.
+3. Review the diff against the task. Check each item:
    - every `covers` acceptance criterion is met;
    - every `done_when` item is true and proven by a test;
    - changes stay inside the task's zones. Judge each out-of-zone and unzoned file;
    - contract zones are changed only by a task that owns them;
+   - changes stay inside the task's component, the interfaces in `implements` match their declaration in the architecture, and the interfaces in `uses` are used as declared;
    - tests exist, are meaningful and were not weakened;
    - the code is correct, clear and consistent with the ADRs and `.forge/rules.md`;
    - CI state from the context. A failing or missing CI is a finding.
    If `diff_truncated` is true, say so and read the remaining files in the PR before you decide.
-3. Write the review body to a file, for example `.forge/local/review-<pr>.md`. Be specific: file, line, what is wrong, what to do. Separate blocking findings from suggestions.
-4. Choose the verdict: `approve`, `request-changes` or `comment`.
-5. Show the user the verdict and the body, unless they already asked you to submit. Then submit:
+4. Write the review body to a file, for example `.forge/local/review-<pr>.md`. Be specific: file, line, what is wrong, what to do. Separate blocking findings from suggestions.
+5. Choose the verdict: `approve`, `request-changes` or `comment`.
+6. Show the user the verdict and the body, unless they already asked you to submit. Then submit:
    `forge review <pr> --submit approve --body-file <file> --json`
    `forge review <pr> --submit request-changes --body-file <file> --json`
    `forge review <pr> --submit comment --body-file <file> --json`
@@ -46,7 +48,7 @@ Give an honest, specific review of one pull request: do the changes meet the tas
 - Do not submit an approval or a change request without the user's go-ahead, unless they asked you to submit.
 
 ## Subagents
-- If `forge-reviewer` is available, delegate the first pass to it. Give it the PR number and the context. Check its findings yourself and decide the verdict.
+- If `forge-reviewer` is available, delegate the first pass to it. Give it the PR number, the context and the task's `component`, `implements` and `uses`. Check its findings yourself and decide the verdict.
 - Without it, do the full review yourself.
 
 ## Final report

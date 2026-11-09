@@ -8,9 +8,10 @@ code (``main`` at ``e72cd50``, before Phase 11) running :mod:`support.delegation
         tests/snapshots
 
 The same scenario runs here with the new code and ``delegation: off`` in the project, the
-profile and ``--delegation off``. After removing only the new fields (``delegation`` in the
-task context, ``delegation_override`` in ``current``), the full envelopes, including every
-message, must equal the captured ones. Do not regenerate these files from the new code.
+profile and ``--delegation off``. After removing only the new fields (``delegation`` and
+``architecture`` (ADR 0019) in the task context, ``delegation_override`` in ``current``), the
+full envelopes, including every message, must equal the captured ones. Do not regenerate
+these files from the new code.
 """
 
 from __future__ import annotations
@@ -26,17 +27,25 @@ from support.delegation_golden import run_scenario
 SNAPSHOTS = Path(__file__).resolve().parent.parent / "snapshots"
 
 
+# The scenario has no plan file and no architecture: the ADR 0019 field is empty.
+NO_ARCHITECTURE = {"path": None, "component": None, "implements": [], "uses": []}
+
+
 def _strip_new_fields(name: str, envelope: dict[str, Any]) -> dict[str, Any]:
     data = envelope["data"]
     if name == "next":
         assert data["context"]["delegation"]["mode"] == "off"
         assert data["current"]["delegation_override"] == "off"
+        assert data["context"]["architecture"] == NO_ARCHITECTURE
         del data["context"]["delegation"]
+        del data["context"]["architecture"]
         del data["current"]["delegation_override"]
     else:
         assert data["delegation"]["mode"] == "off"
         assert data["delegation"]["source"] == "invocation"
+        assert data["architecture"] == NO_ARCHITECTURE
         del data["delegation"]
+        del data["architecture"]
     return envelope
 
 

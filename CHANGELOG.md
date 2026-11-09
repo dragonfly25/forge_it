@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Milestone architecture** (ADR 0019):
+  - **`docs/architecture/`** in the project: `overview.md` maps the system, and `<M>.md` describes what one milestone adds or changes (components with zones, interfaces in contract zones, decisions, risks, open questions). `forge init` writes `_template.md` and an empty `overview.md`.
+  - **`/forge-architect <M>` prompt** (`$forge-architect` in Codex): the lead's agent reads the specs and the code, proposes components and interfaces, writes `<M>.md`, updates `overview.md` and opens the PR `arch: <M>`. With `--update` it changes only what moved. This is the twelfth prompt.
+  - **`forge arch validate <M> [--force]`**: checks `<M>.md` and `overview.md` offline. It ignores `planning.architecture`. It enforces `min_tier_for.architecture` unless `--force` or CI. Exits 0, 1 and 5.
+  - **Plan fields `component`, `implements`, `uses`**: plan-only, like `proposal`. `plan apply` does not write them to issues.
+  - **`forge plan validate` architecture checks**: errors `architecture_missing`, `architecture_invalid`, `architecture_draft`, `unknown_component`, `unknown_interface`, `interface_unimplemented`, `interface_multiply_implemented`, `contract_without_interface` and `uses_without_dependency`. Warnings `zone_outside_component`, `implementer_not_producer` and `architecture_fields_unchecked`.
+  - **`planning` block in `.forge/config.yml`**: `architecture: required | optional`, plus `max_tasks_per_agent` and `max_components_per_agent` (validated now, used in phase 14). `min_tier_for` accepts `architecture`.
+  - **Task context**: `forge task show` and `forge next` gain an `architecture` object (`path`, `component`, `implements`, `uses`) and a matching `## Architecture` block.
 - **Guided project configuration** (ADR 0018):
   - **`forge config validate`**: checks `config.yml`, `team.yml` and `zones.yml` together, offline. Each file that is missing or invalid gives one error that names the file, the key and the fix (exit 1). Warnings cover init placeholders, a team without a lead, files that match no zone, zones that match no file and a CLI outside `forge_version`.
   - **`/forge-configure` prompt** (`$forge-configure` in Codex): the lead's agent reads the codebase, proposes `checks`, `setup.commands`, zones and team members, writes them after the lead agrees, validates them and opens a PR. With `--update` it changes only what drifted. This is the eleventh prompt.
@@ -23,6 +31,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **The plan follows the architecture** (ADR 0019). The documented sequence is now `/forge-plan roadmap` → `/forge-architect M1` → merge the `arch: M1` PR → `/forge-plan M1`. `/forge-plan <M>` assigns `component`, `implements` and `uses` from the architecture and never adds a component or an interface. `/forge-dev`, `/forge-review` and the `explorer` and `reviewer` subagents read the architecture, and the reviewer checks that a change stays inside the task's component.
+- **Existing projects**: a `config.yml` without a `planning` block defaults to `architecture: optional`, so existing plans and the `forge-plan-apply` workflow keep working with no edit. New projects get `required` from `forge init`.
+- **Upgrade note**: v0.1.0 rejects the `planning` key and the new plan fields as unknown. The release that ships this change needs a minor version bump (0.2.0), and projects that use the new fields must pin `forge_version` to it.
 - `forge init` next steps now point the lead to `/forge-configure` and `forge config validate` instead of editing the three project files by hand (ADR 0018). Existing projects get the new prompt by running `forge init` again or by copying `configure.md` and running `forge adapters generate`.
 
 ## [0.1.0] - 2026-11-03

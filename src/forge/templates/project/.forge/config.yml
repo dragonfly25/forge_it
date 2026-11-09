@@ -49,6 +49,14 @@ resolvers:
   #   strategy: regenerate
   #   command: "npm install --package-lock-only"
 
+# Milestone planning. `/forge-architect <milestone>` writes docs/architecture/<milestone>.md
+# before `/forge-plan <milestone>`. With `optional`, a milestone may be planned without it,
+# but an existing file is still checked. Without this block the mode is `optional`.
+planning:
+  architecture: required           # required | optional
+  max_tasks_per_agent: 10          # integer >= 1. Reserved for multi-agent planning; validated, not used yet.
+  max_components_per_agent: 3      # integer >= 1. Reserved for multi-agent planning; validated, not used yet.
+
 review:
   cross_provider: true             # prefer a reviewer whose agent uses a different provider
   required_approvals: 1
@@ -56,5 +64,5 @@ review:
 # Project constraints on model choices. Forge warns when a profile breaks them.
 models:
   recommended: {strong: opus, standard: sonnet}   # shown as suggestions during `forge setup`
-  min_tier_for: {reviewer: strong, plan: strong}  # commands and subagents that must not run below a tier
+  min_tier_for: {reviewer: strong, plan: strong, architecture: strong}  # commands and subagents that must not run below a tier
   allowed_providers: [anthropic, openai, local]   # warn when a profile uses other providers

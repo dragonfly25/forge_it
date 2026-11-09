@@ -22,7 +22,12 @@ from forge.commands._output import GlobalOptions
 from forge.core import adapters
 from forge.core.claim import ClaimContext, Claimed, NextOutcome
 from forge.core.config import DelegationMode, ForgeConfig, check_cli_version
-from forge.core.context import TaskContext, gather_task_context, render_context
+from forge.core.context import (
+    TaskContext,
+    gather_task_context,
+    render_context,
+    task_architecture,
+)
 from forge.core.delegation import delegation_for
 from forge.core.errors import ExitCode, ForgeError, PreconditionError
 from forge.core.models import check_profile
@@ -393,7 +398,8 @@ def finish_claim(
     """Post-claim local steps: workspace, ``current.json``, then the task context in ``data``.
 
     The context carries the delegation decision (ADR 0017) for the claimed task, computed in
-    the task's workspace with ``delegation`` as the ``--delegation`` override.
+    the task's workspace with ``delegation`` as the ``--delegation`` override, and the task's
+    architecture (ADR 0019), read from that same workspace.
     """
     claimed = outcome.claimed
     assert claimed is not None
@@ -425,6 +431,9 @@ def finish_claim(
     context = load_task_context(
         app, claimed.issue, zones=ctx.zones, now=ctx.now(), remote=ctx.remote
     )
+    # The architecture comes from the task's workspace (ADR 0019): a fresh worktree is cut
+    # from the up-to-date claim tip, while ``app.root`` may be a stale checkout.
+    context.architecture = task_architecture(workspace.path, context.meta)
     attach_delegation(context, app.config, profile, ctx.agent, workspace.path, delegation, result)
     rendered.context = context
     result.data["workspace"] = workspace.to_data()

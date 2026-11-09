@@ -10,6 +10,7 @@ from typer.core import TyperGroup
 
 from forge import __version__
 from forge.commands import adapters as adapters_cmd
+from forge.commands import arch as arch_cmd
 from forge.commands import config as config_cmd
 from forge.commands import docs as docs_cmd
 from forge.commands import escalate as escalate_cmd
@@ -273,6 +274,10 @@ plan_app.command("apply", help="Create or update the milestone's task issues (§
     plan_apply_cmd.apply
 )
 app.add_typer(plan_app, name="plan")
+arch_cmd.arch_app.command("validate", help="Validate a milestone architecture offline (ADR 0019).")(
+    arch_cmd.validate
+)
+app.add_typer(arch_cmd.arch_app, name="arch")
 app.command("init", help="Scaffold Forge project files from templates (§5.2).")(init_cmd.init)
 adapters_cmd.adapters_app.command(
     "generate", help="Regenerate adapter files; --check fails on drift (§13)."

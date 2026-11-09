@@ -17,7 +17,7 @@ Implement the claimed task so that every `done_when` item is true, staying insid
    With neither flag, do not pass `--delegation`. An earlier `--solo` or `--delegate` stays in effect for this task (`source: invocation`). Without one, the profile and the project decide. To go back to the profile's mode, pass `--delegation <mode>` explicitly.
    Forge saves the choice in the task's local state until the task is released or handed off. A new `--delegation` replaces it. `forge ship` and `forge status` then report the decision you followed. You do not need to note it anywhere else. Always report the real `source` and `reason` from `data.delegation`.
 2. Read `data.delegation` from the context. Use `delegate`, `reason`, `subagent` and `model`. Tell the user the decision in one line, with `reason`. If a message says the requested mode was not allowed or delegation was forced off, pass it on.
-3. Read `.forge/rules.md`. Work in the task's worktree (the path is in the context).
+3. Read `.forge/rules.md`. Work in the task's worktree (the path is in the context). If `data.architecture.path` is set, read that file (`docs/architecture/<milestone>.md`) and `docs/architecture/overview.md`. Find the task's `component` and the interfaces in `implements` and `uses`. Stay inside that component, build the interfaces you implement exactly as declared, and use the others as declared.
 4. Implement. Follow the path that `data.delegation.delegate` selects.
 
    **If `delegate` is false: implement it yourself.**
@@ -58,6 +58,7 @@ Implement the claimed task so that every `done_when` item is true, staying insid
 ## Guardrails
 - Stay in the zones. If a change needs a file outside them, stop and ask the user. If it is new work, use `forge propose`. If it belongs to someone else's work or to a contract you do not own, run `forge escalate --reason "<reason>" --json`.
 - Never change a contract zone the task does not own.
+- Do not change the architecture (`docs/architecture/`) from a task. If the design does not fit, stop and tell the user; the lead updates it with `/forge-architect <milestone> --update`.
 - Never push to the default branch. Do not push by hand: `/forge-sync` and `/forge-ship` publish your work.
 - Never write credentials or secrets into files, commits or issues.
 - Do not weaken or delete a test to make it pass. Fix the code or tell the user.

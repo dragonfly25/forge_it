@@ -63,4 +63,4 @@ Tell the user:
 - after `pr_opened`: the release PR URL, the changelog section, and that they must get it merged and then ask you to run the release again;
 - after `released`: the tag name, the GitHub release URL and that the GitHub milestone is closed;
 - why you stopped, if you did, and the fix;
-- what is next: `/forge-plan <next-milestone>` if the next milestone is not planned yet.
+- what is next: if the next milestone is not planned yet, `/forge-architect <next-milestone>`, merge its PR, then `/forge-plan <next-milestone>`.

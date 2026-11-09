@@ -1,7 +1,8 @@
 """Tests for forge.core.plan: roadmap, plan files and the offline validation (ADR 0013).
 
 Each test writes a small project (plans, specs) under ``tmp_path`` and validates it; one test
-per error and per warning of ADR 0013, plus the clean case, waves and coverage.
+per error and per warning of ADR 0013, plus the clean case, waves and coverage, and one test
+per architecture error and warning of ADR 0019 with the required / optional / absent modes.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from typing import Any
 import pytest
 import yaml
 
-from forge.core.config import ModelsConfig
+from forge.core.config import ModelsConfig, PlanningConfig
 from forge.core.errors import ConfigError, ExitCode, PreconditionError
 from forge.core.output import Level
 from forge.core.plan import (
@@ -108,9 +109,14 @@ class Project:
         self.write(f"plans/{milestone}.yml", yaml.safe_dump(data, sort_keys=False))
 
     def validate(
-        self, milestone: str = "M1", *, zones: ZonesConfig = ZONES, team: Team | None = None
+        self,
+        milestone: str = "M1",
+        *,
+        zones: ZonesConfig = ZONES,
+        team: Team | None = None,
+        planning: PlanningConfig | None = None,
     ) -> PlanValidation:
-        return validate_plan(self.root, milestone, zones=zones, team=team)
+        return validate_plan(self.root, milestone, zones=zones, team=team, planning=planning)
 
 
 @pytest.fixture
@@ -726,3 +732,381 @@ def test_proposal_adopted_twice_is_an_error(project: Project) -> None:
     project.plan(tasks)
     issue = only(project.validate().errors, "duplicate_proposal")
     assert (issue.task, issue.field) == ("M1-T03", "proposal")
+
+
+# --------------------------------------------------------------------------- architecture
+
+ARCH = "docs/architecture/M1.md"
+OVERVIEW = "docs/architecture/overview.md"
+REQUIRED = PlanningConfig(architecture="required")
+OPTIONAL = PlanningConfig(architecture="optional")
+NO_ARCH_INFO = "no architecture for M1 (planning.architecture: optional)"
+
+ARCH_BODY = """\
+# M1 architecture
+## Context
+x
+## Components
+x
+## Interfaces
+x
+## Data model
+x
+## Decisions
+x
+## Risks
+x
+## Open questions
+"""
+
+
+def arch_front(**overrides: Any) -> dict[str, Any]:
+    """A valid M1 architecture: api-svc produces IF-schema (zone shared) for web-app."""
+    data: dict[str, Any] = {
+        "milestone": "M1",
+        "status": "ready",
+        "specs": [SPEC],
+        "components": [
+            {"id": "api-svc", "zones": ["api"], "summary": "API"},
+            {"id": "web-app", "zones": ["web"], "summary": "Web"},
+        ],
+        "interfaces": [
+            {
+                "id": "IF-schema",
+                "zone": "shared",
+                "producer": "api-svc",
+                "consumers": ["web-app"],
+                "summary": "Schema",
+            }
+        ],
+    }
+    data.update(overrides)
+    return data
+
+
+def overview_front() -> dict[str, Any]:
+    """An overview with an existing component (db-svc) and interface (IF-legacy)."""
+    return {
+        "milestones": ["M0"],
+        "components": [{"id": "db-svc", "zones": ["db"], "summary": "DB"}],
+        "interfaces": [
+            {
+                "id": "IF-legacy",
+                "zone": "shared",
+                "producer": "db-svc",
+                "consumers": [],
+                "summary": "Legacy",
+            }
+        ],
+    }
+
+
+def write_arch(project: Project, front: dict[str, Any] | None = None) -> None:
+    text = yaml.safe_dump(arch_front() if front is None else front, sort_keys=False)
+    project.write(ARCH, f"---\n{text}---\n{ARCH_BODY}")
+
+
+def write_overview(project: Project) -> None:
+    text = yaml.safe_dump(overview_front(), sort_keys=False)
+    project.write(OVERVIEW, f"---\n{text}---\n# System\n")
+
+
+def arch_tasks() -> list[dict[str, Any]]:
+    """The clean plan with its architecture fields: T01 implements IF-schema, T02/T03 use it."""
+    t1, t2, t3 = clean_tasks()
+    t1.update(component="api-svc", implements=["IF-schema"])
+    t2.update(component="api-svc", uses=["IF-schema"])
+    t3.update(component="web-app", uses=["IF-schema"])
+    return [t1, t2, t3]
+
+
+def checked(project: Project, tasks: list[dict[str, Any]], **arch: Any) -> PlanValidation:
+    """Write the architecture and ``tasks`` and validate in required mode."""
+    write_arch(project, arch_front(**arch))
+    project.plan(tasks)
+    return project.validate(planning=REQUIRED)
+
+
+def test_architecture_checked_clean_plan(project: Project) -> None:
+    result = checked(project, arch_tasks())
+    assert result.ok, result.errors
+    assert result.warnings == ()
+    assert result.messages == ()
+    assert result.architecture.to_data() == {
+        "mode": "required",
+        "path": ARCH,
+        "present": True,
+        "status": "ready",
+        "checked": True,
+        "interfaces": {"IF-schema": "M1-T01"},
+    }
+    assert result.to_data()["architecture"]["interfaces"] == {"IF-schema": "M1-T01"}
+    assert result.plan is not None
+    first = result.plan.tasks[0]
+    assert (first.component, first.implements, first.uses) == ("api-svc", ("IF-schema",), ())
+
+
+def test_required_without_architecture_fails(project: Project) -> None:
+    project.plan(clean_tasks())
+    result = project.validate(planning=REQUIRED)
+    # No other architecture check runs: no missing component errors.
+    assert codes(result.errors) == ["architecture_missing"]
+    issue = result.errors[0]
+    assert issue.file == ARCH and "/forge-architect M1" in issue.hint
+    assert result.messages == ()
+    assert result.architecture.checked and not result.architecture.present
+
+
+def test_planning_key_absent_without_architecture_passes(project: Project) -> None:
+    project.plan(clean_tasks())
+    result = project.validate()  # no `planning`: the default is optional
+    assert result.ok and result.warnings == ()
+    assert [(m.level, m.text) for m in result.messages] == [(Level.INFO, NO_ARCH_INFO)]
+    assert result.architecture.to_data() == {
+        "mode": "optional",
+        "path": ARCH,
+        "present": False,
+        "status": None,
+        "checked": False,
+        "interfaces": {},
+    }
+    assert PlanningConfig().architecture == "optional"
+
+
+def test_optional_without_architecture_passes_with_info(project: Project) -> None:
+    project.plan(clean_tasks())
+    result = project.validate(planning=OPTIONAL)
+    assert result.ok and result.warnings == ()
+    assert [m.text for m in result.messages] == [NO_ARCH_INFO]
+
+
+@pytest.mark.parametrize("text", [None, "milestone: [M1\n"])
+def test_optional_info_emitted_when_plan_does_not_load(project: Project, text: str | None) -> None:
+    if text is not None:
+        project.write("plans/M1.yml", text)
+    result = project.validate(planning=OPTIONAL)
+    assert result.plan is None and not result.ok
+    assert [(m.level, m.text) for m in result.messages] == [(Level.INFO, NO_ARCH_INFO)]
+    assert not result.architecture.checked
+
+
+def test_required_without_loadable_plan_has_no_info(project: Project) -> None:
+    project.write("plans/M1.yml", "milestone: [M1\n")
+    result = project.validate(planning=REQUIRED)
+    assert result.plan is None and result.messages == ()
+
+
+def test_optional_with_architecture_is_checked(project: Project) -> None:
+    write_arch(project)
+    project.plan(clean_tasks())  # no component: an error once the file exists
+    result = project.validate(planning=OPTIONAL)
+    assert result.architecture.checked
+    assert result.messages == ()
+    assert {i.code for i in result.errors} >= {"missing_field"}
+
+
+def test_architecture_fields_unchecked_warning(project: Project) -> None:
+    project.plan(arch_tasks())
+    result = project.validate(planning=OPTIONAL)
+    assert result.ok
+    issue = only(result.warnings, "architecture_fields_unchecked")
+    assert "M1-T01, M1-T02, M1-T03" in issue.message
+    assert [m.text for m in result.messages] == [NO_ARCH_INFO]
+
+
+def test_architecture_invalid_relays_errors_with_code_prefix(project: Project) -> None:
+    components = arch_front()["components"]
+    components[0]["zones"] = ["nowhere"]
+    result = checked(project, arch_tasks(), components=components)
+    issue = only(result.errors, "architecture_invalid")
+    assert issue.message.startswith("[unknown_zone] ")
+    assert issue.file == ARCH and issue.field is not None and issue.hint
+    assert issue.task is None
+
+
+def test_architecture_warnings_are_not_relayed(project: Project) -> None:
+    # No overview.md: `forge arch validate` warns overview_stale; plan validate does not.
+    result = checked(project, arch_tasks())
+    assert result.warnings == ()
+
+
+def test_architecture_unreadable_frontmatter_skips_task_checks(project: Project) -> None:
+    front = arch_front()
+    del front["interfaces"]
+    write_arch(project, front)
+    tasks = arch_tasks()
+    del tasks[0]["component"]  # would be missing_field if the task checks ran
+    project.plan(tasks)
+    result = project.validate(planning=REQUIRED)
+    assert codes(result.errors) == ["architecture_invalid"]
+    assert result.errors[0].message.startswith("[missing_field] ")
+    assert result.architecture.interfaces == {}
+
+
+def test_architecture_draft_still_runs_task_checks(project: Project) -> None:
+    tasks = arch_tasks()
+    tasks[2]["component"] = "ghost"
+    result = checked(project, tasks, status="draft")
+    issue = only(result.errors, "architecture_draft")
+    assert (issue.file, issue.field) == (ARCH, "status")
+    assert "unknown_component" in codes(result.errors)
+
+
+def test_component_required_when_checked(project: Project) -> None:
+    tasks = arch_tasks()
+    del tasks[1]["component"]
+    result = checked(project, tasks)
+    issue = only(result.errors, "missing_field")
+    assert (issue.task, issue.field) == ("M1-T02", "component")
+
+
+def test_unknown_component(project: Project) -> None:
+    tasks = arch_tasks()
+    tasks[2]["component"] = "ghost"
+    issue = only(checked(project, tasks).errors, "unknown_component")
+    assert (issue.task, issue.field) == ("M1-T03", "component")
+
+
+def test_component_and_interface_from_overview(project: Project) -> None:
+    write_overview(project)
+    tasks = arch_tasks()
+    tasks.append(
+        task(4, zones=["db"], component="db-svc", uses=["IF-legacy"], depends_on=["M1-T01"])
+    )
+    result = checked(project, tasks)
+    assert result.ok, result.errors
+    # IF-legacy is existing: not implementable, exempt from uses_without_dependency.
+    assert result.architecture.interfaces == {"IF-schema": "M1-T01"}
+
+
+def test_unknown_interface_in_implements(project: Project) -> None:
+    write_overview(project)
+    tasks = arch_tasks()
+    tasks[0]["implements"] = ["IF-schema", "IF-legacy"]  # IF-legacy is only in overview.md
+    issue = only(checked(project, tasks).errors, "unknown_interface")
+    assert (issue.task, issue.field) == ("M1-T01", "implements[1]")
+    assert "declare it in" in issue.hint
+
+
+def test_unknown_interface_in_uses(project: Project) -> None:
+    tasks = arch_tasks()
+    tasks[2]["uses"] = ["IF-schema", "IF-ghost"]
+    issue = only(checked(project, tasks).errors, "unknown_interface")
+    assert (issue.task, issue.field) == ("M1-T03", "uses[1]")
+
+
+def test_interface_unimplemented(project: Project) -> None:
+    interfaces = arch_front()["interfaces"]
+    interfaces.append({**interfaces[0], "id": "IF-events"})
+    result = checked(project, arch_tasks(), interfaces=interfaces)
+    issue = only(result.errors, "interface_unimplemented")
+    assert issue.field == "IF-events" and issue.file == "plans/M1.yml"
+    assert result.architecture.interfaces == {"IF-schema": "M1-T01", "IF-events": None}
+
+
+def test_interface_multiply_implemented(project: Project) -> None:
+    tasks = arch_tasks()
+    tasks.append(
+        task(4, type="contract", zones=["shared"], component="api-svc", implements=["IF-schema"])
+    )
+    issue = only(checked(project, tasks).errors, "interface_multiply_implemented")
+    assert "M1-T01, M1-T04" in issue.message and issue.field == "IF-schema"
+
+
+def test_contract_without_interface(project: Project) -> None:
+    tasks = arch_tasks()
+    del tasks[0]["implements"]
+    result = checked(project, tasks)
+    issue = only(result.errors, "contract_without_interface")
+    assert (issue.task, issue.field) == ("M1-T01", "implements")
+
+
+def test_uses_without_dependency(project: Project) -> None:
+    tasks = arch_tasks()
+    tasks[2]["depends_on"] = []
+    issue = only(checked(project, tasks).errors, "uses_without_dependency")
+    assert (issue.task, issue.field) == ("M1-T03", "uses[0]")
+    assert "M1-T01" in issue.hint
+
+
+def test_uses_with_transitive_dependency_is_fine(project: Project) -> None:
+    tasks = arch_tasks()
+    tasks[2]["depends_on"] = ["M1-T02"]  # T03 -> T02 -> T01
+    tasks[2]["covers"] = ["AC-3"]
+    result = checked(project, tasks)
+    assert "uses_without_dependency" not in codes(result.errors)
+
+
+def test_uses_by_its_own_implementer_is_exempt(project: Project) -> None:
+    tasks = arch_tasks()
+    tasks[0]["uses"] = ["IF-schema"]
+    assert "uses_without_dependency" not in codes(checked(project, tasks).errors)
+
+
+def test_uses_without_dependency_skipped_on_cycle_or_no_implementer(project: Project) -> None:
+    tasks = arch_tasks()
+    tasks[0]["depends_on"] = ["M1-T02"]  # cycle T01 <-> T02
+    tasks[2]["depends_on"] = []
+    result = checked(project, tasks)
+    assert "dependency_cycle" in codes(result.errors)
+    assert "uses_without_dependency" not in codes(result.errors)
+
+    tasks = arch_tasks()
+    del tasks[0]["implements"]
+    tasks[2]["depends_on"] = []
+    result = checked(project, tasks)
+    assert "interface_unimplemented" in codes(result.errors)
+    assert "uses_without_dependency" not in codes(result.errors)
+
+
+def test_zone_outside_component(project: Project) -> None:
+    tasks = arch_tasks()
+    tasks[2]["zones"] = ["web", "db"]
+    result = checked(project, tasks)
+    assert result.ok
+    issue = only(result.warnings, "zone_outside_component")
+    assert (issue.task, issue.field) == ("M1-T03", "zones[1]")
+
+
+def test_zone_of_used_interface_does_not_count(project: Project) -> None:
+    tasks = arch_tasks()
+    tasks[2].update(zones=["web", "shared"], allow_contract_change=True)
+    issue = only(checked(project, tasks).warnings, "zone_outside_component")
+    assert (issue.task, issue.field) == ("M1-T03", "zones[1]")
+
+
+def test_zone_of_implemented_interface_counts(project: Project) -> None:
+    # T01 touches `shared`, which is not a zone of api-svc but the zone of IF-schema.
+    result = checked(project, arch_tasks())
+    assert "zone_outside_component" not in codes(result.warnings)
+
+
+def test_implementer_not_producer(project: Project) -> None:
+    tasks = arch_tasks()
+    tasks[0]["component"] = "web-app"
+    result = checked(project, tasks)
+    assert result.ok
+    issue = only(result.warnings, "implementer_not_producer")
+    assert (issue.task, issue.field) == ("M1-T01", "component")
+    assert "api-svc" in issue.message
+
+
+@pytest.mark.parametrize(
+    ("overrides", "field"),
+    [
+        ({"component": 5}, "component"),
+        ({"component": "Bad_Id"}, "component"),
+        ({"uses": "IF-schema"}, "uses"),
+        ({"uses": ["if-schema"]}, "uses[0]"),
+        ({"type": "contract", "zones": ["shared"], "implements": [3]}, "implements[0]"),
+        ({"implements": ["IF-schema"]}, "implements"),  # not a contract task
+    ],
+)
+def test_architecture_fields_format(
+    project: Project, overrides: dict[str, Any], field: str
+) -> None:
+    project.plan([task(1, **overrides)])
+    # Format rules apply in unchecked mode too.
+    result = project.validate(planning=OPTIONAL)
+    issue = only(result.errors, "invalid_field")
+    assert (issue.task, issue.field) == ("M1-T01", field)

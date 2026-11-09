@@ -511,6 +511,97 @@ def test_task_show_unknown_task_is_code_1(env: Env) -> None:
 # --------------------------------------------------------------------------- heartbeat
 
 
+# --------------------------------------------------------------------------- architecture
+
+PLAN_WITH_ARCH = """\
+milestone: M1
+tasks:
+  - id: M1-T01
+    title: task
+    component: api-svc
+    implements: [IF-schema]
+    uses: [IF-legacy]
+"""
+
+ARCH_FILE = "docs/architecture/M1.md"
+FILLED_ARCH = {
+    "path": ARCH_FILE,
+    "component": "api-svc",
+    "implements": ["IF-schema"],
+    "uses": ["IF-legacy"],
+}
+
+
+def commit_architecture(env: Env) -> None:
+    """Push ``plans/M1.yml`` (with architecture fields) and ``docs/architecture/M1.md``."""
+    lead = env.git_world.clone("lead-arch")
+    env.git_world.commit_file(lead, "plans/M1.yml", PLAN_WITH_ARCH, "chore: plan")
+    env.git_world.commit_file(lead, ARCH_FILE, "# M1 architecture\n", "docs: architecture")
+    env.git_world.push(lead, "main")
+
+
+def test_next_context_has_the_architecture(env: Env) -> None:
+    env.task("M1-T01")
+    repo = env.clone("alice")
+
+    code, out = env.invoke(repo, "next")
+
+    assert code == 0, out
+    assert out["data"]["context"]["architecture"] == {
+        "path": None,
+        "component": None,
+        "implements": [],
+        "uses": [],
+    }
+
+
+def test_next_reads_the_architecture_from_the_fresh_worktree(env: Env) -> None:
+    n = env.task("M1-T01")
+    repo = env.clone("alice")  # cloned before the architecture lands: a stale checkout
+    commit_architecture(env)
+
+    code, out = env.invoke(repo, "next")
+
+    assert code == 0, out
+    assert not (repo / ARCH_FILE).exists()  # the main clone is still stale
+    assert (env.worktree(n) / ARCH_FILE).is_file()
+    assert out["data"]["context"]["architecture"] == FILLED_ARCH
+    assert not any(m["level"] == "warning" for m in out["messages"])
+
+
+def test_task_show_has_the_architecture_block(env: Env) -> None:
+    n = env.task("M1-T01")
+    commit_architecture(env)
+    repo = env.clone("alice")
+    assert env.invoke(repo, "next")[0] == 0
+    worktree = env.worktree(n)
+
+    code, out = env.invoke(worktree, "task", "show")
+    assert code == 0, out
+    assert out["data"]["architecture"] == FILLED_ARCH
+
+    code, out = env.invoke(repo, "task", "show", "M1-T01")
+    assert code == 0 and out["data"]["architecture"] == FILLED_ARCH
+
+    human = env.human(worktree, "task", "show")
+    assert human.exit_code == 0, human.output
+    assert (
+        "## Architecture\n"
+        f"- path: {ARCH_FILE}\n"
+        "- component: api-svc\n"
+        "- implements: IF-schema\n"
+        "- uses: IF-legacy\n"
+    ) in human.stdout
+
+
+def test_task_show_without_architecture_has_no_block(env: Env) -> None:
+    env.task("M1-T01")
+    repo = env.clone("alice")
+    assert env.invoke(repo, "next")[0] == 0
+    human = env.human(env.worktree(1), "task", "show")
+    assert human.exit_code == 0 and "## Architecture" not in human.stdout
+
+
 def test_heartbeat_updates_the_lease(env: Env) -> None:
     n = env.task("M1-T01")
     assert env.invoke(env.clone("alice"), "next")[0] == 0
@@ -965,7 +1056,12 @@ def test_delegation_off_everywhere_equals_v010(env: Env, monkeypatch: pytest.Mon
     assert code == 0, nxt
     assert added == [0]
     data = nxt["data"]
-    assert list(data["context"]) == [*V010_CONTEXT_KEYS[:10], "delegation", "warnings"]
+    assert list(data["context"]) == [
+        *V010_CONTEXT_KEYS[:10],
+        "delegation",
+        "architecture",
+        "warnings",
+    ]
     assert list(data["current"]) == [*V010_CURRENT_KEYS, "delegation_override"]
     assert data["context"]["delegation"]["mode"] == "off"
     assert all(not m["text"].lower().count("delegation") for m in nxt["messages"])
@@ -977,9 +1073,11 @@ def test_delegation_off_everywhere_equals_v010(env: Env, monkeypatch: pytest.Mon
         neutral = env.invoke(worktree, "task", "show", "--delegation", "off")
     assert real[0] == neutral[0] == 0
     assert real[1]["messages"] == neutral[1]["messages"]
-    assert _without(real[1]["data"], "delegation") == _without(neutral[1]["data"], "delegation")
-    assert list(_without(neutral[1]["data"], "delegation")) == V010_CONTEXT_KEYS
-    assert _without(data["context"], "delegation") == _without(neutral[1]["data"], "delegation")
+    # ADR 0019 adds `architecture`; it is stripped like `delegation` (ADR 0017).
+    new_keys = ("delegation", "architecture")
+    assert _without(real[1]["data"], *new_keys) == _without(neutral[1]["data"], *new_keys)
+    assert list(_without(neutral[1]["data"], *new_keys)) == V010_CONTEXT_KEYS
+    assert _without(data["context"], *new_keys) == _without(neutral[1]["data"], *new_keys)
 
     real_status = env.invoke(worktree, "status")
     with monkeypatch.context() as patch:

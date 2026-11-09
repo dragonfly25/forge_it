@@ -226,7 +226,7 @@ Within a rank, the team order is rotated by the issue number, so requests spread
 
 ### `forge review <pr>`
 
-Without `--submit`, it prints the review context: the PR, the linked task and its ACs, the diff (capped at 300 000 bytes), a zone check, CI state and existing reviews. The `/forge-review` prompt checks ACs, `done_when`, zone discipline, tests and contracts. It then submits with `--submit approve|request-changes|comment --body-file F`. Forge adds a footer with the agent, its providers and the model. You cannot approve or request changes on your own PR. An agent below `min_tier_for.reviewer` gets exit 5 unless `--force`.
+Without `--submit`, it prints the review context: the PR, the linked task and its ACs, the diff (capped at 300 000 bytes), a zone check, CI state and existing reviews. The `/forge-review` prompt checks ACs, `done_when`, zone discipline, tests and contracts. It also reads the task's entry in `plans/<M>.yml` and `docs/architecture/` and checks that the change stays inside the task's component and respects the interfaces it implements and uses. It then submits with `--submit approve|request-changes|comment --body-file F`. Forge adds a footer with the agent, its providers and the model. You cannot approve or request changes on your own PR. An agent below `min_tier_for.reviewer` gets exit 5 unless `--force`.
 
 ## 9. Planning
 
@@ -236,15 +236,33 @@ Without `--submit`, it prints the review context: the PR, the linked task and it
 
 **The `/forge-plan` prompt** asks questions first, proposes milestones, splits the spec, writes the plan contract-first and runs validate until there are no errors. Both the roadmap and each plan arrive as PRs (`plan: roadmap`, `plan: M1`). Milestone N+1 is planned in detail when milestone N is about 70% done.
 
+**Sequence.** The lead runs `/forge-plan roadmap`, then `/forge-architect M1`, merges the `arch: M1` PR, and only then runs `/forge-plan M1`. The architecture comes before the task plan.
+
+### Architecture
+
+([ADR 0019](decisions/0019-milestone-architecture.md))
+
+Each milestone has an architecture in the project repository, reviewed through its own PR.
+
+- `docs/architecture/overview.md` maps the system as it is today.
+- `docs/architecture/<M>.md` describes what milestone `<M>` adds or changes: components (each with zones), interfaces (each in a contract zone, with a producer and consumers), a data model, decisions, risks and open questions. Its frontmatter `status` is `draft` or `ready`.
+- `/forge-architect <M>` writes both files and opens the PR `arch: <M>`. `/forge-architect <M> --update` changes only what moved. Durable decisions go to ADRs in `docs/decisions/`.
+- `forge arch validate <M>` checks the files offline.
+
+**The plan follows the architecture.** A plan task names its `component`. A `type: contract` task `implements` one interface. Any task can `use` interfaces. `/forge-plan` never adds a component or an interface. If the architecture is missing, in draft or too thin, it stops and sends the lead back to `/forge-architect <M>`.
+
+**Mode.** `planning.architecture` in `.forge/config.yml` is `required` or `optional`. `forge init` writes `required`. A config without the key is `optional`. With `optional` and no `<M>.md` file, `forge plan validate` skips the architecture checks.
+
 ### `forge plan validate <milestone>`
 
 Validation is offline. It never reads GitHub, so it runs in CI and on a fresh clone.
 
 - **Errors (exit 1):** unknown fields, duplicate ids, unknown zones or dependencies, dependency cycles, `size: L`, a spec with `status: draft` or unresolved questions, a `covers` id that the spec does not define, an AC defined twice, a task touching a contract zone without `type: contract` (unless `allow_contract_change: true`).
-- **Warnings:** two tasks of one wave overlapping by zone, ACs that no task covers, waves narrower than the number of `dev` members.
+- **Architecture errors** (when the architecture is checked, see above): the file is missing, invalid or still `draft`; a task has no `component` (required whenever the architecture is checked); a task has an unknown `component`, `implements` or `uses` id; an interface of the milestone has no contract task, or has more than one; a contract task implements nothing; a task uses an interface without depending on the task that implements it.
+- **Warnings:** two tasks of one wave overlapping by zone, ACs that no task covers, waves narrower than the number of `dev` members, a task touching a zone outside its component, a contract task whose component is not the interface's producer.
 - **Output:** the waves and the AC to task coverage matrix.
 
-The `min_tier_for.plan` rule applies to validate and apply when a profile exists and `GITHUB_ACTIONS` is not set. An agent below the tier gets exit 5 unless `--force`.
+The `min_tier_for.plan` rule applies to validate and apply when a profile exists and `GITHUB_ACTIONS` is not set. An agent below the tier gets exit 5 unless `--force`. `forge arch validate` applies the same rule with `min_tier_for.architecture`.
 
 ### `forge plan apply <milestone> [--dry-run]`
 

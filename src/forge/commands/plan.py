@@ -71,11 +71,14 @@ def validate(
         zones = load_zones(app.root)
         notes: list[str] = []
         team = _claims.try_load_team(app, notes)
-        validation = validate_plan(app.root, milestone, zones=zones, team=team)
+        validation = validate_plan(
+            app.root, milestone, zones=zones, team=team, planning=app.config.planning
+        )
         result = Result(data=validation.to_data())
         if problem is not None:
             result.warn(problem, _claims.VERSION_HINT)
         result.messages.extend(messages)
+        result.messages.extend(validation.messages)
         for note in notes:
             result.warn(note)
         if not validation.ok:
@@ -128,6 +131,27 @@ def _issues(console: Console, title: str, issues: Sequence[dict[str, Any]], styl
             console.print(Text(f"    fix: {issue['hint']}", style="dim"))
 
 
+def _architecture_line(arch: dict[str, Any] | None) -> Text | None:
+    """The one "Architecture" line of the human view (ADR 0019)."""
+    if not arch or not arch.get("path"):
+        return None
+    line = Text("Architecture", style="bold")
+    mode = arch.get("mode", "optional")
+    if not arch.get("checked"):
+        line.append(f"  not checked (planning.architecture: {mode}, no {arch['path']})")
+        return line
+    if not arch.get("present"):
+        line.append(f"  {arch['path']} missing ({mode})")
+        return line
+    interfaces: dict[str, str | None] = arch.get("interfaces") or {}
+    done = sum(1 for owner in interfaces.values() if owner)
+    line.append(
+        f"  {arch['path']}  {arch.get('status') or '?'}, "
+        f"{done}/{len(interfaces)} interface(s) implemented ({mode})"
+    )
+    return line
+
+
 def render_validation(data: dict[str, Any], *, width: int | None = None) -> str:
     """Human view of the ``forge plan validate`` data (also used by ``plan apply``).
 
@@ -144,6 +168,9 @@ def render_validation(data: dict[str, Any], *, width: int | None = None) -> str:
         f"{counts.get('warnings', 0)} warning(s)"
     )
     console.print(head)
+    architecture = _architecture_line(data.get("architecture"))
+    if architecture is not None:
+        console.print(architecture)
     if data["errors"]:
         console.print()
         _issues(console, "Errors", data["errors"], "bold red")

@@ -31,6 +31,10 @@ DelegationMode = Literal["off", "auto", "on"]
 DELEGATION_MODES: tuple[DelegationMode, ...] = ("off", "auto", "on")
 """Implementation delegation modes (ADR 0017), from fewest to most delegation."""
 
+ArchitectureMode = Literal["required", "optional"]
+ARCHITECTURE_MODES: tuple[ArchitectureMode, ...] = ("required", "optional")
+"""Values of ``planning.architecture`` (ADR 0019)."""
+
 ADAPTERS: tuple[str, ...] = ("generic", "claude", "codex")
 """Known adapter names, in rendering order (ADR 0014). ``generic`` is always enabled."""
 
@@ -115,6 +119,20 @@ class DelegationConfig:
 
 
 @dataclass(frozen=True)
+class PlanningConfig:
+    """The `planning` section (ADR 0019).
+
+    ``architecture`` defaults to ``optional`` when the section or the key is missing, so
+    projects created before ADR 0019 keep working. The two ``max_*`` limits are read by
+    multi-agent planning (ADR 0020).
+    """
+
+    architecture: ArchitectureMode = "optional"
+    max_tasks_per_agent: int = 10
+    max_components_per_agent: int = 3
+
+
+@dataclass(frozen=True)
 class ForgeConfig:
     """The whole `.forge/config.yml`."""
 
@@ -131,6 +149,7 @@ class ForgeConfig:
     models: ModelsConfig = field(default_factory=ModelsConfig)
     adapters: tuple[str, ...] = ADAPTERS
     delegation: DelegationConfig = field(default_factory=DelegationConfig)
+    planning: PlanningConfig = field(default_factory=PlanningConfig)
 
 
 _TOP_KEYS = (
@@ -147,6 +166,7 @@ _TOP_KEYS = (
     "models",
     "adapters",
     "delegation",
+    "planning",
 )
 
 
@@ -177,6 +197,7 @@ def parse_config(f: Fields) -> ForgeConfig:
         models=_models(f.mapping("models")),
         adapters=_adapters(f),
         delegation=_delegation(f.mapping("delegation")),
+        planning=_planning(f.mapping("planning")),
     )
 
 
@@ -440,6 +461,16 @@ def _delegation(f: Fields) -> DelegationConfig:
     return DelegationConfig(default=default, allowed=allowed)
 
 
+def _planning(f: Fields) -> PlanningConfig:
+    f.reject_unknown(("architecture", "max_tasks_per_agent", "max_components_per_agent"))
+    mode = cast(ArchitectureMode, f.choice("architecture", ARCHITECTURE_MODES, default="optional"))
+    return PlanningConfig(
+        architecture=mode,
+        max_tasks_per_agent=f.int_("max_tasks_per_agent", default=10, min=1),
+        max_components_per_agent=f.int_("max_components_per_agent", default=3, min=1),
+    )
+
+
 # -- helpers ----------------------------------------------------------------------------------
 
 
@@ -469,10 +500,12 @@ def _optional_int(f: Fields, key: str, *, min_: int) -> int | None:
 
 __all__ = [
     "ADAPTERS",
+    "ARCHITECTURE_MODES",
     "CONFIG_PATH",
     "DELEGATION_MODES",
     "MERGE_METHODS",
     "STRATEGIES",
+    "ArchitectureMode",
     "ClaimConfig",
     "DelegationConfig",
     "DelegationMode",
@@ -480,6 +513,7 @@ __all__ = [
     "GitHubConfig",
     "MergeMethod",
     "ModelsConfig",
+    "PlanningConfig",
     "ProjectConfig",
     "Resolver",
     "ReviewConfig",

@@ -20,6 +20,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from forge.core.claim import resolve_task_ref
 from forge.core.config import ForgeConfig
 from forge.core.delegation import Delegation
@@ -310,6 +312,80 @@ class DependencySummary:
         }
 
 
+@dataclass(frozen=True)
+class TaskArchitecture:
+    """The task's place in the milestone architecture (ADR 0019).
+
+    ``path`` is the repository-relative ``docs/architecture/<M>.md`` when it exists in the
+    checkout, else ``None``. ``component``, ``implements`` and ``uses`` come from the task's
+    entry in ``plans/<M>.yml`` of the same checkout; the issue does not carry them.
+    """
+
+    path: str | None = None
+    component: str | None = None
+    implements: tuple[str, ...] = ()
+    uses: tuple[str, ...] = ()
+
+    @property
+    def shown(self) -> bool:
+        """True when the human view shows the ``## Architecture`` block."""
+        return self.path is not None or self.component is not None
+
+    def to_data(self) -> dict[str, Any]:
+        """Return a JSON-able dict."""
+        return {
+            "path": self.path,
+            "component": self.component,
+            "implements": list(self.implements),
+            "uses": list(self.uses),
+        }
+
+
+def _id_list(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(v for v in value if isinstance(v, str))
+
+
+def task_architecture(repo_root: Path, meta: TaskMetadata) -> TaskArchitecture:
+    """Read the task's architecture fields from the checkout at ``repo_root`` (ADR 0019).
+
+    Never fails and adds no warning: an unreadable plan, or a task missing from it, gives
+    ``component: None`` and empty lists; malformed values are treated as absent.
+    """
+    # Imported here: spec.py imports this module, and architecture.py and plan.py import
+    # spec.py, so a module-level import would be circular.
+    from forge.core import architecture as _arch
+    from forge.core import plan as _plan
+
+    rel = _arch.architecture_path(meta.milestone)
+    path = rel.as_posix() if (repo_root / rel).is_file() else None
+    try:
+        data = yaml.safe_load(
+            (repo_root / _plan.plan_path(meta.milestone)).read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return TaskArchitecture(path=path)
+    tasks = data.get("tasks") if isinstance(data, dict) else None
+    entry = next(
+        (
+            t
+            for t in (tasks if isinstance(tasks, list) else [])
+            if isinstance(t, dict) and t.get("id") == meta.id
+        ),
+        None,
+    )
+    if entry is None:
+        return TaskArchitecture(path=path)
+    component = entry.get("component")
+    return TaskArchitecture(
+        path=path,
+        component=component if isinstance(component, str) else None,
+        implements=_id_list(entry.get("implements")),
+        uses=_id_list(entry.get("uses")),
+    )
+
+
 @dataclass
 class TaskContext:
     """Everything ``forge task show`` prints.
@@ -329,6 +405,7 @@ class TaskContext:
     lease: dict[str, Any] | None = None
     warnings: list[str] = field(default_factory=list)
     delegation: Delegation | None = None
+    architecture: TaskArchitecture = field(default_factory=TaskArchitecture)
 
     def to_data(self) -> dict[str, Any]:
         """Return the JSON-able ``data`` payload."""
@@ -356,6 +433,7 @@ class TaskContext:
             "adrs": [a.to_data() for a in self.adrs],
             "lease": self.lease,
             "delegation": None if self.delegation is None else self.delegation.to_data(),
+            "architecture": self.architecture.to_data(),
             "warnings": list(self.warnings),
         }
 
@@ -500,6 +578,7 @@ def build_context(
         adrs=adrs,
         lease=lease,
         warnings=warnings,
+        architecture=task_architecture(repo_root, meta),
     )
 
 
@@ -549,6 +628,16 @@ def render_context(ctx: TaskContext) -> str:
         out += ["", "## Lease", *_render_lease(ctx.lease)]
     if ctx.delegation is not None:
         out += ["", "## Delegation", *ctx.delegation.render_lines()]
+    if ctx.architecture.shown:
+        arch = ctx.architecture
+        out += [
+            "",
+            "## Architecture",
+            f"- path: {arch.path or '-'}",
+            f"- component: {arch.component or '-'}",
+            f"- implements: {', '.join(arch.implements) or '-'}",
+            f"- uses: {', '.join(arch.uses) or '-'}",
+        ]
     if ctx.handoff is not None:
         note = ctx.handoff
         out += ["", f"## Latest handoff note (by {note.author}, {_ts(note.created_at)})", note.body]

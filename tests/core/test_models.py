@@ -5,10 +5,12 @@ from __future__ import annotations
 import pytest
 
 from forge.core.config import ModelsConfig
+from forge.core.errors import ExitCode, PreconditionError
 from forge.core.models import (
     Drift,
     Note,
     can_serve,
+    check_min_tier,
     check_profile,
     model_map,
     preset_drift,
@@ -339,3 +341,49 @@ def test_no_drift_for_unknown_tool(presets: dict[str, Preset]) -> None:
 def test_roles_as_single_string_is_rejected() -> None:
     with pytest.raises(TypeError):
         resolve(FULL, declared_tier=M, roles="reviewer", constraints=CONSTRAINTS)
+
+
+# -- check_min_tier (ADR 0013 B4, ADR 0019) ---------------------------------------------------
+
+LIGHT_ONLY = AgentProfile("small", "ollama", ("local",), {L: "qwen"})
+NEEDS_STRONG_ARCH = ModelsConfig(min_tier_for={"architecture": S, "plan": L})
+
+
+def test_check_min_tier_reads_the_given_role() -> None:
+    assert check_min_tier(NEEDS_STRONG_ARCH, LIGHT_ONLY, "plan") == []
+    assert check_min_tier(NEEDS_STRONG_ARCH, LIGHT_ONLY, "reviewer") == []
+    assert check_min_tier(NEEDS_STRONG_ARCH, ONLY_STRONG, "architecture") == []
+
+
+def test_check_min_tier_refusal_names_role_and_activity() -> None:
+    with pytest.raises(PreconditionError) as info:
+        check_min_tier(
+            NEEDS_STRONG_ARCH,
+            LIGHT_ONLY,
+            "architecture",
+            activity="the architecture",
+            verb="design",
+        )
+    assert info.value.code == ExitCode.PRECONDITION
+    assert "models.min_tier_for.architecture" in info.value.message
+    assert "required for the architecture" in info.value.message
+    assert (info.value.hint or "").startswith("design with an agent")
+    assert "--force" in (info.value.hint or "")
+
+
+def test_check_min_tier_force_ci_and_no_profile() -> None:
+    [forced] = check_min_tier(NEEDS_STRONG_ARCH, LIGHT_ONLY, "architecture", force=True)
+    assert forced.level == Level.WARNING and "--force" in forced.text
+    [ci] = check_min_tier(NEEDS_STRONG_ARCH, LIGHT_ONLY, "architecture", ci=True)
+    assert ci.level == Level.INFO and "GitHub Actions" in ci.text
+    [none] = check_min_tier(NEEDS_STRONG_ARCH, None, "architecture")
+    assert none.level == Level.INFO and "no Forge profile" in none.text
+
+
+def test_check_plan_tier_wrapper_keeps_its_wording() -> None:
+    from forge.core.plan import check_plan_tier
+
+    with pytest.raises(PreconditionError) as info:
+        check_plan_tier(ModelsConfig(min_tier_for={"plan": S}), LIGHT_ONLY)
+    assert "required for planning by models.min_tier_for.plan" in info.value.message
+    assert (info.value.hint or "").startswith("plan with an agent that maps tier strong")
