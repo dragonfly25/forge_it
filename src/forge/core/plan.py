@@ -12,17 +12,20 @@ task id and the field where they apply, with a fix.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 import yaml
 
+# A module import, not ``from forge.core.architecture import ...``: architecture.py imports
+# this module back (for PlanIssue), and a module import tolerates the cycle.
+from forge.core import architecture as _arch
 from forge.core.claim import zones_overlap
-from forge.core.config import ModelsConfig
-from forge.core.errors import ConfigError, PreconditionError
+from forge.core.config import ModelsConfig, PlanningConfig
+from forge.core.errors import ConfigError
 from forge.core.graph import TaskGraph, natural_key
-from forge.core.models import can_serve
+from forge.core.models import check_min_tier
 from forge.core.output import Level, Message
 from forge.core.profile import AgentProfile
 from forge.core.spec import MILESTONE_RE, Spec, load_spec
@@ -61,11 +64,23 @@ TASK_KEYS: tuple[str, ...] = (
     "done_when",
     "allow_contract_change",
     "proposal",
+    "component",
+    "implements",
+    "uses",
 )
-"""Fields of a plan task: the §7.1 metadata fields plus ``title``, ``description`` and the
-optional ``proposal`` (the number of a ``forge propose`` issue the task adopts)."""
+"""Fields of a plan task: the §7.1 metadata fields plus ``title``, ``description``, the
+optional ``proposal`` (the number of a ``forge propose`` issue the task adopts) and the
+optional architecture fields ``component``, ``implements`` and ``uses`` (ADR 0019). The
+last four are plan-only: ``plan apply`` never writes them to issues."""
 
-OPTIONAL_TASK_KEYS: tuple[str, ...] = ("allow_contract_change", "proposal")
+ARCHITECTURE_TASK_KEYS: tuple[str, ...] = ("component", "implements", "uses")
+"""The plan-only task fields that link a task to the milestone architecture (ADR 0019)."""
+
+OPTIONAL_TASK_KEYS: tuple[str, ...] = (
+    "allow_contract_change",
+    "proposal",
+    *ARCHITECTURE_TASK_KEYS,
+)
 
 REQUIRED_TASK_KEYS: tuple[str, ...] = tuple(k for k in TASK_KEYS if k not in OPTIONAL_TASK_KEYS)
 
@@ -89,6 +104,7 @@ _EXAMPLES = {
     "done_when": '["..."]',
     "milestone": "M1",
     "tasks": "[...]",
+    "component": "auth-service",
 }
 
 IssueLevel = Literal["error", "warning"]
@@ -130,6 +146,14 @@ class PlanTask:
     title: str
     description: str
     proposal: int | None = None
+    component: str | None = None
+    implements: tuple[str, ...] = ()
+    uses: tuple[str, ...] = ()
+
+    @property
+    def sets_architecture(self) -> bool:
+        """True when the task sets ``component``, ``implements`` or ``uses``."""
+        return self.component is not None or bool(self.implements) or bool(self.uses)
 
 
 @dataclass(frozen=True)
@@ -181,6 +205,35 @@ class Roadmap:
 
 
 @dataclass(frozen=True)
+class PlanArchitecture:
+    """How :func:`validate_plan` treated the milestone architecture (ADR 0019).
+
+    ``checked`` is True when ``planning.architecture`` is ``required`` or ``path`` exists.
+    ``interfaces`` maps every interface of ``<M>.md`` to the first task implementing it
+    (``None`` when no task does); it is empty when the architecture is not checked or could
+    not be loaded.
+    """
+
+    mode: str = "optional"
+    path: str | None = None
+    present: bool = False
+    checked: bool = False
+    status: str | None = None
+    interfaces: Mapping[str, str | None] = field(default_factory=dict)
+
+    def to_data(self) -> dict[str, Any]:
+        """JSON view: the ``architecture`` block of ``forge plan validate``."""
+        return {
+            "mode": self.mode,
+            "path": self.path,
+            "present": self.present,
+            "status": self.status,
+            "checked": self.checked,
+            "interfaces": dict(self.interfaces),
+        }
+
+
+@dataclass(frozen=True)
 class PlanValidation:
     """Result of :func:`validate_plan`.
 
@@ -198,6 +251,9 @@ class PlanValidation:
     roadmap: Roadmap | None
     file: str = ""
     specs: tuple[str, ...] = field(default=())
+    architecture: PlanArchitecture = field(default_factory=PlanArchitecture)
+    messages: tuple[Message, ...] = ()
+    """Envelope messages (info level) the command adds, e.g. the unchecked architecture."""
 
     @property
     def ok(self) -> bool:
@@ -221,6 +277,7 @@ class PlanValidation:
                 "present": self.roadmap is not None,
                 "milestone": None if roadmap_entry is None else roadmap_entry.to_data(),
             },
+            "architecture": self.architecture.to_data(),
             "counts": {
                 "tasks": 0 if self.plan is None else len(self.plan.tasks),
                 "errors": len(self.errors),
@@ -466,9 +523,13 @@ def _task(
             **where,
         )
         ok = False
+    arch_fields = _architecture_fields(f, where, issues)
+    if arch_fields is None:
+        ok = False
 
     if not ok:
         return None
+    assert arch_fields is not None
     meta_data = {k: v for k, v in f.data.items() if k in METADATA_KEYS}
     try:
         meta = parse_metadata_fields(Fields(meta_data, f.file, f.prefix), None)
@@ -477,7 +538,90 @@ def _task(
         return None
     assert isinstance(title, str) and isinstance(description, str)
     assert proposal is None or isinstance(proposal, int)
-    return PlanTask(meta=meta, title=title, description=description, proposal=proposal)
+    component, implements, uses = arch_fields
+    return PlanTask(
+        meta=meta,
+        title=title,
+        description=description,
+        proposal=proposal,
+        component=component,
+        implements=implements,
+        uses=uses,
+    )
+
+
+def _interface_ids(
+    f: Fields, key: str, where: dict[str, str | None], issues: _Issues
+) -> tuple[str, ...] | None:
+    """Read ``implements`` or ``uses``: a list of ``IF-…`` ids; ``None`` (recorded) if bad."""
+    raw = f.raw(key)
+    if raw is None:
+        return ()
+    hint = f"write `{key}: [IF-auth-api]`, ids of the form `IF-<name>`"
+    if not isinstance(raw, list):
+        issues.error(
+            "invalid_field",
+            f"expected a list of interface ids, got {type_name(raw)}",
+            field=f.path(key),
+            hint=hint,
+            **where,
+        )
+        return None
+    ok = True
+    for i, item in enumerate(raw):
+        if not isinstance(item, str) or _arch.INTERFACE_ID_RE.fullmatch(item) is None:
+            issues.error(
+                "invalid_field",
+                f"invalid interface id {item!r}",
+                field=f.path(f"{key}[{i}]"),
+                hint=hint,
+                **where,
+            )
+            ok = False
+    return tuple(raw) if ok else None
+
+
+def _architecture_fields(
+    f: Fields, where: dict[str, str | None], issues: _Issues
+) -> tuple[str | None, tuple[str, ...], tuple[str, ...]] | None:
+    """Check the format of ``component``, ``implements`` and ``uses`` (ADR 0019).
+
+    The format rules apply whether or not the architecture is checked. Returns the three
+    values, or ``None`` when one of them is invalid (the problems are recorded).
+    """
+    ok = True
+    component = f.raw("component")
+    if component is not None and (
+        not isinstance(component, str) or _arch.COMPONENT_ID_RE.fullmatch(component) is None
+    ):
+        problem = (
+            f"invalid component id {component!r}"
+            if isinstance(component, str)
+            else f"expected a component id, got {type_name(component)}"
+        )
+        issues.error(
+            "invalid_field",
+            problem,
+            field=f.path("component"),
+            hint="write `component: auth-service`, an id of the form `[a-z][a-z0-9-]*`",
+            **where,
+        )
+        ok = False
+    implements = _interface_ids(f, "implements", where, issues)
+    uses = _interface_ids(f, "uses", where, issues)
+    if f.raw("implements") is not None and f.raw("type") != TaskType.CONTRACT.value:
+        issues.error(
+            "invalid_field",
+            "only `type: contract` tasks implement interfaces",
+            field=f.path("implements"),
+            hint="make it a `type: contract` task, or move the id to `uses`",
+            **where,
+        )
+        ok = False
+    if not ok or implements is None or uses is None:
+        return None
+    assert component is None or isinstance(component, str)
+    return component, implements, uses
 
 
 def _load_plan(root: Path, milestone: str, issues: _Issues) -> _Loaded | None:
@@ -826,17 +970,244 @@ def _coverage(
     return coverage
 
 
+def _ancestors(plan: PlanFile, task_id: str) -> set[str]:
+    """Every task of ``plan`` that ``task_id`` depends on, directly or transitively."""
+    deps = {t.meta.id: t.meta.depends_on for t in plan.tasks}
+    seen: set[str] = set()
+    stack = list(deps.get(task_id, ()))
+    while stack:
+        node = stack.pop()
+        if node in seen or node not in deps:
+            continue
+        seen.add(node)
+        stack.extend(deps[node])
+    return seen
+
+
+def _architecture_state(root: Path, milestone: str, planning: PlanningConfig) -> PlanArchitecture:
+    rel = _arch.architecture_path(milestone).as_posix()
+    present = (root / rel).is_file()
+    mode = planning.architecture
+    return PlanArchitecture(
+        mode=mode, path=rel, present=present, checked=mode == "required" or present
+    )
+
+
+def _check_architecture(
+    root: Path,
+    milestone: str,
+    plan: PlanFile,
+    state: PlanArchitecture,
+    zones: ZonesConfig,
+    file: str,
+    issues: _Issues,
+) -> PlanArchitecture:
+    """The architecture checks of ``validate_plan`` (ADR 0019); returns the ``architecture`` block.
+
+    The info message of an unchecked architecture is emitted by the caller.
+    """
+    rel = state.path or ""
+    if not state.checked:
+        users = [t.meta.id for t in plan.tasks if t.sets_architecture]
+        if users:
+            issues.warn(
+                "architecture_fields_unchecked",
+                f"{', '.join(users)} set component, implements or uses, but there is no "
+                f"architecture for {milestone} to check them against",
+                file=file,
+                hint=f"write {rel} with `/forge-architect {milestone}`, or remove the fields",
+            )
+        return state
+    if not state.present:
+        issues.error(
+            "architecture_missing",
+            f"architecture file not found; planning.architecture is required for {milestone}",
+            file=rel,
+            hint=f"run `/forge-architect {milestone}` and merge its PR before planning, "
+            f"or copy {_arch.ARCHITECTURE_DIR.as_posix()}/_template.md",
+        )
+        return state
+
+    checked = _arch.validate_architecture(root, milestone, zones=zones)
+    for err in checked.errors:
+        issues.error(
+            "architecture_invalid",
+            f"[{err.code}] {err.message}",
+            file=err.file,
+            field=err.field,
+            hint=err.hint,
+        )
+    arch = checked.architecture
+    overview = checked.overview
+    state = PlanArchitecture(
+        mode=state.mode,
+        path=rel,
+        present=True,
+        checked=True,
+        status=checked.status,
+    )
+    # A frontmatter that cannot be read as the schema (either file) skips the task checks:
+    # they would only repeat the relayed errors.
+    if arch is None or (checked.overview_present and overview is None):
+        return state
+    if arch.status != "ready":
+        issues.error(
+            "architecture_draft",
+            f"the architecture of {milestone} has status: {arch.status}",
+            file=rel,
+            field="status",
+            hint="finish the architecture, merge its PR with `status: ready`, then plan",
+        )
+
+    own = _arch.milestone_interfaces(arch)
+    implementers: dict[str, list[str]] = {iid: [] for iid in own}
+    for task in plan.tasks:
+        meta = task.meta
+        where: dict[str, str | None] = {"file": file, "task": meta.id}
+        component = None
+        if task.component is None:
+            issues.error(
+                "missing_field",
+                "required key is missing: the architecture of "
+                f"{milestone} is checked, so every task names its component",
+                field="component",
+                hint=f"add `component: <id>` with a component of {rel} or of "
+                f"{_arch.OVERVIEW_PATH.as_posix()}",
+                **where,
+            )
+        else:
+            component = _arch.resolve_component(arch, overview, task.component)
+            if component is None:
+                issues.error(
+                    "unknown_component",
+                    f"component {task.component!r} is declared in neither {rel} nor "
+                    f"{_arch.OVERVIEW_PATH.as_posix()}",
+                    field="component",
+                    hint=f"use a component of the architecture, or add it with "
+                    f"`/forge-architect {milestone} --update`",
+                    **where,
+                )
+        if meta.type is TaskType.CONTRACT and not task.implements:
+            issues.error(
+                "contract_without_interface",
+                "a contract task implements no interface",
+                field="implements",
+                hint=f"add `implements: [IF-…]` with an interface of {rel}",
+                **where,
+            )
+        allowed: set[str] = set() if component is None else set(component.zones)
+        for i, iid in enumerate(task.implements):
+            iface = own.get(iid)
+            if iface is None:
+                issues.error(
+                    "unknown_interface",
+                    f"{iid} is not an interface of {rel}: a plan implements only the "
+                    "interfaces its milestone declares",
+                    field=f"implements[{i}]",
+                    hint=f"to change an existing interface, declare it in {rel} "
+                    f"(`/forge-architect {milestone} --update`); otherwise fix the id",
+                    **where,
+                )
+                continue
+            if meta.id not in implementers[iid]:
+                implementers[iid].append(meta.id)
+            allowed.add(iface.zone)
+            if component is not None and component.id != iface.producer:
+                issues.warn(
+                    "implementer_not_producer",
+                    f"{iid} is produced by {iface.producer}, but the task's component is "
+                    f"{component.id}",
+                    field="component",
+                    hint=f"set `component: {iface.producer}`, or change the producer in {rel}",
+                    **where,
+                )
+        for i, iid in enumerate(task.uses):
+            if _arch.resolve_interface(arch, overview, iid) is None:
+                issues.error(
+                    "unknown_interface",
+                    f"{iid} is declared in neither {rel} nor {_arch.OVERVIEW_PATH.as_posix()}",
+                    field=f"uses[{i}]",
+                    hint="use an interface of the architecture, or fix the id",
+                    **where,
+                )
+        if component is not None:
+            for i, zone in enumerate(meta.zones):
+                if zone not in allowed:
+                    issues.warn(
+                        "zone_outside_component",
+                        f"zone {zone!r} belongs neither to component {component.id} nor to "
+                        "an interface the task implements",
+                        field=f"zones[{i}]",
+                        hint=f"add the zone to {component.id} in the architecture, or move "
+                        "the work to a task of the owning component",
+                        **where,
+                    )
+
+    for iid, ids in implementers.items():
+        if not ids:
+            issues.error(
+                "interface_unimplemented",
+                f"interface {iid} of {rel} has no contract task implementing it",
+                file=file,
+                field=iid,
+                hint=f"add a `type: contract` task with `implements: [{iid}]`",
+            )
+        elif len(ids) > 1:
+            issues.error(
+                "interface_multiply_implemented",
+                f"interface {iid} is implemented by {', '.join(ids)}",
+                file=file,
+                task=ids[1],
+                field=iid,
+                hint=f"keep `implements: [{iid}]` on exactly one contract task",
+            )
+
+    cyclic = any(i.code == "dependency_cycle" for i in issues.errors)
+    if not cyclic:
+        for task in plan.tasks:
+            ancestors: set[str] | None = None
+            for i, iid in enumerate(task.uses):
+                owners = implementers.get(iid)
+                if not owners or task.meta.id in owners:
+                    continue
+                if ancestors is None:
+                    ancestors = _ancestors(plan, task.meta.id)
+                if ancestors.isdisjoint(owners):
+                    issues.error(
+                        "uses_without_dependency",
+                        f"the task uses {iid} but does not depend on {owners[0]}, which "
+                        "implements it",
+                        file=file,
+                        task=task.meta.id,
+                        field=f"uses[{i}]",
+                        hint=f"add {owners[0]} to depends_on (directly or through another task)",
+                    )
+
+    interfaces = {iid: (ids[0] if ids else None) for iid, ids in implementers.items()}
+    return replace(state, interfaces=interfaces)
+
+
 def validate_plan(
-    root: Path, milestone: str, *, zones: ZonesConfig, team: Team | None = None
+    root: Path,
+    milestone: str,
+    *,
+    zones: ZonesConfig,
+    team: Team | None = None,
+    planning: PlanningConfig | None = None,
 ) -> PlanValidation:
     """Validate ``plans/<milestone>.yml`` under ``root`` offline (spec §9.4, ADR 0013).
 
     Reads the plan, the other plan files (for cross-milestone dependencies), the optional
     roadmap and the milestone specs. ``zones`` is the parsed ``.forge/zones.yml``; ``team``
-    (optional) enables the parallelism warning. Never raises for content problems: they are
-    returned as errors and warnings.
+    (optional) enables the parallelism warning. ``planning`` (default: ``architecture:
+    optional``) decides whether the milestone architecture is checked (ADR 0019). Never raises
+    for content problems: they are returned as errors and warnings; the info message of an
+    unchecked architecture is in :attr:`PlanValidation.messages`.
     """
     issues = _Issues()
+    planning = planning if planning is not None else PlanningConfig()
+    state = PlanArchitecture(mode=planning.architecture)
+    messages: list[Message] = []
     file = _rel(plan_path(milestone)) if MILESTONE_RE.fullmatch(milestone) else ""
 
     def result(
@@ -856,6 +1227,8 @@ def validate_plan(
             roadmap=roadmap,
             file=file,
             specs=specs,
+            architecture=state,
+            messages=tuple(messages),
         )
 
     if not file:
@@ -885,6 +1258,15 @@ def validate_plan(
         else:
             roadmap_specs = entry.specs
 
+    state = _architecture_state(root, milestone, planning)
+    if not state.checked:
+        # Depends on the architecture state alone, so it is emitted even when the plan
+        # file does not load.
+        messages.append(
+            Message(
+                Level.INFO, f"no architecture for {milestone} (planning.architecture: optional)"
+            )
+        )
     loaded = _load_plan(root, milestone, issues)
     if loaded is None:
         return result(roadmap=roadmap)
@@ -894,6 +1276,7 @@ def validate_plan(
     waves = _check_graph(plan, loaded.declared, _other_plan_ids(root, milestone), file, issues)
     _check_waves(plan, waves, zones, team, file, issues)
     coverage = _coverage(plan, specs, order, issues)
+    state = _check_architecture(root, milestone, plan, state, zones, file, issues)
     return result(plan, roadmap, waves, coverage, tuple(order))
 
 
@@ -909,41 +1292,25 @@ def check_plan_tier(
 ) -> list[Message]:
     """Check ``models.min_tier_for.plan`` for the active agent (ADR 0013, B4).
 
+    A thin wrapper over :func:`forge.core.models.check_min_tier` with the ``plan`` role.
+
     Without an agent (no profile) or in CI (``ci``: ``GITHUB_ACTIONS`` is set) nothing is
     checked and an info message says so. An agent that cannot serve the required tier raises
     :class:`PreconditionError` (exit 5), unless ``force``, which turns it into a warning.
     Returns the messages to show; empty when no minimum is configured or the agent serves it.
     """
-    required = models.min_tier_for.get(PLAN_ROLE)
-    if required is None:
-        return []
-    key = f"models.min_tier_for.{PLAN_ROLE}"
-    if ci:
-        return [Message(Level.INFO, f"{key} not checked: running in GitHub Actions")]
-    if agent is None:
-        return [Message(Level.INFO, f"{key} not checked: no Forge profile")]
-    if can_serve(agent, required):
-        return []
-    if not force:
-        raise PreconditionError(
-            f"agent {agent.id} cannot serve tier {required}, required for planning by {key}",
-            hint=f"plan with an agent that maps tier {required} or stronger (--agent <id>), "
-            "or pass --force",
-        )
-    return [
-        Message(
-            Level.WARNING,
-            f"agent {agent.id} cannot serve tier {required} required by {key}; "
-            "continuing because of --force",
-        )
-    ]
+    return check_min_tier(
+        models, agent, PLAN_ROLE, force=force, ci=ci, activity="planning", verb="plan"
+    )
 
 
 __all__ = [
+    "ARCHITECTURE_TASK_KEYS",
     "PLANS_DIR",
     "PLAN_ROLE",
     "ROADMAP_PATH",
     "TASK_KEYS",
+    "PlanArchitecture",
     "PlanFile",
     "PlanIssue",
     "PlanTask",

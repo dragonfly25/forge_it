@@ -37,6 +37,7 @@ COMMAND_ORDER = (
     "setup",
     "configure",
     "plan",
+    "architect",
     "next",
     "dev",
     "sync",
@@ -46,8 +47,8 @@ COMMAND_ORDER = (
     "handoff",
     "release",
 )
-"""Display order of the v0 prompts (spec §12) plus ``configure`` (ADR 0018); other prompts
-follow alphabetically."""
+"""Display order of the v0 prompts (spec §12) plus ``configure`` (ADR 0018) and ``architect``
+(ADR 0019, right after ``plan``); other prompts follow alphabetically."""
 
 _NAME_RE = r"[a-z][a-z0-9-]*"
 _FRONT_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)^---[ \t]*(?:\r?\n|\Z)", re.DOTALL | re.MULTILINE)

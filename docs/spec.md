@@ -112,7 +112,7 @@ forge_it/
 ├─ team.yml                        # who works on the project (§6.2)
 ├─ zones.yml                       # codebase zones (§6.3)
 ├─ rules.md                        # rules every agent must follow
-├─ prompts/                        # 10 provider-neutral command prompts (§12)
+├─ prompts/                        # 12 provider-neutral command prompts (§12)
 └─ agents/                         # provider-neutral subagent definitions (§12.1)
 AGENTS.md                          # entry point for Codex, Cursor, Gemini CLI, opencode, local agents
 CLAUDE.md                          # thin: points to AGENTS.md (+ Claude specifics)
@@ -120,6 +120,9 @@ CLAUDE.md                          # thin: points to AGENTS.md (+ Claude specifi
 specs/_template.md                 # spec template (§9.1)
 plans/roadmap.yml                  # milestones and leads (§9.2)
 plans/<milestone>.yml              # task plans (§9.3)
+docs/architecture/_template.md     # milestone architecture template (§9.7)
+docs/architecture/overview.md      # the system as it is today (§9.7), created by init
+docs/architecture/<milestone>.md   # architecture of one milestone, written by /architect (§9.7)
 docs/decisions/_template.md        # ADR template
 docs/forge/                        # onboarding.md, commands.md, roles.md, faq.md
 .github/workflows/forge-ci.yml           # checks on PRs
@@ -147,6 +150,8 @@ docs/forge/                        # onboarding.md, commands.md, roles.md, faq.m
 | git settings | repo-local `git config rerere.enabled true`, `rerere.autoupdate true` | `forge setup` |
 
 **Credentials are never stored by Forge.** The profile holds only labels (e.g. `claude-pro-1`) used for traceability.
+
+Note: the paths under `docs/architecture/` and the prompt count of 12 are added by [ADR 0019](decisions/0019-milestone-architecture.md). The `docs/architecture/` folder is in the project repository. The framework's own `docs/architecture.md` describes the Forge CLI.
 
 ---
 
@@ -189,9 +194,15 @@ review:
   required_approvals: 1
 models:                            # project constraints on model choices (decided by the lead)
   recommended: {strong: opus, standard: sonnet}   # shown as suggestions during setup
-  min_tier_for: {reviewer: strong, plan: strong}  # subagents/commands that must not run below a tier
+  min_tier_for: {reviewer: strong, plan: strong, architecture: strong}  # subagents/commands that must not run below a tier
   allowed_providers: [anthropic, openai, local]   # warn when a profile uses others
+planning:
+  architecture: required           # required | optional (default when missing: optional)
+  max_tasks_per_agent: 10          # read from phase 14 (ADR 0020)
+  max_components_per_agent: 3      # read from phase 14 (ADR 0020)
 ```
+
+Note: the `planning` block and `min_tier_for.architecture` are added by [ADR 0019](decisions/0019-milestone-architecture.md). `forge init` writes `planning.architecture: required`. A config without the block behaves as `optional`.
 
 ### 6.2 `.forge/team.yml`
 
@@ -430,6 +441,14 @@ tasks:
       - schema published in shared/types with unit tests
 ```
 
+Note: [ADR 0019](decisions/0019-milestone-architecture.md) adds three optional plan-only fields, like `proposal`. `plan apply` does not write them to issues.
+
+| Field | Form | Rule |
+|---|---|---|
+| `component` | a component id from the architecture (§9.7) | required when the architecture is checked |
+| `implements` | list of `IF-…` interface ids | only on `type: contract` tasks; required on them when checked |
+| `uses` | list of `IF-…` interface ids | optional |
+
 ### 9.4 `forge plan validate <milestone>` (deterministic)
 
 Errors (exit 1):
@@ -444,6 +463,19 @@ Warnings:
 - waves with fewer tasks than active team members (parallelism report).
 
 Output: the waves (topological levels) with task ids, and the coverage matrix AC → tasks.
+
+Note: [ADR 0019](decisions/0019-milestone-architecture.md) adds the architecture checks. The architecture is *checked* when `planning.architecture` is `required`, or when `docs/architecture/<milestone>.md` exists. Only the mode `optional` with no file leaves it unchecked.
+
+Errors added (exit 1):
+- `architecture_missing` (mode `required`, no file), `architecture_invalid` (relays each `forge arch validate` error), `architecture_draft` (`status` is not `ready`);
+- `unknown_component`, `unknown_interface`;
+- `interface_unimplemented`, `interface_multiply_implemented`, `contract_without_interface`;
+- `uses_without_dependency`: a task uses an interface of the milestone but does not depend on the task that implements it.
+
+Warnings added:
+- `zone_outside_component`: a task touches a zone that is outside its component and the zones of the interfaces it implements;
+- `implementer_not_producer`: a contract task's component is not the producer of the interface;
+- `architecture_fields_unchecked`: unchecked mode, and tasks still set `component`, `implements` or `uses`.
 
 ### 9.5 `forge plan apply <milestone>` (idempotent)
 
@@ -460,6 +492,44 @@ Output: the waves (topological levels) with task ids, and the coverage matrix AC
 - `/plan <milestone>` → read specs, zones, ADRs, code → if the spec is not ready, list questions and stop → write `plans/<milestone>.yml` contract-first → run `forge plan validate` until no errors → address or explain warnings → open PR `plan: <milestone>`.
 - `/plan <milestone> --update` → diff the specs against existing tasks → minimal change set → PR.
 - Proposals: during `/dev`, discovered work becomes `forge propose` (issue with `status:proposed`); the lead accepts it by adding it to the plan file.
+
+Note: [ADR 0019](decisions/0019-milestone-architecture.md) changes the sequence. The milestone architecture comes first: `/plan roadmap` → `/architect <M>` → merge the `arch: <M>` PR → `/plan <M>`. The `<milestone>` path reads `docs/architecture/overview.md` and `<M>.md` and assigns `component`, `implements` and `uses`. It never invents a component or an interface. When the architecture is missing, draft or insufficient, it stops and points to `/architect <M>` or `/architect <M> --update`. The roadmap (§9.2) and apply (§9.5) do not change.
+
+### 9.7 Architecture: `docs/architecture/`
+
+Added by [ADR 0019](decisions/0019-milestone-architecture.md), which holds the full formats and checks. Summary:
+
+| Path | Content |
+|---|---|
+| `docs/architecture/overview.md` | The system as it is today: the result of every milestone included so far. |
+| `docs/architecture/<M>.md` | What milestone `<M>` adds or changes. |
+| `docs/decisions/NNNN-*.md` | Durable decisions taken while designing. |
+
+`<M>.md` has YAML frontmatter, which the CLI checks, and a body that explains it:
+
+```yaml
+---
+milestone: M1
+status: draft            # draft | ready
+specs: [specs/m1/auth.md]
+components:
+  - id: auth-service     # [a-z][a-z0-9-]*
+    zones: [app/auth]    # zones from .forge/zones.yml
+    summary: Issues and verifies session tokens
+interfaces:
+  - id: IF-auth-api      # IF-[a-z0-9-]+
+    zone: contracts/api  # a zone with contract: true
+    producer: auth-service
+    consumers: [web-app]
+    summary: REST endpoints for login and token refresh
+---
+```
+
+- The body has the level-2 sections `Context`, `Components`, `Interfaces`, `Data model`, `Decisions`, `Risks` and `Open questions`. A `ready` file has no unresolved open question.
+- `overview.md` has the frontmatter keys `milestones`, `components` and `interfaces`. Its body is free text.
+- `forge arch validate <M>` checks both files offline (§16). It ignores `planning.architecture`.
+- Each interface declared in `<M>.md` needs exactly one contract task in `plans/<M>.yml` (§9.3). An interface that is only in `overview.md` already exists: a plan may use it, not implement it.
+- The architecture is written by `/architect` and reviewed through its own PR `arch: <M>`.
 
 ---
 
@@ -547,7 +617,9 @@ Each prompt must: state its goal; list the exact `forge` calls with `--json`; de
 | Command | Who | Agent behaviour (summary) |
 |---|---|---|
 | `/setup` | all | Run `forge setup`; fix what it reports (guide logins, profile creation); run project setup; confirm the app starts locally |
-| `/plan` | lead | §9.6 |
+| `/configure` | lead | Read the codebase; propose `checks`, `setup.commands`, zones and team; write them after the lead agrees; run `forge config validate`; open a PR (see [ADR 0018](decisions/0018-guided-project-configuration.md)) |
+| `/plan` | lead | §9.6 (the `<milestone>` path follows the architecture, see [ADR 0019](decisions/0019-milestone-architecture.md)) |
+| `/architect` | lead | Write or update `docs/architecture/<M>.md` and `overview.md`; run `forge arch validate`; open PR `arch: <M>` (§9.7, [ADR 0019](decisions/0019-milestone-architecture.md)) |
 | `/next` | all | `forge next --json`; summarize the task context; propose an implementation outline; ask the user to confirm before coding |
 | `/dev` | all | Implement the current task within its zones following specs, ADRs and `rules.md`; small commits; write/extend tests for `done_when`; run checks; `forge propose` for discovered extra work; `forge heartbeat` on long sessions |
 | `/sync` | all | §10 — run, interpret exit codes, resolve per §10.3, `--continue`, escalate when required |
@@ -578,12 +650,14 @@ v0 ships these subagents:
 
 | Subagent | Tier / effort | Used by | Purpose |
 |---|---|---|---|
-| `explorer` | light / low | `/next`, `/dev` | Read code, specs, ADRs; return a compact context summary to keep the main agent's context clean |
+| `explorer` | light / low | `/next`, `/dev`, `/architect` | Read code, specs, ADRs; return a compact context summary to keep the main agent's context clean |
 | `test-writer` | task / medium | `/dev` | Write and run tests for `done_when` |
-| `reviewer` | strong / high | `/review`, self-check before `/ship` | Review against ACs, zones, contracts, tests |
+| `reviewer` | strong / high | `/review`, self-check before `/ship` | Review against ACs, zones, contracts, tests, and the component and interface boundaries of the milestone architecture |
 | `implementer` | standard / medium | `/dev` (when delegation is on) | Implement one brief from the lead agent inside the listed files and zones (added in v0.2, see [ADR 0017](decisions/0017-implementer-subagent-and-delegation.md)) |
 
 Note: v0.1 shipped the first three. A fourth subagent, `implementer`, was added in v0.2 for delegation. The delegation switch (`off`, `auto`, `on`) is defined in ADR 0017, which amends this section.
+
+Note: [ADR 0019](decisions/0019-milestone-architecture.md) also amends this section. `/architect` uses `explorer` to read the specs and the code, and `reviewer` checks that a change stays inside the task's component and respects the interfaces it implements and uses.
 
 Rules:
 - Every command must work **without** subagents (tools/models that do not support them): prompts say "if subagents are available, delegate X to `<name>`; otherwise do it yourself".
@@ -643,6 +717,8 @@ Global options: `--json`, `--agent <id>`, `--repo <path>`, `--verbose`, `--yes`.
 | `forge propose --title T --body-file F` | Create a `status:proposed` issue |
 | `forge status [--me] [--milestone M]` | §11.3 |
 | `forge refresh` | Recompute labels, unblock dependents |
+| `forge config validate` | Check `config.yml`, `team.yml` and `zones.yml` together, offline; errors name file, key and fix ([ADR 0018](decisions/0018-guided-project-configuration.md)) |
+| `forge arch validate <M> [--force]` | Validate the milestone architecture (§9.7), offline; `--force` overrides the `min_tier_for.architecture` refusal ([ADR 0019](decisions/0019-milestone-architecture.md)) |
 | `forge plan validate <M>` / `forge plan apply <M>` | §9 |
 | `forge release <M> [--version V]` | §11.4 |
 | `forge adapters generate [--check] [--local]` | §13 |

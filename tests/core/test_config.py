@@ -13,6 +13,7 @@ from forge.core.config import (
     ClaimConfig,
     DelegationConfig,
     ModelsConfig,
+    PlanningConfig,
     Resolver,
     ReviewConfig,
     SetupConfig,
@@ -421,3 +422,64 @@ def test_parse_delegation_mode() -> None:
     assert parse_delegation_mode(True) == "on"
     assert parse_delegation_mode("never") is None
     assert parse_delegation_mode(None) is None
+
+
+# -- planning (ADR 0019) ----------------------------------------------------------------------
+
+
+def test_planning_defaults_to_optional_when_absent(tmp_path: Path) -> None:
+    write(tmp_path, MINIMAL)
+    assert load_config(tmp_path).planning == PlanningConfig(
+        architecture="optional", max_tasks_per_agent=10, max_components_per_agent=3
+    )
+
+
+@pytest.mark.parametrize(
+    ("section", "expected"),
+    [
+        ("planning: {}\n", PlanningConfig()),
+        ("planning:\n  max_tasks_per_agent: 4\n", PlanningConfig(max_tasks_per_agent=4)),
+        ("planning:\n  architecture: required\n", PlanningConfig(architecture="required")),
+        ("planning:\n  architecture: optional\n", PlanningConfig(architecture="optional")),
+        (
+            "planning:\n  architecture: required\n  max_tasks_per_agent: 1\n"
+            "  max_components_per_agent: 1\n",
+            PlanningConfig("required", 1, 1),
+        ),
+    ],
+    ids=["empty-block", "missing-architecture-key", "required", "optional", "all-keys"],
+)
+def test_planning_section(tmp_path: Path, section: str, expected: PlanningConfig) -> None:
+    write(tmp_path, MINIMAL + section)
+    assert load_config(tmp_path).planning == expected
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "fix_part"),
+    [
+        ("planning: {architecture: mandatory}\n", "planning.architecture", "architecture:"),
+        ("planning: {architecture: true}\n", "planning.architecture", "architecture:"),
+        ("planning: {max_tasks_per_agent: 0}\n", "planning.max_tasks_per_agent", "1"),
+        ("planning: {max_tasks_per_agent: ten}\n", "planning.max_tasks_per_agent", "10"),
+        ("planning: {max_components_per_agent: 0}\n", "planning.max_components_per_agent", "1"),
+        ("planning: {max_components_per_agent: 2.5}\n", "planning.max_components_per_agent", "3"),
+        ("planning: {architecure: required}\n", "planning.architecure", "architecture"),
+        ("planning: required\n", "planning", "mapping"),
+    ],
+    ids=[
+        "bad-mode",
+        "bool-mode",
+        "tasks-zero",
+        "tasks-string",
+        "components-zero",
+        "components-float",
+        "unknown-key",
+        "not-mapping",
+    ],
+)
+def test_planning_errors_name_key_and_fix(
+    tmp_path: Path, section: str, key: str, fix_part: str
+) -> None:
+    err = config_error(tmp_path, MINIMAL + section)
+    assert err.key == key
+    assert fix_part in (err.hint or "") or fix_part in err.message

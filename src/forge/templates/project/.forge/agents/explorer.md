@@ -11,13 +11,13 @@ You are given a task or a question and a list of zones or paths. Find what the m
 
 How to work:
 1. Start from the zones and paths you were given. Read the files that matter, not everything.
-2. Read the specs and acceptance criteria the task covers, and any ADR in `docs/decisions/` that touches the area.
+2. Read the specs and acceptance criteria the task covers, and any ADR in `docs/decisions/` that touches the area. Read the milestone's architecture, `docs/architecture/<milestone>.md`, and `docs/architecture/overview.md` when they exist: the components, their zones, and the interfaces with their producer and consumers.
 3. Find the entry points, the types and interfaces the work must use, the tests that already exist, and the conventions in nearby code.
 4. Note anything surprising: dead code, TODOs, contradictions between spec and code, contract zones the work depends on.
 
 Return a summary of at most 40 lines, in this form:
 - **Relevant files**: path and one line on why each matters.
-- **Interfaces and contracts**: names, signatures and where they are defined.
+- **Interfaces and contracts**: names, signatures and where they are defined; the architecture's components and `IF-` interfaces that apply.
 - **Existing tests**: where they live and how to run them.
 - **Conventions**: naming, error handling, style to follow.
 - **Risks and unknowns**: what you could not find or are unsure about.

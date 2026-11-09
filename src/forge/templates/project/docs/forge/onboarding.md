@@ -4,7 +4,7 @@ This guide takes you from a fresh machine to a merged pull request. It works wit
 
 ## How you talk to Forge
 
-Forge has eleven commands for your agent. You can invoke each one in three ways:
+Forge has twelve commands for your agent. You can invoke each one in three ways:
 
 | Where | How | Example |
 |---|---|---|
@@ -127,7 +127,13 @@ The lead runs `forge init` once, then:
    The lead can also edit these files by hand. Run `forge config validate` afterwards. It checks the three files together and warns about placeholders, files that match no zone and zones that match no file.
 2. Merges the PR (or commits and pushes the files, with `AGENTS.md` and the generated adapter files).
 3. Runs `forge setup` on their own machine.
-4. Writes the roadmap with `/forge-plan roadmap <spec-file>`, then plans the first milestone with `/forge-plan M1`. Both arrive as pull requests. When a plan merges, a workflow creates the task issues.
+4. Plans the work in this order. Each step arrives as a pull request:
+   1. `/forge-plan roadmap <spec-file>` writes the roadmap and one spec per feature.
+   2. `/forge-architect M1` writes the milestone's architecture, `docs/architecture/M1.md`: its components, the interfaces between them, the data model and the decisions. It also updates `docs/architecture/overview.md`, the map of the whole system, and runs `forge arch validate M1`. The pull request is titled `arch: M1`.
+   3. Merge the `arch: M1` pull request.
+   4. `/forge-plan M1` turns the architecture into tasks. It never invents a component or an interface. When a plan merges, a workflow creates the task issues.
+
+   Repeat steps 2 to 4 for each milestone. When specs or code change the design, run `/forge-architect M1 --update`, then `/forge-plan M1 --update`. The `planning.architecture` key in `.forge/config.yml` decides whether the architecture is `required` (the default for new projects) or `optional`. See the FAQ.
 
 Run `/forge-configure --update` later, for example after a refactor that moves directories. It changes only what drifted. See `roles.md` for what the lead does through the project.
 
@@ -138,6 +144,7 @@ Run `/forge-configure --update` later, for example after a refactor that moves d
 | `/forge-setup` | Check the machine, create the profile |
 | `/forge-configure` | Lead only. Fill and validate the config, team and zones |
 | `/forge-plan` | Lead only. Roadmap and milestone plans |
+| `/forge-architect` | Lead only. Write or update a milestone's architecture |
 | `/forge-next` | Claim the next task and load its context |
 | `/forge-dev` | Implement the current task |
 | `/forge-sync` | Rebase on the default branch and resolve conflicts |

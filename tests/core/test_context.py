@@ -374,3 +374,83 @@ def test_render_context_unbalanced_description_markers_keeps_text(tmp_path: Path
     the = issue(42, "[M1-T07] Save/load", body=body, labels=("forge:task", "status:in-progress"))
     ctx = build_context(the, m, comments=[], tasks={}, repo_root=tmp_path, zones=zones())
     assert ctx.body == f"{DESCRIPTION_BEGIN}\nHalf a region."
+
+
+# -- architecture (ADR 0019) -----------------------------------------------------------------
+
+PLAN = """\
+milestone: M1
+tasks:
+  - id: M1-T07
+    component: page-svc
+    implements: [IF-pages]
+    uses: [IF-auth, 5]
+  - id: M1-T08
+    component: 7
+"""
+
+
+def write(root: Path, rel: str, text: str) -> None:
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def test_architecture_from_plan_and_file(tmp_path: Path) -> None:
+    write(tmp_path, "plans/M1.yml", PLAN)
+    write(tmp_path, "docs/architecture/M1.md", "---\nmilestone: M1\n---\n")
+    m = meta(covers=(), depends_on=(), zones=())
+    ctx = build_context(the_issue(m), m, comments=[], tasks={}, repo_root=tmp_path, zones=None)
+    # Malformed list items are dropped; no warning is added.
+    assert ctx.to_data()["architecture"] == {
+        "path": "docs/architecture/M1.md",
+        "component": "page-svc",
+        "implements": ["IF-pages"],
+        "uses": ["IF-auth"],
+    }
+    assert ctx.warnings == []
+    text = render_context(ctx)
+    assert (
+        "## Architecture\n- path: docs/architecture/M1.md\n- component: page-svc\n"
+        "- implements: IF-pages\n- uses: IF-auth\n"
+    ) in text
+
+
+def test_architecture_without_plan_or_file_is_empty_and_hidden(tmp_path: Path) -> None:
+    m = meta(covers=(), depends_on=(), zones=())
+    ctx = build_context(the_issue(m), m, comments=[], tasks={}, repo_root=tmp_path, zones=None)
+    assert ctx.to_data()["architecture"] == {
+        "path": None,
+        "component": None,
+        "implements": [],
+        "uses": [],
+    }
+    assert ctx.warnings == []
+    assert "## Architecture" not in render_context(ctx)
+
+
+def test_architecture_task_missing_or_plan_unreadable(tmp_path: Path) -> None:
+    m = meta(id="M1-T09", covers=(), depends_on=(), zones=())
+    write(tmp_path, "plans/M1.yml", PLAN)
+    ctx = build_context(the_issue(m), m, comments=[], tasks={}, repo_root=tmp_path, zones=None)
+    assert ctx.architecture.component is None and ctx.architecture.uses == ()
+    assert ctx.warnings == []
+
+    write(tmp_path, "plans/M1.yml", "tasks: [unclosed\n")
+    write(tmp_path, "docs/architecture/M1.md", "x")
+    ctx = build_context(the_issue(m), m, comments=[], tasks={}, repo_root=tmp_path, zones=None)
+    assert ctx.architecture.path == "docs/architecture/M1.md"
+    assert ctx.architecture.component is None
+    assert ctx.warnings == []
+    # Shown because the path is set, with dashes for the missing fields.
+    assert "## Architecture\n- path: docs/architecture/M1.md\n- component: -\n" in (
+        render_context(ctx)
+    )
+
+
+def test_architecture_malformed_component_is_null(tmp_path: Path) -> None:
+    write(tmp_path, "plans/M1.yml", PLAN)
+    m = meta(id="M1-T08", covers=(), depends_on=(), zones=())
+    ctx = build_context(the_issue(m), m, comments=[], tasks={}, repo_root=tmp_path, zones=None)
+    assert ctx.architecture.component is None
+    assert "## Architecture" not in render_context(ctx)

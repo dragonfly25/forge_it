@@ -56,6 +56,38 @@ Regenerate adapter files; --check fails on drift (§13).
 | `--check` | flag | no | - | Write nothing; exit 1 when files are out of date. |
 | `--local` | flag | no | - | Render machine-level subagents from your profile. |
 
+<a id="forge-arch"></a>
+
+### `forge arch`
+
+```text
+forge arch [OPTIONS] COMMAND [ARGS]...
+```
+
+Validate milestone architectures (ADR 0019).
+
+Subcommands:
+
+- [`forge arch validate`](#forge-arch-validate)
+
+<a id="forge-arch-validate"></a>
+
+### `forge arch validate`
+
+```text
+forge arch validate [OPTIONS] {milestone}
+```
+
+Validate a milestone architecture offline (ADR 0019).
+
+| Argument | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `MILESTONE` | str | yes | - | Milestone id, e.g. M1. |
+
+| Option | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `--force` | flag | no | - | Validate even if the agent cannot serve models.min_tier_for.architecture. |
+
 <a id="forge-config"></a>
 
 ### `forge config`
@@ -465,6 +497,7 @@ Print the task context: metadata, body, criteria, zones, dependencies, lease, AD
 | `setup` | Check this machine, create or update your personal profile, and run the project setup | `[--check]` | dev, lead |
 | `configure` | Fill the project's config, team and zones from the codebase, validate them and open a PR | `[--update]` | lead |
 | `plan` | Turn a project spec into a roadmap, or a milestone's specs into a validated task plan, and open a PR | `roadmap <spec-file> \| <milestone> [--update] [--agent <id>]` | lead |
+| `architect` | Write or update a milestone's architecture and the system overview, validate them and open a PR | `<milestone> [--update]` | lead |
 | `next` | Pick and claim the next available task, then load its context | `[task-id] [--reclaim] [--agent <id>]` | dev |
 | `dev` | Implement the current task inside its zones, with tests, small commits and heartbeats | `[--solo\|--delegate]` | dev |
 | `sync` | Rebase the current task on the default branch, resolve conflicts safely and push | `[--abort]` | dev |

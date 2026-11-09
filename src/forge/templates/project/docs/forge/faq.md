@@ -61,6 +61,15 @@ Zones are owned by the lead. The lead can run `/forge-configure --update`: the a
 
 `/forge-ship` warns about files that match no zone. `unzoned: error` in the same file turns that warning into a failure.
 
+## Is the milestone architecture required?
+
+It depends on `planning.architecture` in `.forge/config.yml`:
+
+- `required`: `forge plan validate` (and so `forge plan apply` and the `forge-plan-apply` workflow) fails with `architecture_missing` until `docs/architecture/<milestone>.md` exists, and with `architecture_draft` until it has `status: ready`. Every task then needs a `component`, and every contract task an `implements`. `forge init` writes `required` for new projects.
+- `optional`: a milestone may be planned without `docs/architecture/<milestone>.md`. `forge plan validate` prints an info message. If the file exists, it is checked exactly as with `required`.
+
+A project created before this setting has no `planning` block. A missing block, or a missing `architecture` key, means `optional`, so existing plans and the workflow keep working with no edit. To switch, the lead adds `planning: {architecture: required}` through a pull request. The next plan change then needs `/forge-architect <milestone>` first. `forge arch validate <milestone>` always checks the file, whatever the mode.
+
 ## Where is my profile, and does it hold secrets?
 
 Your profile is in `~/.config/forge/profile.yml` (or `$XDG_CONFIG_HOME/forge/profile.yml`). It maps tiers to models for each of your agents. It holds labels only. Forge never stores credentials. Your tools keep their own logins.

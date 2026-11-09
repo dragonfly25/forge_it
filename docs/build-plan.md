@@ -153,17 +153,23 @@ See ADR 0018.
 - the `configure` prompt passes the prompt checks;
 - `forge docs --check` passes.
 
-## [ ] Phase 13 — Milestone architecture
-- [ ] `core/architecture.py`: load and validate `docs/architecture/<M>.md` and `overview.md` (frontmatter components and interfaces, mandatory body sections, open questions), with every error and warning of ADR 0019.
-- [ ] `forge arch validate <M> [--force] [--json]` (`commands/arch.py`), offline, with the `models.min_tier_for.architecture` check.
-- [ ] Config `planning` block (`architecture: required | optional`, defaulting to `optional` when missing; `max_tasks_per_agent` and `max_components_per_agent` validated for phase 14).
-- [ ] Plan tasks gain `component`, `implements`, `uses`; `forge plan validate` gains the architecture errors and warnings. `plan apply` and the issue regions do not change.
-- [ ] `architecture` in the task context of `forge task show` and `forge next`.
-- [ ] `architect` prompt (role `lead`), rendered as `/forge-architect` and `$forge-architect`. `plan`, `dev`, `review`, `explorer` and `reviewer` read the architecture.
-- [ ] Templates `docs/architecture/_template.md` and `overview.md`, written by `forge init`.
-- [ ] Docs: README lead quickstart, project `docs/forge/{onboarding,roles,faq}.md`, `docs/protocol.md`, CHANGELOG, regenerated `docs/commands.md`.
+## [x] Phase 13 — Milestone architecture
+- [x] `core/architecture.py`: load and validate `docs/architecture/<M>.md` and `overview.md` (frontmatter components and interfaces, mandatory body sections, open questions), with every error and warning of ADR 0019.
+- [x] `forge arch validate <M> [--force] [--json]` (`commands/arch.py`), offline, with the `models.min_tier_for.architecture` check.
+- [x] Config `planning` block (`architecture: required | optional`, defaulting to `optional` when missing; `max_tasks_per_agent` and `max_components_per_agent` validated for phase 14).
+- [x] Plan tasks gain `component`, `implements`, `uses`; `forge plan validate` gains the architecture errors and warnings. `plan apply` and the issue regions do not change.
+- [x] `architecture` in the task context of `forge task show` and `forge next`.
+- [x] `architect` prompt (role `lead`), rendered as `/forge-architect` and `$forge-architect`. `plan`, `dev`, `review`, `explorer` and `reviewer` read the architecture.
+- [x] Templates `docs/architecture/_template.md` and `overview.md`, written by `forge init`.
+- [x] Docs: README lead quickstart, project `docs/forge/{onboarding,roles,faq}.md`, `docs/protocol.md`, CHANGELOG, regenerated `docs/commands.md`.
 
 See ADR 0019.
+
+Progress notes:
+- **Guides**: the README stays lean; the full lead and developer workflows live in `docs/guides/lead.md` and `docs/guides/developer.md`.
+- **Confirmed additions**: the warning `implementer_not_producer`, and the ADR 0018 items (`/configure`, `forge config validate`) added to spec §12 and §16.
+- **Task context**: `forge next` reads the architecture from the fresh task worktree; `task show` from where it runs.
+- **Reviews**: one pass; every medium and low finding fixed.
 
 **Done when:**
 - `tests/core/test_architecture.py` has one test per error and warning;

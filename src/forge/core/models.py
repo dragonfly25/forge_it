@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from typing import Literal
 
 from forge.core.config import ModelsConfig
-from forge.core.output import Level
+from forge.core.errors import PreconditionError
+from forge.core.output import Level, Message
 from forge.core.presets import Preset
 from forge.core.profile import AgentProfile, Profile
 from forge.core.tiers import TASK_TIER, TIERS, Effort, Tier
@@ -28,6 +29,53 @@ def serving_tier(agent: AgentProfile, tier: Tier) -> Tier | None:
 def can_serve(agent: AgentProfile, tier: Tier) -> bool:
     """True if ``agent`` maps ``tier`` or a stronger tier."""
     return serving_tier(agent, tier) is not None
+
+
+def check_min_tier(
+    models: ModelsConfig,
+    agent: AgentProfile | None,
+    role: str,
+    *,
+    force: bool = False,
+    ci: bool = False,
+    activity: str | None = None,
+    verb: str | None = None,
+) -> list[Message]:
+    """Check ``models.min_tier_for.<role>`` for the active agent (ADR 0013 B4, ADR 0019).
+
+    Without an agent (no profile) or in CI (``ci``: ``GITHUB_ACTIONS`` is set) nothing is
+    checked and an info message says so. An agent that cannot serve the required tier raises
+    :class:`PreconditionError` (exit 5), unless ``force``, which turns it into a warning.
+    Returns the messages to show; empty when no minimum is configured or the agent serves it.
+
+    ``activity`` names the work in the refusal (``"required for <activity>"``, default
+    ``role``); ``verb`` starts the hint (``"<verb> with an agent that maps ..."``, default
+    ``"run it"``).
+    """
+    required = models.min_tier_for.get(role)
+    if required is None:
+        return []
+    key = f"models.min_tier_for.{role}"
+    if ci:
+        return [Message(Level.INFO, f"{key} not checked: running in GitHub Actions")]
+    if agent is None:
+        return [Message(Level.INFO, f"{key} not checked: no Forge profile")]
+    if can_serve(agent, required):
+        return []
+    if not force:
+        raise PreconditionError(
+            f"agent {agent.id} cannot serve tier {required}, required for "
+            f"{activity or role} by {key}",
+            hint=f"{verb or 'run it'} with an agent that maps tier {required} or stronger "
+            "(--agent <id>), or pass --force",
+        )
+    return [
+        Message(
+            Level.WARNING,
+            f"agent {agent.id} cannot serve tier {required} required by {key}; "
+            "continuing because of --force",
+        )
+    ]
 
 
 def model_map(agent: AgentProfile) -> dict[str, str]:
@@ -305,6 +353,7 @@ __all__ = [
     "Resolution",
     "Violation",
     "can_serve",
+    "check_min_tier",
     "check_profile",
     "model_map",
     "preset_drift",

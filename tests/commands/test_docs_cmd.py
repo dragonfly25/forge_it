@@ -72,7 +72,7 @@ def test_generate_then_check_then_drift(repo: Path) -> None:
 
     code, env = invoke(repo)
     assert code == 0 and env["data"]["written"] is True
-    assert env["data"]["prompts"] == 11
+    assert env["data"]["prompts"] == 12
     code, env = invoke(repo)
     assert code == 0 and env["data"]["written"] is False
 

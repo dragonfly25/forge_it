@@ -26,6 +26,12 @@ if TYPE_CHECKING:
 
 runner = CliRunner()
 
+NO_ARCH_INFO = {
+    "level": "info",
+    "text": "no architecture for M1 (planning.architecture: optional)",
+    "hint": None,
+}
+
 CONFIG = """\
 forge_version: ">=0.1,<0.2"
 project:
@@ -166,7 +172,8 @@ def test_clean_plan_json(repo: Path) -> None:
     assert data["waves"] == [["M1-T01"], ["M1-T02", "M1-T03"]]
     assert data["coverage"] == {"AC-1": ["M1-T01"], "AC-2": ["M1-T02"], "AC-3": ["M1-T03"]}
     assert data["errors"] == [] and data["warnings"] == []
-    assert env["messages"] == []
+    # No `planning` block and no docs/architecture/M1.md: unchecked, one info (ADR 0019).
+    assert env["messages"] == [NO_ARCH_INFO]
 
 
 def test_errors_exit_1_with_data(repo: Path) -> None:
@@ -239,15 +246,17 @@ def test_tier_skipped_in_github_actions(repo: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     code, env = envelope(repo, "M1")
     assert code == 0
-    [message] = env["messages"]
+    [message, arch] = env["messages"]
     assert message["level"] == "info" and "GitHub Actions" in message["text"]
+    assert arch == NO_ARCH_INFO
 
 
 def test_tier_without_profile_is_info(repo: Path) -> None:
     code, env = envelope(repo, "M1")
     assert code == 0
-    [message] = env["messages"]
+    [message, arch] = env["messages"]
     assert message["level"] == "info" and "no Forge profile" in message["text"]
+    assert arch == NO_ARCH_INFO
 
 
 def test_in_ci() -> None:
@@ -311,3 +320,137 @@ def test_markup_is_printed_literally() -> None:
     assert "'[red]x[/red]' :smile:" in out
     assert "fix: [bold]fix[/bold]" in out
     assert "uncovered" in out
+
+
+# --------------------------------------------------------------------------- architecture
+
+ARCH_BODY = """
+## Context
+Editor.
+## Components
+Two.
+## Interfaces
+One.
+## Data model
+Docs.
+## Decisions
+None.
+## Risks
+None.
+## Open questions
+"""
+
+ARCH_FRONT: dict[str, Any] = {
+    "milestone": "M1",
+    "status": "ready",
+    "specs": ["specs/m1/editor.md"],
+    "components": [
+        {"id": "api-svc", "zones": ["api"], "summary": "API"},
+        {"id": "web-app", "zones": ["web"], "summary": "Web"},
+    ],
+    "interfaces": [
+        {
+            "id": "IF-schema",
+            "zone": "shared",
+            "producer": "api-svc",
+            "consumers": ["web-app"],
+            "summary": "Schema",
+        }
+    ],
+}
+
+ARCH_TASKS = [
+    {**CLEAN[0], "component": "api-svc", "implements": ["IF-schema"]},
+    {**CLEAN[1], "component": "api-svc", "uses": ["IF-schema"]},
+    {**CLEAN[2], "component": "web-app", "uses": ["IF-schema"]},
+]
+
+
+def write_architecture(root: Path, front: dict[str, Any] = ARCH_FRONT) -> None:
+    path = root / "docs" / "architecture" / "M1.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("---\n" + yaml.safe_dump(front, sort_keys=False) + "---\n" + ARCH_BODY)
+
+
+def set_mode(root: Path, mode: str) -> None:
+    (root / ".forge" / "config.yml").write_text(CONFIG + f"planning:\n  architecture: {mode}\n")
+
+
+def test_required_without_architecture_exits_1(repo: Path) -> None:
+    set_profile(PROFILE_STRONG)
+    set_mode(repo, "required")
+    code, env = envelope(repo, "M1")
+    assert code == 1
+    assert [e["code"] for e in env["data"]["errors"]] == ["architecture_missing"]
+    assert env["data"]["architecture"] == {
+        "mode": "required",
+        "path": "docs/architecture/M1.md",
+        "present": False,
+        "status": None,
+        "checked": True,
+        "interfaces": {},
+    }
+    assert NO_ARCH_INFO not in env["messages"]
+    assert any(m["level"] == "error" for m in env["messages"])
+
+
+def test_required_with_architecture_exits_0_without_info(repo: Path) -> None:
+    set_profile(PROFILE_STRONG)
+    set_mode(repo, "required")
+    write_architecture(repo)
+    write_plan(repo, ARCH_TASKS)
+    code, env = envelope(repo, "M1")
+    assert code == 0, env["data"]["errors"]
+    assert env["messages"] == []
+    arch = env["data"]["architecture"]
+    assert arch["checked"] is True and arch["status"] == "ready"
+    assert arch["interfaces"] == {"IF-schema": "M1-T01"}
+
+
+def test_optional_with_fields_warns_unchecked(repo: Path) -> None:
+    set_profile(PROFILE_STRONG)
+    set_mode(repo, "optional")
+    write_plan(repo, ARCH_TASKS)
+    code, env = envelope(repo, "M1")
+    assert code == 0
+    assert [w["code"] for w in env["data"]["warnings"]] == ["architecture_fields_unchecked"]
+    assert env["messages"] == [NO_ARCH_INFO]
+
+
+def test_plan_apply_relays_architecture_errors(repo: Path) -> None:
+    set_profile(PROFILE_STRONG)
+    set_mode(repo, "required")
+    result = invoke(repo, "--json", "plan", "apply", "M1", "--dry-run")
+    assert result.exit_code == 1
+    env = json.loads(result.stdout)
+    codes = [e["code"] for e in env["data"]["validation"]["errors"]]
+    assert codes == ["architecture_missing"]
+
+
+def test_plan_apply_surfaces_the_unchecked_info(repo: Path) -> None:
+    set_profile(PROFILE_STRONG)
+    # An invalid plan stops apply before any GitHub access (the fixture forbids it).
+    tasks = [dict(t) for t in CLEAN]
+    tasks[1]["size"] = "L"
+    write_plan(repo, tasks)
+    result = invoke(repo, "--json", "plan", "apply", "M1", "--dry-run")
+    assert result.exit_code == 1
+    env = json.loads(result.stdout)
+    assert NO_ARCH_INFO in env["messages"]
+
+
+def test_human_output_architecture_line(repo: Path) -> None:
+    set_profile(PROFILE_STRONG)
+    out = invoke(repo, "plan", "validate", "M1").stdout
+    assert (
+        "Architecture  not checked (planning.architecture: optional, "
+        "no docs/architecture/M1.md)" in out
+    )
+    set_mode(repo, "required")
+    write_architecture(repo)
+    write_plan(repo, ARCH_TASKS)
+    out = invoke(repo, "plan", "validate", "M1").stdout
+    assert (
+        "Architecture  docs/architecture/M1.md  ready, 1/1 interface(s) implemented (required)"
+        in out
+    )

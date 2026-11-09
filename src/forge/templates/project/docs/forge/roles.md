@@ -17,14 +17,15 @@ A dev takes tasks and delivers them.
 - Escalate when a conflict or failing check belongs to someone else.
 - Choose how the code is written: `off`, `auto` or `on` (delegation), within what the project allows. See `onboarding.md`.
 
-A dev does not change the plan, the zones or the project config on their own.
+A dev does not change the plan, the architecture, the zones or the project config on their own.
 
 ## Lead
 
 The lead is the person responsible for one milestone. The role rotates between milestones.
 
 - **Configure**: fill `.forge/config.yml`, `team.yml` and `zones.yml` with `/forge-configure`, then check them with `forge config validate`. Run `/forge-configure --update` when the codebase changes shape. The agent proposes, and writes only after the lead agrees. The changes arrive as a pull request.
-- **Plan**: turn specs into a roadmap and a task plan with `/forge-plan`. Plans arrive as pull requests for the team to read.
+- **Own the architecture**: for each milestone, design the components and the interfaces with `/forge-architect <milestone>`. It writes `docs/architecture/<milestone>.md`, updates `docs/architecture/overview.md` and runs `forge arch validate <milestone>`. The design arrives as a pull request titled `arch: <milestone>`. Run `/forge-architect <milestone> --update` when the specs or the code change the design.
+- **Plan**: turn specs into a roadmap with `/forge-plan roadmap <spec-file>`, and a merged architecture into a task plan with `/forge-plan <milestone>`. The order is roadmap, architecture, merge, plan. The plan never adds a component or an interface. Plans arrive as pull requests for the team to read.
 - **Approve the plan**: merging the plan pull request makes the `forge-plan-apply` workflow create the task issues. The lead can run `forge plan apply <milestone>` by hand if needed.
 - **Own the zones**: add or change zones in `.forge/zones.yml` when the codebase grows (`/forge-configure --update` helps). Mark interface areas as contract zones.
 - **Triage proposals**: each proposal is an issue labeled `status:proposed`. The lead accepts it by adding a task with `proposal: <issue number>` to the plan, or rejects it by closing the issue with a comment.
@@ -40,12 +41,13 @@ The lead is the person responsible for one milestone. The role rotates between m
 |---|---|---|
 | Claim, build, sync, ship, review | yes | yes |
 | Propose new work | yes | yes |
+| Write the architecture | no | yes |
 | Write and apply plans | no | yes |
 | Accept proposals | no | yes |
 | Edit zones, config and team | no | yes |
 | Release a milestone | no | yes |
 
-The table is a convention. Forge does not check the lead role for planning: `forge plan validate` and `forge plan apply` run for anyone with access, and `forge-plan-apply` runs them in CI. Only `forge release` checks the role, and its check is soft: it warns when the person is neither the milestone's `lead` in `plans/roadmap.yml` nor a team member with the role `lead`, and it carries on. Treat the warning as a stop.
+The table is a convention. Forge does not check the lead role for planning: `forge arch validate`, `forge plan validate` and `forge plan apply` run for anyone with access, and `forge-plan-apply` runs the last two (`forge plan validate` and `forge plan apply`) in CI. Only `forge release` checks the role, and its check is soft: it warns when the person is neither the milestone's `lead` in `plans/roadmap.yml` nor a team member with the role `lead`, and it carries on. Treat the warning as a stop.
 
 `forge release <milestone> --version X.Y.Z` runs in two steps, and the lead runs the same command both times:
 1. When every task of the milestone is closed, it opens a release pull request `chore(release): vX.Y.Z` that adds the changelog section. Forge never pushes to the default branch. The team reviews and merges the pull request like any other.

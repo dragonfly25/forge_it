@@ -51,9 +51,11 @@ def apply(
         zones = load_zones(app.root)
         notes: list[str] = []
         team = _claims.try_load_team(app, notes)
-        validation = validate_plan(app.root, milestone, zones=zones, team=team)
+        validation = validate_plan(
+            app.root, milestone, zones=zones, team=team, planning=app.config.planning
+        )
         result = plan_apply(app, validation, dry_run=dry_run)
-        prefix = list(messages)
+        prefix = [*messages, *validation.messages]
         result.messages[:0] = prefix
         for note in notes:
             result.warn(note)

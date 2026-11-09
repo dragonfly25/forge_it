@@ -5,7 +5,8 @@ Used by the ADR 0017 golden test: ``tests/snapshots/v010_*.json`` were captured 
 ``python tests/support/delegation_golden.py <out-dir>`` with ``PYTHONPATH`` pointing at that
 code's ``src`` (see the module docstring of ``tests/commands/test_delegation_golden.py``).
 The new code runs the same scenario with ``delegation: off`` in the project, the profile and
-``--delegation off``; minus the new fields, the output must be identical.
+``--delegation off``; minus the new fields (``delegation``, and ``architecture`` of
+ADR 0019), the output must be identical.
 
 Only APIs that exist in v0.1.0 are used here. Output is normalised: the temporary base
 directory becomes ``<base>`` and commit shas become ``<sha>``.
