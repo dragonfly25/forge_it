@@ -70,6 +70,9 @@ def test_init_render_local_and_task_show_delegates(tmp_path: Path, fake: FakeGit
     root.mkdir()
     git = Git(root)
     git.run("init", "--quiet", "--initial-branch=main")
+    # CI runners have no global git identity: set one in the repo so the commit below works.
+    git.config_set("user.name", "alice")
+    git.config_set("user.email", "alice@example.test")
     git.run("remote", "add", "origin", "https://github.com/acme/shop.git")
 
     code, out = forge(root, "init")
