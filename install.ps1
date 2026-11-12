@@ -224,6 +224,8 @@
         Resolve-ForgeVersion
         Install-Forge
         Show-NextSteps
+        # Success: do not leak the exit code of the last native probe (`gh auth status`).
+        $global:LASTEXITCODE = 0
     }
     catch {
         [Console]::Error.WriteLine($_.Exception.Message)
