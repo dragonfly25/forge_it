@@ -1003,9 +1003,15 @@ def test_commits_with_files_excludes_merges(git_world: GitWorld) -> None:
     assert by_sha == {left: ("left.txt",), right: ("right.txt",)}
 
 
+# Windows file names cannot hold control characters, ``"`` or ``*`` (ADR 0021).
+WINDOWS = sys.platform == "win32"
+
+
 def test_commits_with_files_odd_paths(git_world: GitWorld) -> None:
     alice = git_world.clone("alice")
-    names = ["with space.txt", "new\nline.txt", "caffè/naïve ✓.md", "tab\there", '"quoted"']
+    names = ["with space.txt", "caffè/naïve ✓.md", "[brackets] & (parens).txt"]
+    if not WINDOWS:
+        names += ["new\nline.txt", "tab\there", '"quoted"']
     for name in names:
         target = alice.cwd / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1013,13 +1019,14 @@ def test_commits_with_files_odd_paths(git_world: GitWorld) -> None:
     alice.add()
     odd = alice.commit("feat: odd names")
     empty = alice.commit("forge: claim", allow_empty=True)
-    (alice.cwd / "\nleading-newline").write_text("y\n")
+    leading = "-leading-dash" if WINDOWS else "\nleading-newline"
+    (alice.cwd / leading).write_text("y\n")
     alice.add()
     lead = alice.commit("feat: leading newline")
 
     result = alice.commits_with_files("origin/main..HEAD")
     assert [c.commit.sha for c in result] == [lead, empty, odd]
-    assert result[0].files == ("\nleading-newline",)
+    assert result[0].files == (leading,)
     assert result[1].files == ()
     assert sorted(result[2].files) == sorted(names)
 
@@ -1244,7 +1251,7 @@ def test_stage_blob_and_checkout_stage(git_world: GitWorld) -> None:
 def test_stage_blob_odd_path_without_base(git_world: GitWorld) -> None:
     alice = git_world.clone("alice")
     bob = git_world.clone("bob")
-    name = "caffè dir/naïve [x] *.txt"
+    name = "caffè dir/naïve [x] +.txt" if WINDOWS else "caffè dir/naïve [x] *.txt"
     git_world.commit_file(alice, name, "alice\n", "feat: alice")
     git_world.push(alice, "main")
     git_world.commit_file(bob, name, "bob\n", "feat: bob")
@@ -1275,17 +1282,18 @@ def test_merge_file_union(git_world: GitWorld) -> None:
 
 def test_add_paths_stages_deletions_and_literal_names(git_world: GitWorld) -> None:
     alice = git_world.clone("alice")
+    glob = "[k]eep.txt" if WINDOWS else "*.txt"  # a pathspec glob that matches keep.txt
     git_world.commit_file(alice, "a b.txt", "x\n", "feat: a b")
-    git_world.commit_file(alice, "*.txt", "star\n", "feat: star")
+    git_world.commit_file(alice, glob, "star\n", "feat: star")
     (alice.cwd / "a b.txt").unlink()
-    (alice.cwd / "*.txt").write_text("changed\n")
+    (alice.cwd / glob).write_text("changed\n")
     (alice.cwd / "keep.txt").write_text("untouched\n")
     alice.add_paths(["a b.txt"])
     staged = _split(alice.run("diff", "--cached", "--name-status", "-z").stdout)
     assert staged == ["D", "a b.txt"]
-    alice.add_paths(["*.txt"])  # literal: does not stage keep.txt
+    alice.add_paths([glob])  # literal: does not stage keep.txt
     staged = _split(alice.run("diff", "--cached", "--name-only", "-z").stdout)
-    assert sorted(staged) == ["*.txt", "a b.txt"]
+    assert sorted(staged) == sorted([glob, "a b.txt"])
     alice.add_paths([])
 
 
@@ -1457,6 +1465,7 @@ def test_commit_file_keeps_the_mode_of_an_existing_file(git_world: GitWorld) -> 
     script.write_text("#!/bin/sh\n")
     script.chmod(0o755)
     alice.add(["run.sh"])
+    alice.run("update-index", "--chmod=+x", "--", "run.sh")  # Windows has no exec bit
     head = alice.commit("add script")
     sha = alice.commit_file(head, "run.sh", b"#!/bin/sh\necho hi\n", "edit")
     assert alice.run("ls-tree", sha, "--", "run.sh").stdout.startswith("100755 blob ")

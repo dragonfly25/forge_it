@@ -18,10 +18,13 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
 ]
 dependencies = [
-    "typer>=0.12",
+    # typer 0.29 dropped Click; Forge builds on Click internals (ADR 0022).
+    "typer>=0.12,<0.29",
     "pyyaml>=6.0",
     "rich>=13.7",
     "packaging>=24.0",
+    # Windows has no system IANA time zone database for zoneinfo (PEP 615, ADR 0021).
+    "tzdata>=2024.1; sys_platform == 'win32'",
 ]
 
 [project.urls]

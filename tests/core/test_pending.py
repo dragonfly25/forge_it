@@ -182,7 +182,7 @@ def test_task_lock_is_exclusive_and_removed_on_exit(git_world: GitWorld) -> None
         with task_lock(git, 8, timeout=0) as other:
             assert other  # one lock per task
         assert path.exists()  # the refused attempt did not remove the holder's file
-    assert not path.exists()
+    assert path.exists() == is_windows()  # Windows keeps the file; only the OS lock counts
     with task_lock(git, 7, timeout=0) as held:
         assert held
 

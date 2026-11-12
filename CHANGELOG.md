@@ -13,6 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - **Claims, releases and handoffs** work on Windows. The per-task lock uses `LockFileEx` (`msvcrt.locking`). The `flock` requirement and its exit-5 refusal are gone.
   - **Automatic takeover** of an interrupted claim works on Windows, through a real process-liveness check.
   - **UTF-8** for every text file, every git and gh call and piped output (`--json`), so non-ASCII titles and paths are safe.
+  - **Commit, tag and `gh` input** reaches the child byte for byte, so trailers never gain a `\r` on Windows.
+  - **Time zones**: `tzdata` is a dependency on Windows only, so `team.yml` time zones validate there.
   - **CRLF checkouts are not drift**: `adapters generate --check`, `docs --check` and `init` treat CRLF and LF as equal.
   - **`.cmd` shims** such as npm's `claude` and `codex` are found.
   - **Locations**: the profile is `%APPDATA%\forge\profile.yml` and the machine id is `%LOCALAPPDATA%\forge\machine-id`. `XDG_CONFIG_HOME` and `XDG_STATE_HOME` override both on every platform.
@@ -51,6 +53,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Dependencies** (ADR 0022): typer is capped below 0.29. typer 0.29 dropped Click, and fresh installs broke `forge init` and `forge docs`.
 - **Windows** (ADR 0021): `forge docs --check` no longer reports a file that differs only in CRLF. `install.sh` points Windows users to `install.ps1` instead of WSL.
 - **Multi-agent planning** (ADR 0020): `forge plan assemble` rewrites `plans/<M>.yml` in a fixed format and drops its comments. Existing projects get `planner.md` and `arch-writer.md` by running `forge init` again, then `forge adapters generate --local`. Without them the prompts fall back to sequential work. Old CLIs do not know `split`, `assemble`, `arch split` or `--skeleton`, so the new prompts need the new CLI version in `forge_version`.
 - **The plan follows the architecture** (ADR 0019). The documented sequence is now `/forge-plan roadmap` → `/forge-architect M1` → merge the `arch: M1` PR → `/forge-plan M1`. `/forge-plan <M>` assigns `component`, `implements` and `uses` from the architecture and never adds a component or an interface. `/forge-dev`, `/forge-review` and the `explorer` and `reviewer` subagents read the architecture, and the reviewer checks that a change stays inside the task's component.

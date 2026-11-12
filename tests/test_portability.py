@@ -141,3 +141,18 @@ def test_platform_lock_modules_are_confined_to_the_lock() -> None:
             if {"fcntl", "msvcrt"} & set(names) and path != LOCK_MODULE:
                 bad.append(_where(path, node))
     assert not bad, "fcntl/msvcrt belong in forge.core.pending: " + ", ".join(bad)
+
+
+def test_text_subprocesses_get_no_stdin() -> None:
+    """Text-mode stdin turns LF into CRLF on Windows: use ``forge.core.system.run_text``."""
+    bad = [
+        _where(path, call)
+        for path, call in _calls()
+        if _attr(call) in _SUBPROCESS
+        and any(k.arg in ("text", "universal_newlines") for k in call.keywords)
+        and any(
+            k.arg == "input" and not (isinstance(k.value, ast.Constant) and k.value.value is None)
+            for k in call.keywords
+        )
+    ]
+    assert not bad, "text-mode subprocess with input=: " + ", ".join(bad)

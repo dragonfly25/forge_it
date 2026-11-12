@@ -17,6 +17,7 @@ from forge.core.system import (
     is_windows,
     replace_file,
     resolve_argv,
+    run_text,
     same_text,
     state_home,
     utf8_stdio,
@@ -173,7 +174,7 @@ def test_replace_file_gives_up_after_the_retry_window(
 
 
 def _stream() -> io.TextIOWrapper:
-    return io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+    return io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict", newline="\n")
 
 
 def test_utf8_stdio_reconfigures_on_windows_only(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -205,3 +206,20 @@ def test_same_path(tmp_path: Path) -> None:
     if is_windows():
         assert system.same_path(str(tmp_path / "a").upper(), str(tmp_path / "a").lower())
         assert system.same_path((tmp_path / "a").as_posix(), str(tmp_path / "a"))
+
+
+def test_run_text_sends_stdin_byte_for_byte() -> None:
+    """No CR is added on Windows: git trailers and issue bodies keep their LF endings."""
+    echo = "import sys; data = sys.stdin.buffer.read(); sys.stdout.write(repr(data))"
+    proc = run_text(
+        [sys.executable, "-c", echo], input="a\nb: c\n→\n", capture_output=True, check=False
+    )
+    assert proc.returncode == 0
+    assert proc.stdout == repr("a\nb: c\n→\n".encode())
+
+
+def test_run_text_decodes_like_text_mode() -> None:
+    emit = "import sys; sys.stdout.buffer.write('x\\r\\ny\\n→'.encode()); sys.stderr.write('e')"
+    proc = run_text([sys.executable, "-c", emit], capture_output=True, check=False)
+    assert proc.stdout == "x\ny\n→" and proc.stderr == "e"
+    assert run_text([sys.executable, "-c", "pass"], check=False).stdout == ""

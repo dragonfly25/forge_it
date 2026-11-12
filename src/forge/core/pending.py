@@ -254,7 +254,8 @@ def task_lock(
     """Hold the exclusive lock of ``task/<issue_number>``'s record; yield False if busy.
 
     The lock is ``<git-common-dir>/forge/pending/task-<n>.lock``, holding ``{pid, host}``
-    (default: this process) for diagnostics, and removed on exit. It is an OS lock that dies
+    (default: this process) for diagnostics. It is removed on exit on macOS and Linux and
+    kept on Windows (see :func:`_release`). It is an OS lock that dies
     with its process: ``flock`` on macOS and Linux, ``msvcrt.locking`` (``LockFileEx``) on
     Windows. A lock file left by a crashed run is therefore never "held": it is simply locked
     again, and no stale-lock breaking (which cannot be made atomic with ``O_EXCL`` files
@@ -304,7 +305,10 @@ if sys.platform == "win32":
     _LOCK_OFFSET = 1 << 30
 
     def _try_lock(path: Path) -> int | None:
-        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_BINARY, 0o644)
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_BINARY, 0o644)
+        except PermissionError:  # another process is creating or closing it: retry
+            return None
         try:
             os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
             msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
@@ -319,13 +323,11 @@ if sys.platform == "win32":
             msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
 
     def _release(path: Path, fd: int) -> None:
-        # Windows cannot remove a file that is open. Unlock and close first, then remove it
-        # unless a waiter already has it open (that waiter then owns the same file, so no
-        # second lock file can appear while it is held).
+        # The file is kept. Windows cannot remove a file that another process has open,
+        # and a file being deleted cannot be opened (PermissionError), so removing it would
+        # race with waiters. A kept file is never "held": only the OS lock counts.
         _unlock(fd)
         os.close(fd)
-        with contextlib.suppress(OSError):
-            path.unlink(missing_ok=True)
 
 else:
 

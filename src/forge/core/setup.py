@@ -32,7 +32,13 @@ import yaml
 
 from forge.core import adapters
 from forge.core.config import DelegationConfig, DelegationMode, ForgeConfig, check_cli_version
-from forge.core.errors import ConfigError, ExitCode, ForgeError, PreconditionError
+from forge.core.errors import (
+    ConfigError,
+    ExitCode,
+    ForgeError,
+    PreconditionError,
+    display_path,
+)
 from forge.core.git import Git, GitError
 from forge.core.github import (
     MIN_GH_VERSION,
@@ -262,10 +268,11 @@ class ProjectAdapters:
 
 
 def _relative(root: Path, path: Path) -> str:
+    """``path`` relative to ``root`` with ``/``; a path outside ``root`` in native form."""
     if path.is_absolute():
         with contextlib.suppress(ValueError):
             return path.relative_to(root).as_posix()
-    return path.as_posix()
+    return display_path(path)
 
 
 # --------------------------------------------------------------------------- target

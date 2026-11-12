@@ -179,7 +179,7 @@ def test_deleted_worktree_at_the_path_is_replaced_other_stale_entries_kept(
     assert ws.worktree_created and not ws.worktree_reused
     assert Git(path).current_branch() == BRANCH and Git(path).rev_parse("HEAD") == tip
     listed = alice.run("worktree", "list", "--porcelain").stdout
-    assert f"worktree {unrelated}" in listed  # an unrelated stale entry is left alone
+    assert f"worktree {unrelated.as_posix()}" in listed  # an unrelated stale entry is left alone
 
 
 def test_custom_worktrees_dir(git_world: GitWorld, tmp_path: Path) -> None:

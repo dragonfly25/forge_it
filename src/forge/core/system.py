@@ -17,12 +17,15 @@ Functions that depend on the platform take an optional ``platform`` argument
 from __future__ import annotations
 
 import contextlib
+import io
 import os
 import shutil
+import subprocess
 import sys
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 WINDOWS = "win32"
 """``sys.platform`` on Windows (also for 64-bit Python)."""
@@ -163,6 +166,34 @@ def same_text(a: str | None, b: str | None) -> bool:
 # --------------------------------------------------------------------------- processes
 
 
+def run_text(
+    argv: Sequence[str], *, input: str | None = None, **kwargs: Any
+) -> subprocess.CompletedProcess[str]:
+    """``subprocess.run`` with UTF-8 text in and out, and stdin passed byte for byte.
+
+    Text mode would translate ``\\n`` to ``\\r\\n`` in what Windows writes to the child's stdin,
+    so a commit message or an issue body sent that way would carry CRLF (and git trailers a
+    trailing ``\\r``). Here stdin is encoded as given; stdout and stderr are decoded like text
+    mode does (UTF-8, universal newlines). ``kwargs`` go to ``subprocess.run`` (``cwd``,
+    ``env``, ``capture_output``, ``check``, ``timeout``, ...).
+    """
+    proc = subprocess.run(
+        list(argv),
+        input=None if input is None else input.encode(TEXT_ENCODING),
+        **kwargs,
+    )
+    return subprocess.CompletedProcess(
+        proc.args, proc.returncode, _decode(proc.stdout), _decode(proc.stderr)
+    )
+
+
+def _decode(data: bytes | None) -> str:
+    """Decode child output like ``text=True`` would: UTF-8 and universal newlines."""
+    if not data:
+        return ""
+    return io.TextIOWrapper(io.BytesIO(data), encoding=TEXT_ENCODING, newline=None).read()
+
+
 def pid_running(pid: int) -> bool:
     """True when a process with ``pid`` exists on this machine.
 
@@ -249,6 +280,7 @@ __all__ = [
     "pid_running",
     "replace_file",
     "resolve_argv",
+    "run_text",
     "same_path",
     "same_text",
     "state_home",

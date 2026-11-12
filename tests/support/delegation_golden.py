@@ -23,6 +23,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from support.paths import replace_paths
+
 T0 = datetime(2026, 11, 2, 9, 0, tzinfo=UTC)
 
 CONFIG = """\
@@ -68,9 +70,7 @@ def isolate_git(home: Path) -> None:
 
 def normalise(value: Any, base: Path) -> Any:
     """Replace the base directory and commit shas so runs compare across machines."""
-    text = json.dumps(value, sort_keys=False)
-    for form in {str(base), str(base.resolve())}:
-        text = text.replace(form, "<base>")
+    text = json.dumps(replace_paths(value, [base], "<base>"), sort_keys=False)
     return json.loads(_SHA_RE.sub("<sha>", text))
 
 

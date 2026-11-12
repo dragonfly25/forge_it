@@ -9,6 +9,7 @@ alice's clone, with a config and zones file in her working tree, a profile under
 from __future__ import annotations
 
 import json
+import re
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -300,7 +301,8 @@ def test_human_output_shows_every_section(full: Path, monkeypatch: pytest.Monkey
     assert "! unknown labels: status:wip (#9)" in out
     assert "✓ forge 0.1.0" in out and "satisfies <0.2,>=0.1" in out
     assert "\x1b[" not in out  # no colour when stdout is not a terminal
-    assert max(len(line) for line in out.splitlines() if not line.lstrip().startswith("in /")) <= 80
+    paths = re.compile(r"\s*in (/|[A-Za-z]:\\)")  # worktree paths: POSIX or Windows
+    assert max(len(line) for line in out.splitlines() if not paths.match(line)) <= 80
     assert "warning:" in result.stderr
 
 

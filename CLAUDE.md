@@ -11,7 +11,7 @@ Work **one phase at a time**, in order. Do not start a phase before the previous
 
 ## Stack
 - Python ≥ 3.11, packaged with `pyproject.toml` (hatchling), src layout: `src/forge/`.
-- Dependencies (keep minimal): `typer`, `pyyaml`, `rich`, `packaging`. Ask before adding others.
+- Dependencies (keep minimal): `typer` (`<0.29`, ADR 0022), `pyyaml`, `rich`, `packaging`, and `tzdata` on Windows only (ADR 0021). Ask before adding others.
 - Dev tooling: `uv`, `pytest`, `ruff` (lint + format), `mypy` (strict on `src/forge/core`).
 - Entry point: `forge = "forge.cli:app"`. Distribution name `forge-it`, import package `forge`.
 
