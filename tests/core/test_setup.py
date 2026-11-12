@@ -387,6 +387,44 @@ def test_rerere_check_and_enable(tmp_path: Path) -> None:
     assert one(project_checks(SetupTarget(repo_root=tmp_path, git=git), None, env), "rerere").ok
 
 
+@pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
+def test_longpaths_check_only_on_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    git = Git(tmp_path)
+    git.run("init", "--quiet")
+    git.config_set("core.longpaths", "false")
+    monkeypatch.setattr(sys, "platform", platform)
+    checks = project_checks(SetupTarget(repo_root=tmp_path, git=git), None, make_env())
+    found = by_name(checks, "longpaths")
+    if platform != "win32":
+        assert found == []
+        return
+    assert len(found) == 1 and not found[0].ok and found[0].level is Level.WARNING
+    assert "core.longpaths" in (found[0].fix or "")
+    git.config_set("core.longpaths", "true")
+    assert one(
+        project_checks(SetupTarget(repo_root=tmp_path, git=git), None, make_env()), "longpaths"
+    ).ok
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_run_setup_enables_longpaths_on_windows_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    target = project_target(repo, FakeAdapters())
+    assert target.git is not None
+    target.git.config_set("core.longpaths", "false")
+    monkeypatch.setattr(sys, "platform", platform)
+    result = run_setup(DefaultsIO(), make_env(), target, tmp_path / "p.yml", PRESETS)
+    assert result.code == ExitCode.OK, result.messages
+    expected = "true" if platform == "win32" else "false"
+    assert target.git.config_get("core.longpaths") == expected
+    assert not any("longpaths" in m.text for m in result.messages), result.messages
+
+
 def test_forge_version_mismatch_is_warning() -> None:
     target = SetupTarget(repo_root=Path("."), config=make_config())
     check = one(project_checks(target, None, make_env(cli_version="0.3.0")), "forge_version")
@@ -785,8 +823,19 @@ def test_editor_command_order() -> None:
     assert editor_command({"EDITOR": "code --wait", "VISUAL": "nano"}) == ["nano"]
     assert editor_command({"EDITOR": "code --wait", "VISUAL": " "}) == ["code", "--wait"]
     assert editor_command({"VISUAL": "nano"}) == ["nano"]
-    assert editor_command({"EDITOR": "  "}) == ["vi"]
-    assert editor_command({}) == ["vi"]
+    assert editor_command({"EDITOR": "  "}, "linux") == ["vi"]
+    assert editor_command({}, "darwin") == ["vi"]
+
+
+def test_editor_command_on_windows() -> None:
+    """notepad by default; quotes group words and backslashes in paths survive (ADR 0021)."""
+    assert editor_command({}, "win32") == ["notepad"]
+    assert editor_command({"EDITOR": "code --wait"}, "win32") == ["code", "--wait"]
+    assert editor_command({"EDITOR": r'"C:\Program Files\Ed\ed.exe" -w'}, "win32") == [
+        r"C:\Program Files\Ed\ed.exe",
+        "-w",
+    ]
+    assert editor_command({"VISUAL": r"C:\Tools\vim.exe"}, "win32") == [r"C:\Tools\vim.exe"]
 
 
 def fake_editor(new_text: str | None, code: int = 0) -> Callable[[Sequence[str]], int]:

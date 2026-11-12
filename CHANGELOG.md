@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Native Windows support** (ADR 0021). Forge runs from PowerShell and cmd, without WSL, on Windows 10/11 with Git for Windows:
+  - **`install.ps1`**: the PowerShell installer. It checks git and gh (and offers `winget install --id GitHub.cli`), installs `uv`, installs the newest release tag or `FORGE_VERSION`, and prints the next steps.
+  - **Claims, releases and handoffs** work on Windows. The per-task lock uses `LockFileEx` (`msvcrt.locking`). The `flock` requirement and its exit-5 refusal are gone.
+  - **Automatic takeover** of an interrupted claim works on Windows, through a real process-liveness check.
+  - **UTF-8** for every text file, every git and gh call and piped output (`--json`), so non-ASCII titles and paths are safe.
+  - **CRLF checkouts are not drift**: `adapters generate --check`, `docs --check` and `init` treat CRLF and LF as equal.
+  - **`.cmd` shims** such as npm's `claude` and `codex` are found.
+  - **Locations**: the profile is `%APPDATA%\forge\profile.yml` and the machine id is `%LOCALAPPDATA%\forge\machine-id`. `XDG_CONFIG_HOME` and `XDG_STATE_HOME` override both on every platform.
+  - **`core.longpaths`**: `forge setup` turns it on, and `forge setup --check` warns when it is off.
+  - **Claude Code subagents** get `Bash, PowerShell` as tools on Windows.
+  - **CI** runs on Windows and macOS, as well as Linux.
+  - Checks, resolver commands and `setup.commands` run in `cmd.exe` on Windows. Forge does not translate them.
 - **Multi-agent planning** (ADR 0020):
   - **Thresholds**: `planning.max_tasks_per_agent` (default 10) and `planning.max_components_per_agent` (default 3) now take effect. Above the threshold, `ceil(N / max)` agents get balanced groups (12 tasks → 6 + 6, 21 → 7 + 7 + 7). The grouping is deterministic.
   - **`forge plan validate <M> --skeleton`**: skips only the `missing_field` errors for `description`, `done_when` and `tier`. Every other check runs in full.
@@ -39,6 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Windows** (ADR 0021): `forge docs --check` no longer reports a file that differs only in CRLF. `install.sh` points Windows users to `install.ps1` instead of WSL.
 - **Multi-agent planning** (ADR 0020): `forge plan assemble` rewrites `plans/<M>.yml` in a fixed format and drops its comments. Existing projects get `planner.md` and `arch-writer.md` by running `forge init` again, then `forge adapters generate --local`. Without them the prompts fall back to sequential work. Old CLIs do not know `split`, `assemble`, `arch split` or `--skeleton`, so the new prompts need the new CLI version in `forge_version`.
 - **The plan follows the architecture** (ADR 0019). The documented sequence is now `/forge-plan roadmap` → `/forge-architect M1` → merge the `arch: M1` PR → `/forge-plan M1`. `/forge-plan <M>` assigns `component`, `implements` and `uses` from the architecture and never adds a component or an interface. `/forge-dev`, `/forge-review` and the `explorer` and `reviewer` subagents read the architecture, and the reviewer checks that a change stays inside the task's component.
 - **Existing projects**: a `config.yml` without a `planning` block defaults to `architecture: optional`, so existing plans and the `forge-plan-apply` workflow keep working with no edit. New projects get `required` from `forge init`.

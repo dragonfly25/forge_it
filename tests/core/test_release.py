@@ -966,7 +966,8 @@ def test_recovery_by_tagging_the_right_commit_by_hand(world: ReleaseWorld) -> No
     with pytest.raises(PreconditionError) as exc:
         world.run()
     hint = exc.value.hint or ""
-    assert 'git tag -a v1.2.0 -m "v1.2.0 (M1)" <commit> && git push origin v1.2.0' in hint
+    assert '`git tag -a v1.2.0 -m "v1.2.0 (M1)" <commit>`' in hint
+    assert "`git push origin v1.2.0`" in hint and "&&" not in hint  # PowerShell 5.1 has no &&
     user = world.clone("carol")
     user.fetch()
     user.run("tag", "-a", "v1.2.0", "-m", "v1.2.0 (M1)", merged_tip)

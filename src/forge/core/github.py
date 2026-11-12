@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, runtime_check
 from urllib.parse import quote, urlencode
 
 from forge.core.errors import ForgeError, PreconditionError
+from forge.core.system import TEXT_ENCODING, resolve_argv
 
 IssueState = Literal["open", "closed"]
 StateFilter = Literal["open", "closed", "all"]
@@ -575,7 +576,14 @@ _STATUS_RE = re.compile(r"HTTP (\d{3})")
 
 def _subprocess_runner(argv: list[str], stdin: str | None) -> tuple[int, str, str]:
     """Default runner: ``subprocess.run`` with captured text output."""
-    proc = subprocess.run(argv, input=stdin, capture_output=True, text=True, check=False)
+    proc = subprocess.run(
+        resolve_argv(argv),
+        input=stdin,
+        capture_output=True,
+        text=True,
+        encoding=TEXT_ENCODING,
+        check=False,
+    )
     return proc.returncode, proc.stdout, proc.stderr
 
 

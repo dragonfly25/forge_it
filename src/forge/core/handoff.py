@@ -71,7 +71,7 @@ from forge.core.lease import (
     stale_at,
     upsert_lease,
 )
-from forge.core.pending import remove_pending, require_flock
+from forge.core.pending import remove_pending
 from forge.core.refresh import TaskBranch, TaskRecord, check_full_history, ensure_labels
 from forge.core.tasks import (
     TRAILER_AGENT,
@@ -694,7 +694,6 @@ def handoff(ctx: ClaimContext, issue_number: int, note: str) -> HandoffOutcome:
     step undoes the wip commit and is re-raised.
     """
     text = check_note(note)
-    require_flock()
     login = check_identity(ctx.github, ctx.profile_login)
     check_full_history(ctx.git, "handoff")
     github = ctx.github

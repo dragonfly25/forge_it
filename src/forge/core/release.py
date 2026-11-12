@@ -972,8 +972,8 @@ def _tag_target(
                 f"commit is not on {_REMOTE}/{default_branch} with the "
                 f"`{heading_prefix(version)}` section",
                 hint=f"find the {default_branch} commit that carries the section, tag it with "
-                f'`git tag -a {tag} -m "{tag_message(tag, milestone_id)}" <commit> && '
-                f"git push origin {tag}`, then re-run forge release",
+                f'`git tag -a {tag} -m "{tag_message(tag, milestone_id)}" <commit>`, push it '
+                f"with `git push origin {tag}`, then re-run forge release",
             )
         result.data["target_source"] = f"pull request #{pr.number}"
         return sha

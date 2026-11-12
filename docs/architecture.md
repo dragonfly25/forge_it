@@ -74,12 +74,13 @@ Configuration and models:
 | Module | Purpose |
 |---|---|
 | `errors.py` | `ExitCode`, `ForgeError`, `ConfigError`, `PreconditionError`. |
+| `system.py` | Operating-system differences: per-user directories, executable lookup, process liveness, editor, UTF-8 streams, atomic replace ([ADR 0021](decisions/0021-native-windows.md)). |
 | `output.py` | `Message`, `Result`, `to_envelope`, `error_result`, `dumps`: the JSON envelope. |
 | `validate.py` | YAML loading and typed field validation (`Fields`) with precise errors. |
 | `config.py` | `.forge/config.yml` loader, `check_cli_version`, adapter names. |
 | `team.py` | `.forge/team.yml` loader. |
 | `zones.py` | `.forge/zones.yml` loader, glob matching, zone overlap. |
-| `profile.py` | The machine profile `~/.config/forge/profile.yml`. |
+| `profile.py` | The machine profile `~/.config/forge/profile.yml` (`%APPDATA%\forge\profile.yml` on Windows). |
 | `tiers.py` | Abstract tiers and effort levels. |
 | `presets.py` | Loads `src/forge/presets/*.yml` (claude-code, codex, ollama). |
 | `models.py` | Model resolution, tier serving, profile constraint checks, preset drift. |
@@ -108,7 +109,7 @@ Claims:
 |---|---|
 | `claim.py` | Snapshot, candidate selection, claim commit, CAS push, post-claim verification, release. |
 | `lease.py` | Lease comment, last activity, staleness, heartbeat. |
-| `pending.py` | Pending-claim records, per-task lock, machine id. |
+| `pending.py` | Pending-claim records, per-task lock (`flock`, or `LockFileEx` on Windows), machine id. |
 | `workspace.py` | Worktree, branch checkout and `.forge/local/` state. |
 | `context.py` | The task context printed by `forge next` and `forge task show`. |
 | `handoff.py` | `forge handoff`. |

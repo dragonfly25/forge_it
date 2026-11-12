@@ -84,7 +84,7 @@ A project created before this setting has no `planning` block. A missing block, 
 
 ## Where is my profile, and does it hold secrets?
 
-Your profile is in `~/.config/forge/profile.yml` (or `$XDG_CONFIG_HOME/forge/profile.yml`). It maps tiers to models for each of your agents. It holds labels only. Forge never stores credentials. Your tools keep their own logins.
+Your profile is in `~/.config/forge/profile.yml` (or `$XDG_CONFIG_HOME/forge/profile.yml`). On Windows it is `%APPDATA%\forge\profile.yml`. It maps tiers to models for each of your agents. It holds labels only. Forge never stores credentials. Your tools keep their own logins.
 
 Show it with `forge profile show`. Change a value with `forge profile set <agent>.<tier>=<model>`.
 

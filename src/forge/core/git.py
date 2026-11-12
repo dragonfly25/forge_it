@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Literal
 
 from forge.core.errors import ForgeError
+from forge.core.system import TEXT_ENCODING
 
 GIT_ENV: Mapping[str, str] = {
     "LC_ALL": "C",
@@ -283,6 +284,7 @@ class Git:
             input=input,
             capture_output=True,
             text=True,
+            encoding=TEXT_ENCODING,
             check=False,
         )
         if check and proc.returncode != 0:
@@ -300,6 +302,7 @@ class Git:
             env=cls.env(),
             capture_output=True,
             text=True,
+            encoding=TEXT_ENCODING,
             check=False,
         )
         if proc.returncode != 0:

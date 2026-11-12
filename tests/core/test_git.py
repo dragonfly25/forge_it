@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+import sys
 import threading
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -593,6 +594,9 @@ def test_worktree_tree_with_a_split_index_leaves_the_shared_index_alone(
 
 
 @pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="root reads all")
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="chmod(0) does not make a file unreadable on Windows"
+)
 def test_worktree_tree_unreadable_file_is_a_clear_error(git_world: GitWorld) -> None:
     alice = git_world.clone("alice")
     secret = alice.cwd / "unreadable.txt"
@@ -1143,6 +1147,9 @@ def test_restore_conflict_after_rerere_and_after_add(git_world: GitWorld) -> Non
     bob.rebase_abort()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="chmod(0) does not make a file unreadable on Windows"
+)
 def test_commit_all_reports_a_failing_add_separately(git_world: GitWorld) -> None:
     alice = git_world.clone("alice")
     tip = alice.rev_parse("HEAD")

@@ -40,6 +40,7 @@ from forge.core.plan import (
     validate_plan,
 )
 from forge.core.spec import MILESTONE_RE
+from forge.core.system import replace_file
 from forge.core.tasks import description_text_problem
 from forge.core.team import Team
 from forge.core.tiers import Tier
@@ -311,7 +312,7 @@ def _atomic_write(path: Path, content: bytes) -> None:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp, path)
+        replace_file(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise

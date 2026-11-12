@@ -285,7 +285,7 @@ What is not enforced:
 | Architecture | `docs/architecture/overview.md`, `docs/architecture/<milestone>.md` | yes |
 | Decisions | `docs/decisions/` | yes |
 | Workflows | `.github/workflows/forge-*.yml` | yes |
-| A developer's profile (tiers to models, agent labels, no credentials) | `~/.config/forge/profile.yml` | no |
+| A developer's profile (tiers to models, agent labels, no credentials) | `~/.config/forge/profile.yml` (Windows: `%APPDATA%\forge\profile.yml`) | no |
 | Rendered subagents with the developer's models | `.claude/agents/forge-*.md`, `.codex/agents/forge-*.toml` | no (gitignored) |
 | Local task state, and the planning fragments (`plan/<M>/`, `arch/<M>/`) | `<worktree>/.forge/local/` | no (gitignored) |
 | Worktrees | `<parent-of-repo>/<repo>-worktrees/task-<n>/` | no |

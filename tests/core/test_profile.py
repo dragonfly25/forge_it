@@ -177,6 +177,7 @@ def test_github_login_required_and_valid(tmp_path: Path) -> None:
 
 def test_worktrees_dir_expands_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # what ~ means on Windows
     profile = load_profile(make(tmp_path, extra_top="worktrees_dir: ~/wt\n"))
     assert profile.worktrees_dir == tmp_path / "wt"
 
@@ -184,9 +185,10 @@ def test_worktrees_dir_expands_home(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 # -- profile_path -----------------------------------------------------------------------------
 
 
-def test_profile_path_uses_xdg(tmp_path: Path) -> None:
-    env = {"XDG_CONFIG_HOME": str(tmp_path / "cfg"), "HOME": "/home/x"}
-    assert profile_path(env) == tmp_path / "cfg" / "forge" / "profile.yml"
+@pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
+def test_profile_path_uses_xdg(tmp_path: Path, platform: str) -> None:
+    env = {"XDG_CONFIG_HOME": str(tmp_path / "cfg"), "HOME": "/home/x", "APPDATA": str(tmp_path)}
+    assert profile_path(env, platform) == tmp_path / "cfg" / "forge" / "profile.yml"
 
 
 @pytest.mark.parametrize("xdg", [None, "", "relative/dir"])
@@ -194,7 +196,19 @@ def test_profile_path_defaults_to_home_config(xdg: str | None) -> None:
     env = {"HOME": "/home/x"}
     if xdg is not None:
         env["XDG_CONFIG_HOME"] = xdg
-    assert profile_path(env) == Path("/home/x/.config/forge/profile.yml")
+    assert profile_path(env, "linux") == Path("/home/x/.config/forge/profile.yml")
+
+
+@pytest.mark.parametrize("xdg", [None, "", "relative/dir"])
+def test_profile_path_on_windows_is_in_appdata(tmp_path: Path, xdg: str | None) -> None:
+    env = {"APPDATA": str(tmp_path / "Roaming"), "HOME": "/home/x"}
+    if xdg is not None:
+        env["XDG_CONFIG_HOME"] = xdg
+    assert profile_path(env, "win32") == tmp_path / "Roaming" / "forge" / "profile.yml"
+    del env["APPDATA"]
+    assert profile_path(env, "win32") == (
+        Path.home() / "AppData" / "Roaming" / "forge" / "profile.yml"
+    )
 
 
 def test_load_profile_default_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

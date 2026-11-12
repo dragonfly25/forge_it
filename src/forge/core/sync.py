@@ -78,6 +78,7 @@ from forge.core.lease import (
 from forge.core.output import Level, Message, Result
 from forge.core.profile import AgentProfile
 from forge.core.refresh import parse_records
+from forge.core.system import TEXT_ENCODING, replace_file
 from forge.core.tasks import (
     BLOCKED_CONFLICT,
     FORGE_TASK_LABEL,
@@ -140,6 +141,7 @@ def run_shell(command: str, cwd: Path) -> CommandRun:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding=TEXT_ENCODING,
         errors="replace",
         check=False,
     )
@@ -514,8 +516,10 @@ class SyncRecord:
 def _write_json(path: Path, data: Any) -> None:
     ensure_local_dir(path.parent.parent.parent)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
-    os.replace(tmp, path)
+    tmp.write_text(
+        json.dumps(data, indent=2, sort_keys=False) + "\n", encoding=TEXT_ENCODING, newline="\n"
+    )
+    replace_file(tmp, path)
 
 
 def sync_file(root: Path) -> Path:

@@ -54,6 +54,15 @@ from forge.core.profile import (
     save_profile,
 )
 from forge.core.subagents import SUBAGENT_TOOLS
+from forge.core.system import (
+    TEXT_ENCODING,
+    default_editor,
+    editor_hint,
+    is_windows,
+    replace_file,
+    resolve_argv,
+    same_path,
+)
 from forge.core.team import LOGIN_RE
 from forge.core.tiers import EFFORTS, TIERS, Effort, Tier
 from forge.core.validate import Fields
@@ -113,7 +122,15 @@ def subprocess_runner(argv: Sequence[str]) -> CommandOutput:
     A missing executable gives code 127; a command still running after 60 s gives code 124.
     """
     try:
-        proc = subprocess.run(list(argv), capture_output=True, text=True, check=False, timeout=60)
+        proc = subprocess.run(
+            resolve_argv(argv),
+            capture_output=True,
+            text=True,
+            encoding=TEXT_ENCODING,
+            errors="replace",
+            check=False,
+            timeout=60,
+        )
     except FileNotFoundError:
         return CommandOutput(NOT_FOUND, "", f"{argv[0]}: command not found")
     except subprocess.TimeoutExpired:
@@ -233,9 +250,8 @@ class ProjectAdapters:
             worktrees = task_worktrees(self.git)
         except GitError as exc:
             return written, [*warnings, f"task worktrees not re-rendered: {exc.message}"]
-        main = os.path.realpath(self.repo_root)
         for _issue, path in worktrees:
-            if os.path.realpath(path) == main:
+            if same_path(path, self.repo_root):
                 continue
             extra, notes = adapters.write_local_best_effort(
                 path, profile, self.config, presets=self.presets
@@ -524,6 +540,8 @@ def project_checks(target: SetupTarget, profile: Profile | None, env: MachineEnv
             )
     if target.git is not None:
         checks.append(rerere_check(target.git))
+        if is_windows():
+            checks.append(longpaths_check(target.git))
     if target.adapters is not None and profile is not None:
         try:
             drift = target.adapters.status(profile)
@@ -572,8 +590,8 @@ def rerere_check(git: Git) -> Check:
         False,
         Level.WARNING,
         "git rerere is not enabled in this repository",
-        "run `forge setup`, or `git config rerere.enabled true && "
-        "git config rerere.autoupdate true`",
+        "run `forge setup`, or `git config rerere.enabled true`, then "
+        "`git config rerere.autoupdate true`",
     )
 
 
@@ -581,6 +599,33 @@ def enable_rerere(git: Git) -> None:
     """Enable rerere (with autoupdate) in the repository's local config."""
     git.config_set("rerere.enabled", "true")
     git.config_set("rerere.autoupdate", "true")
+
+
+def longpaths_check(git: Git) -> Check:
+    """Windows only (ADR 0021): check that ``core.longpaths`` is true for the repository.
+
+    Task worktrees sit next to the clone (``<repo>-worktrees/task-<n>/...``), so deep trees
+    such as ``node_modules`` pass the 260-character Windows path limit quickly; without
+    ``core.longpaths`` git then fails to check files out.
+    """
+    try:
+        enabled = (git.config_get("core.longpaths") or "").strip().lower() == "true"
+    except GitError:
+        enabled = False
+    if enabled:
+        return _ok("longpaths", "git core.longpaths is enabled")
+    return Check(
+        "longpaths",
+        False,
+        Level.WARNING,
+        "git core.longpaths is not enabled: checkouts deeper than 260 characters fail on Windows",
+        "run `forge setup`, or `git config core.longpaths true`",
+    )
+
+
+def enable_longpaths(git: Git) -> None:
+    """Enable ``core.longpaths`` in the repository's local config (Windows, ADR 0021)."""
+    git.config_set("core.longpaths", "true")
 
 
 def blocking(checks: Sequence[Check]) -> list[Check]:
@@ -1110,6 +1155,9 @@ def run_setup(
         enable_rerere(target.git)
         rerere = True
         io_.print("Enabled git rerere for this repository")
+        if is_windows():
+            enable_longpaths(target.git)
+            io_.print("Enabled git core.longpaths for this repository (Windows)")
     # 8. Machine-level adapters.
     rendered: list[str] = []
     if target.adapters is not None:
@@ -1159,18 +1207,35 @@ EditorRunner = Callable[[Sequence[str]], int]
 """Runs the editor argv (attached to the terminal) and returns its exit code."""
 
 
-def editor_command(env: Mapping[str, str] = os.environ) -> list[str]:
-    """Return the editor argv: ``$VISUAL``, else ``$EDITOR``, else ``vi`` (ADR 0014)."""
+def editor_command(env: Mapping[str, str] = os.environ, platform: str | None = None) -> list[str]:
+    """Return the editor argv: ``$VISUAL``, else ``$EDITOR``, else the platform default.
+
+    The default is ``vi`` (ADR 0014), or ``notepad`` on Windows (ADR 0021). On Windows the
+    value is split without POSIX escapes, so a path such as ``C:\\Tools\\ed.exe`` survives.
+    """
     for var in ("VISUAL", "EDITOR"):
         value = env.get(var, "").strip()
         if value:
-            return shlex.split(value)
-    return ["vi"]
+            return _split_command(value, platform)
+    return default_editor(platform)
+
+
+def _split_command(value: str, platform: str | None = None) -> list[str]:
+    """Split a command line. Windows: quotes group words, backslashes stay literal."""
+    if not is_windows(platform):
+        return shlex.split(value)
+    return [_unquote(word) for word in shlex.split(value, posix=False)]
+
+
+def _unquote(word: str) -> str:
+    if len(word) >= 2 and word[0] == word[-1] and word[0] in "\"'":
+        return word[1:-1]
+    return word
 
 
 def _run_editor(argv: Sequence[str]) -> int:
     try:
-        return subprocess.run(list(argv), check=False).returncode
+        return subprocess.run(resolve_argv(argv), check=False).returncode
     except FileNotFoundError:
         return NOT_FOUND
 
@@ -1203,7 +1268,7 @@ def edit_profile(
         if code != 0:
             raise ForgeError(
                 f"the editor `{' '.join(editor)}` exited with code {code}; profile unchanged",
-                hint="set $EDITOR to a working editor, e.g. `export EDITOR=nano`",
+                hint=editor_hint(),
             )
         edited = tmp.read_text(encoding="utf-8")
         try:
@@ -1227,7 +1292,7 @@ def _atomic_write(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
-        tmp.replace(path)
+        replace_file(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
@@ -1270,8 +1335,10 @@ __all__ = [
     "detect_tools",
     "edit_profile",
     "editor_command",
+    "enable_longpaths",
     "enable_rerere",
     "github_login_check",
+    "longpaths_check",
     "machine_checks",
     "machine_github",
     "parse_date_header",

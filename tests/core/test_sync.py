@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import stat
+import sys
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -39,6 +40,7 @@ from forge.core.tasks import BLOCKED_CONFLICT, TRAILER_CLAIM, TRAILER_RUN, TaskT
 from forge.core.workspace import read_current
 from forge.core.zones import Zone, ZonesConfig
 from support.scenarios import T0, Clock, UserGitHub, claim_of
+from support.shell import FAIL, PASS, file_contains
 from support.sync_world import (
     DEFAULT_RESOLVERS,
     LOCK_COMMAND,
@@ -161,7 +163,7 @@ def test_up_to_date_skips_checks_and_push(sw: SyncWorld) -> None:
     git = sw.claim("alice", n)
     tip = head(git)
     checks = Recorder()
-    out = sync(sw.ctx(config=sync_config(checks={"t": "true"}), run_check=checks))
+    out = sync(sw.ctx(config=sync_config(checks={"t": PASS}), run_check=checks))
     assert out.code == ExitCode.OK and out.outcome == "up_to_date"
     assert checks.calls == [] and sw.remote_tip(n) == tip and not out.rebased
     assert read_sync_log(git.cwd)[-1]["outcome"] == "up_to_date"
@@ -455,7 +457,7 @@ def test_abort_after_failed_checks(sw: SyncWorld) -> None:
     sw.commit("alice", "src/api/a.py", "broken\n")
     tip = head(git)
     sw.upstream({"src/web/x.js": "x\n"})
-    config = sync_config(checks={"lint": "grep -q fixed src/api/a.py"})
+    config = sync_config(checks={"lint": file_contains("src/api/a.py", "fixed")})
     assert sync(sw.ctx(config=config)).outcome == "checks_failed"
     assert head(git) != tip  # rebased
     assert sync_abort(sw.ctx(config=config)).code == ExitCode.OK
@@ -470,7 +472,7 @@ def test_failing_check_then_fix_and_continue(sw: SyncWorld) -> None:
     git = sw.claim("alice", n)
     sw.commit("alice", "src/api/a.py", "broken\n")
     sw.upstream({"src/web/x.js": "x\n"})
-    config = sync_config(checks={"lint": "grep -q fixed src/api/a.py", "unit": "true"})
+    config = sync_config(checks={"lint": file_contains("src/api/a.py", "fixed"), "unit": PASS})
 
     out = sync(sw.ctx(config=config))
 
@@ -760,14 +762,14 @@ def test_interrupted_after_push_converges_with_continue(sw: SyncWorld) -> None:
 def test_rerere_replays_an_earlier_resolution(sw: SyncWorld) -> None:
     """A resolution recorded by rerere is reused: the second sync needs no agent."""
     n, _, git = in_zone_conflict(sw)
-    failing = sync_config(checks={"gate": "false"})
+    failing = sync_config(checks={"gate": FAIL})
     assert sync(sw.ctx(config=failing)).code == ExitCode.AGENT_ACTION
     (git.cwd / "src/api/routes.py").write_text("upstream\ntask\n")
     git.add(["src/api/routes.py"])
     assert sync_continue(sw.ctx(config=failing)).outcome == "checks_failed"
     assert sync_abort(sw.ctx(config=failing)).code == ExitCode.OK
 
-    out = sync(sw.ctx(config=sync_config(checks={"gate": "true"})))
+    out = sync(sw.ctx(config=sync_config(checks={"gate": PASS})))
 
     assert out.code == ExitCode.OK and out.outcome == "pushed", out.messages
     assert (git.cwd / "src/api/routes.py").read_text() == "upstream\ntask\n"
@@ -786,7 +788,7 @@ def test_replayed_out_of_zone_rerere_resolution_escalates(sw: SyncWorld) -> None
     plain sync: it is recorded as ``rerere`` and escalates (exit 4) instead of being pushed."""
     n, m, git = out_of_zone_conflict(sw)
     tip, before, remote = head(git), status(git), sw.remote_tip(n)
-    failing = sync_config(checks={"gate": "false"})
+    failing = sync_config(checks={"gate": FAIL})
     forced = sync(sw.ctx(config=failing), SyncOptions(force_resolve=True))
     assert forced.code == ExitCode.AGENT_ACTION and forced.unresolved == ["src/web/app.js"]
     (git.cwd / "src/web/app.js").write_text("merged\n")
@@ -794,7 +796,7 @@ def test_replayed_out_of_zone_rerere_resolution_escalates(sw: SyncWorld) -> None
     assert sync_continue(sw.ctx(config=failing)).outcome == "checks_failed"  # rerere recorded
     assert sync_abort(sw.ctx(config=failing)).code == ExitCode.OK
     assert head(git) == tip and BLOCKED_CONFLICT not in sw.labels(n)
-    passing = sync_config(checks={"gate": "true"})
+    passing = sync_config(checks={"gate": PASS})
 
     out = sync(sw.ctx(config=passing))
 
@@ -943,7 +945,7 @@ def checks_failed_sync(sw: SyncWorld) -> tuple[int, Git, str, Any]:
     sw.commit("alice", "src/api/a.py", "broken\n")
     tip = head(git)
     sw.upstream({"src/web/x.js": "x\n"})
-    config = sync_config(checks={"lint": "grep -q fixed src/api/a.py"})
+    config = sync_config(checks={"lint": file_contains("src/api/a.py", "fixed")})
     assert sync(sw.ctx(config=config)).outcome == "checks_failed"
     return n, git, tip, config
 
@@ -1058,7 +1060,7 @@ def test_interrupted_after_the_wip_commit_is_undone_by_abort(sw: SyncWorld) -> N
         raise KeyboardInterrupt
 
     with pytest.raises(KeyboardInterrupt):
-        sync(sw.ctx(config=sync_config(checks={"t": "true"}), run_check=crash))
+        sync(sw.ctx(config=sync_config(checks={"t": PASS}), run_check=crash))
     record = read_sync(git.cwd)
     assert record is not None and record.state.value == "running" and record.wip
     assert head(git) != tip and git.commits("HEAD^!")[0].subject == "forge: wip"
@@ -1080,7 +1082,7 @@ def test_resolver_paths_replayed_by_rerere_go_through_the_resolver_again(sw: Syn
         {"package-lock.json": "lock upstream\n", "CHANGELOG.md": "# Changelog\n\n- upstream\n"}
     )
     tip = head(git)
-    failing = sync_config(checks={"gate": "false"}, resolvers=DEFAULT_RESOLVERS)
+    failing = sync_config(checks={"gate": FAIL}, resolvers=DEFAULT_RESOLVERS)
     first = Recorder()
     assert sync(sw.ctx(config=failing, run_command=first)).outcome == "checks_failed"
     assert first.calls == [(LOCK_COMMAND, git.cwd)]
@@ -1114,7 +1116,7 @@ def test_resolver_path_replayed_by_rerere_never_escalates_without_its_conflict(
     git = sw.claim("alice", n)
     sw.commit("alice", "CHANGELOG.md", "# Changelog\n\n- task entry\n")
     sw.upstream({"CHANGELOG.md": "# Changelog\n\n- upstream\n"})
-    failing = sync_config(checks={"gate": "false"}, resolvers=DEFAULT_RESOLVERS)
+    failing = sync_config(checks={"gate": FAIL}, resolvers=DEFAULT_RESOLVERS)
     assert sync(sw.ctx(config=failing)).outcome == "checks_failed"
     assert sync_abort(sw.ctx(config=failing)).code == ExitCode.OK
     monkeypatch.setattr(Git, "restore_conflict", lambda self, path: False)
@@ -1228,6 +1230,9 @@ def test_interrupted_abort_after_the_last_reset_converges(
     assert (git.cwd / "src/api/routes.py").read_text() == "task, edited\n"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="chmod(0) does not make a file unreadable on Windows"
+)
 def test_failing_git_add_is_not_reported_as_a_hook_rejection(sw: SyncWorld) -> None:
     n = sw.task("M1-T01", ["api"])
     git = sw.claim("alice", n)

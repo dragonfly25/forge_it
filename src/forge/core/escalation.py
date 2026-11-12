@@ -29,6 +29,7 @@ from forge.core.errors import ForgeError, PreconditionError
 from forge.core.git import CommitFiles, Git
 from forge.core.github import Comment, GitHubClient, GitHubError, PullRequest
 from forge.core.lease import load_task
+from forge.core.system import TEXT_ENCODING
 from forge.core.tasks import BLOCKED_CONFLICT, LABELS, TaskMetadata, has_label
 from forge.core.team import Team
 from forge.core.workspace import LOCAL_DIR, find_current_task
@@ -145,7 +146,7 @@ def post_once(
 def read_json_file(path: Path) -> Any:
     """Read a JSON state file; ``None`` when missing. Corrupt files raise :class:`ForgeError`."""
     try:
-        raw = path.read_text()
+        raw = path.read_text(encoding=TEXT_ENCODING)
     except FileNotFoundError:
         return None
     try:

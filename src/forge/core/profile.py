@@ -19,6 +19,7 @@ import yaml
 
 from forge.core.config import DELEGATION_MODES, DelegationMode, parse_delegation_mode
 from forge.core.errors import ForgeError
+from forge.core.system import config_home, replace_file
 from forge.core.team import LOGIN_RE
 from forge.core.tiers import EFFORTS, TIERS, Effort, Tier
 from forge.core.validate import Fields, load_yaml_mapping
@@ -61,19 +62,15 @@ class Profile:
         return [a.id for a in self.agents]
 
 
-def profile_path(env: Mapping[str, str] = os.environ) -> Path:
-    """Return the profile location: ``$XDG_CONFIG_HOME/forge/profile.yml``.
+def profile_path(env: Mapping[str, str] = os.environ, platform: str | None = None) -> Path:
+    """Return the profile location: ``<config home>/forge/profile.yml`` (ADR 0021).
 
-    Falls back to ``~/.config/forge/profile.yml`` when ``XDG_CONFIG_HOME`` is unset, empty
-    or relative (the XDG spec says relative values must be ignored).
+    ``$XDG_CONFIG_HOME/forge/profile.yml`` when that is set and absolute (the XDG spec says
+    relative values must be ignored); otherwise ``~/.config/forge/profile.yml`` on macOS and
+    Linux and ``%APPDATA%\\forge\\profile.yml`` on Windows
+    (:func:`forge.core.system.config_home`).
     """
-    xdg = env.get("XDG_CONFIG_HOME", "")
-    if xdg and Path(xdg).is_absolute():
-        base = Path(xdg)
-    else:
-        home = env.get("HOME")
-        base = (Path(home) if home else Path.home()) / ".config"
-    return base / "forge" / "profile.yml"
+    return config_home(env, platform) / "forge" / "profile.yml"
 
 
 def load_profile(path: Path | None = None) -> Profile:
@@ -254,7 +251,7 @@ def save_profile(profile: Profile, path: Path) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(dump_profile(profile))
-        tmp.replace(path)
+        replace_file(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise

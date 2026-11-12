@@ -26,6 +26,7 @@ from forge.core.validate import Fields
 from forge.core.workspace import CurrentTask, write_current
 from forge.core.zones import Zone, ZonesConfig
 from support.scenarios import AGENT, T0, Clock, HookedGit, UserGitHub, World, run
+from support.shell import append_line
 
 if TYPE_CHECKING:
     from conftest import GitWorld
@@ -40,7 +41,7 @@ SYNC_ZONES = ZonesConfig(
     }
 )
 
-LOCK_COMMAND = "printf 'regenerated\\n' >> package-lock.json"
+LOCK_COMMAND = append_line("package-lock.json", "regenerated")
 """Appends a line, so a test can tell which side ``regenerate`` started from."""
 
 

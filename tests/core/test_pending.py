@@ -30,11 +30,11 @@ from forge.core.pending import (
     prune_orphans,
     read_pending,
     remove_pending,
-    require_flock,
     run_alive,
     task_lock,
     write_pending,
 )
+from forge.core.system import is_windows
 
 if TYPE_CHECKING:
     from conftest import GitWorld
@@ -143,13 +143,27 @@ def test_an_old_record_is_dead_whatever_its_pid() -> None:
     assert not may_take_over(RECORD, SHA, host="desktop", running=alive, now=later)
 
 
-def test_pid_running(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pid_running() -> None:
+    """Runs on every platform: os.kill(pid, 0) on POSIX, OpenProcess on Windows."""
     assert pid_running(os.getpid())
     child = subprocess.Popen([sys.executable, "-c", "pass"])
     child.wait()
     assert not pid_running(child.pid)
     assert not pid_running(0) and not pid_running(-1)
 
+
+def test_pid_running_sees_a_live_child() -> None:
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert pid_running(child.pid)
+    finally:
+        child.kill()
+        child.wait()
+    assert not pid_running(child.pid)
+
+
+@pytest.mark.skipif(is_windows(), reason="os.kill(pid, 0) is the POSIX probe")
+def test_pid_running_treats_permission_denied_as_running(monkeypatch: pytest.MonkeyPatch) -> None:
     def denied(pid: int, sig: int) -> None:
         raise PermissionError(pid)
 
@@ -174,11 +188,18 @@ def test_task_lock_is_exclusive_and_removed_on_exit(git_world: GitWorld) -> None
 
 
 def test_task_lock_left_by_a_dead_process_is_free(git_world: GitWorld) -> None:
-    """A crashed holder leaves its file, but the kernel released its flock."""
+    """A crashed holder leaves its file, but the OS released its lock (flock, LockFileEx)."""
     git = git_world.clone("alice")
+    if is_windows():
+        lock = (
+            "import msvcrt; os.lseek(fd, 1 << 30, os.SEEK_SET); "
+            "msvcrt.locking(fd, msvcrt.LK_NBLCK, 1); os.lseek(fd, 0, os.SEEK_SET)"
+        )
+    else:
+        lock = "import fcntl; fcntl.flock(fd, fcntl.LOCK_EX)"
     script = (
-        "import fcntl, os, sys; fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT); "
-        "fcntl.flock(fd, fcntl.LOCK_EX); os.write(fd, b'{\"pid\": 1}'); os._exit(9)"
+        "import os, sys; fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT); "
+        f"{lock}; os.write(fd, b'{{\"pid\": 1}}'); os._exit(9)"
     )
     path = lock_path(git, 7)
     path.parent.mkdir(parents=True)
@@ -246,21 +267,26 @@ def test_prune_orphans(git_world: GitWorld) -> None:
     assert pending_path(git, 9).exists()  # unreadable: left alone
 
 
-def test_task_lock_refuses_windows(git_world: GitWorld, monkeypatch: pytest.MonkeyPatch) -> None:
-    """No O_EXCL fallback: on Windows claims stop with a clear precondition error."""
+def test_task_lock_is_held_across_processes(git_world: GitWorld) -> None:
+    """Another process cannot take a held lock, and gets it once the holder is done."""
     git = git_world.clone("alice")
-    require_flock("linux")
-    require_flock("darwin")
-    with pytest.raises(PreconditionError, match="claims need macOS, Linux or WSL") as info:
-        require_flock("win32")
-    assert info.value.code == ExitCode.PRECONDITION
-    monkeypatch.setattr(sys, "platform", "win32")
-    with (
-        pytest.raises(PreconditionError, match="claims need macOS, Linux or WSL"),
-        task_lock(git, 7),
-    ):
-        pass  # pragma: no cover - never entered
-    assert not lock_path(git, 7).exists()
+    script = (
+        "import sys; from pathlib import Path; from forge.core.git import Git; "
+        "from forge.core.pending import task_lock\n"
+        "with task_lock(Git(Path(sys.argv[1])), 7, timeout=0) as held:\n"
+        "    print('held' if held else 'busy')"
+    )
+    probe = [sys.executable, "-c", script, str(git.cwd)]
+
+    def other_process() -> str:
+        out = subprocess.run(probe, capture_output=True, text=True, encoding="utf-8", check=True)
+        return out.stdout.strip()
+
+    with task_lock(git, 7, pid=11, host="m") as held:
+        assert held
+        assert json.loads(lock_path(git, 7).read_text()) == {"pid": 11, "host": "m"}
+        assert other_process() == "busy"
+    assert other_process() == "held"
 
 
 def test_machine_id_location_honours_xdg_state_home(
@@ -268,20 +294,33 @@ def test_machine_id_location_honours_xdg_state_home(
 ) -> None:
     home = tmp_path / "home"
     state = tmp_path / "state"
-    assert machine_id_path({"XDG_STATE_HOME": str(state), "HOME": str(home)}) == (
-        state / "forge" / "machine-id"
-    )
+    for platform in ("linux", "darwin", "win32"):
+        env = {"XDG_STATE_HOME": str(state), "HOME": str(home), "LOCALAPPDATA": str(home)}
+        assert machine_id_path(env, platform) == state / "forge" / "machine-id"
     fallback = home / ".local" / "state" / "forge" / "machine-id"
-    assert machine_id_path({"HOME": str(home)}) == fallback
-    assert machine_id_path({"XDG_STATE_HOME": "", "HOME": str(home)}) == fallback
-    assert machine_id_path({"XDG_STATE_HOME": "rel/state", "HOME": str(home)}) == fallback
+    for env in ({"HOME": str(home)}, {"XDG_STATE_HOME": "", "HOME": str(home)}):
+        assert machine_id_path(env, "linux") == fallback
+    assert machine_id_path({"XDG_STATE_HOME": "rel/state", "HOME": str(home)}, "linux") == fallback
 
     monkeypatch.setenv("XDG_STATE_HOME", str(state))
     found = machine_id()
     assert (state / "forge" / "machine-id").read_text().strip() == found
     monkeypatch.delenv("XDG_STATE_HOME")
-    monkeypatch.setenv("HOME", str(home))
+    if is_windows():
+        monkeypatch.setenv("LOCALAPPDATA", str(home))
+        fallback = home / "forge" / "machine-id"
+    else:
+        monkeypatch.setenv("HOME", str(home))
     assert machine_id() != found and fallback.read_text().strip() == machine_id()
+
+
+def test_machine_id_on_windows_lives_in_local_appdata(tmp_path: Path) -> None:
+    local = tmp_path / "Local"
+    env = {"LOCALAPPDATA": str(local), "HOME": str(tmp_path / "home")}
+    assert machine_id_path(env, "win32") == local / "forge" / "machine-id"
+    assert machine_id_path({"LOCALAPPDATA": "relative"}, "win32") == (
+        Path.home() / "AppData" / "Local" / "forge" / "machine-id"
+    )
 
 
 def test_machine_id_is_kept_outside_the_clone(
@@ -315,6 +354,7 @@ def test_machine_id_is_created_once_and_shared(tmp_path: Path) -> None:
         machine_id(path)
 
 
+@pytest.mark.skipif(is_windows(), reason="chmod cannot make a directory read-only on Windows")
 def test_unwritable_state_dir_is_a_precondition_error(tmp_path: Path) -> None:
     state = tmp_path / "state"
     state.mkdir()

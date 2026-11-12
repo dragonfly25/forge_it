@@ -17,7 +17,7 @@ reused). The git common dir is shared by every worktree of one clone, so runs st
 task worktree see the same records.
 
 ``host`` is not the network hostname, which can change with the network, but a machine id
-kept outside the clone (:func:`machine_id`, ``$XDG_STATE_HOME/forge/machine-id``), so a
+kept outside the clone (:func:`machine_id`, ``<state home>/forge/machine-id``), so a
 container that shares the clone but has its own home (and pid namespace) gets its own id.
 
 Reading a record and replacing it is a read-modify-write: two runs of one clone could both
@@ -27,6 +27,7 @@ exclusive per-task lock (:func:`task_lock`).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -44,8 +45,12 @@ from typing import Any, Final
 from forge.core.errors import ForgeError, PreconditionError
 from forge.core.git import Git
 from forge.core.lease import format_time, parse_time
+from forge.core.system import TEXT_ENCODING, replace_file, state_home
+from forge.core.system import pid_running as pid_running
 
-if sys.platform != "win32":
+if sys.platform == "win32":
+    import msvcrt
+else:
     import fcntl
 
 _KEYS = ("claim", "pid", "host", "started_at")
@@ -121,8 +126,12 @@ def write_pending(git: Git, record: PendingClaim) -> Path:
     path = pending_path(git, record.issue)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    tmp.write_text(json.dumps(record.to_json(), separators=(",", ":")) + "\n")
-    os.replace(tmp, path)
+    tmp.write_text(
+        json.dumps(record.to_json(), separators=(",", ":")) + "\n",
+        encoding=TEXT_ENCODING,
+        newline="\n",
+    )
+    replace_file(tmp, path)
     return path
 
 
@@ -134,7 +143,7 @@ def read_pending(git: Git, issue_number: int) -> PendingClaim | None:
     """
     path = pending_path(git, issue_number)
     try:
-        raw = json.loads(path.read_text())
+        raw = json.loads(path.read_text(encoding=TEXT_ENCODING))
     except (OSError, ValueError):
         return None
     if not isinstance(raw, dict) or not set(_KEYS) <= set(raw) <= {*_KEYS, *_OPTIONAL_KEYS}:
@@ -244,17 +253,15 @@ def task_lock(
 ) -> Iterator[bool]:
     """Hold the exclusive lock of ``task/<issue_number>``'s record; yield False if busy.
 
-    Raises :class:`PreconditionError` on Windows (:func:`require_flock`).
-
     The lock is ``<git-common-dir>/forge/pending/task-<n>.lock``, holding ``{pid, host}``
-    (default: this process) for diagnostics, locked with ``flock`` and removed on exit. The
-    kernel releases a ``flock`` when its process dies, so a lock file left by a crashed run
-    is never "held": it is simply locked again, and no stale-lock breaking (which cannot be
-    made atomic with ``O_EXCL`` files alone) is needed. Callers keep the critical section
-    local (read and write records, no network), so ``timeout`` seconds is plenty; a lock
-    still busy after it yields False and the caller treats the task as in flight.
+    (default: this process) for diagnostics, and removed on exit. It is an OS lock that dies
+    with its process: ``flock`` on macOS and Linux, ``msvcrt.locking`` (``LockFileEx``) on
+    Windows. A lock file left by a crashed run is therefore never "held": it is simply locked
+    again, and no stale-lock breaking (which cannot be made atomic with ``O_EXCL`` files
+    alone) is needed. Callers keep the critical section local (read and write records, no
+    network), so ``timeout`` seconds is plenty; a lock still busy after it yields False and
+    the caller treats the task as in flight.
     """
-    require_flock()
     path = lock_path(git, issue_number)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = _acquire(path, timeout)
@@ -264,28 +271,11 @@ def task_lock(
     try:
         os.ftruncate(fd, 0)
         holder = {"pid": os.getpid() if pid is None else pid, "host": host}
+        os.lseek(fd, 0, os.SEEK_SET)  # Windows: _try_lock moved the position
         os.write(fd, json.dumps(holder).encode() + b"\n")
         yield True
     finally:
-        # Unlink while still holding the lock: a waiter that opened this inode notices the
-        # unlink (inode check in _acquire) and retries on a fresh file.
-        path.unlink(missing_ok=True)
-        os.close(fd)
-
-
-def require_flock(platform: str | None = None) -> None:
-    """Raise :class:`PreconditionError` where :func:`task_lock` cannot work (Windows).
-
-    Claims are serialised with ``flock``, which Windows lacks; an ``O_EXCL`` lock file would
-    need a stale-lock break that cannot be made atomic. Forge supports macOS, Linux and WSL.
-    ``platform`` defaults to ``sys.platform``.
-    """
-    if (platform if platform is not None else sys.platform) == "win32":
-        raise PreconditionError(
-            "claims need macOS, Linux or WSL: Forge serialises them with flock, which "
-            "Windows does not provide",
-            hint="run forge from WSL",
-        )
+        _release(path, fd)
 
 
 def _acquire(path: Path, timeout: float) -> int | None:
@@ -300,6 +290,7 @@ def _acquire(path: Path, timeout: float) -> int | None:
                 current = None
             if os.fstat(fd).st_ino == current:
                 return fd
+            _unlock(fd)
             os.close(fd)  # locked a file its holder had just removed: retry on the new one
             continue
         if time.monotonic() >= deadline:
@@ -307,37 +298,72 @@ def _acquire(path: Path, timeout: float) -> int | None:
         time.sleep(0.01)
 
 
-def _try_lock(path: Path) -> int | None:
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+if sys.platform == "win32":
+    # Windows locks are mandatory: a locked byte cannot be read by others. The lock covers
+    # one byte far past the holder JSON, so diagnostics can still read the file.
+    _LOCK_OFFSET = 1 << 30
+
+    def _try_lock(path: Path) -> int | None:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_BINARY, 0o644)
+        try:
+            os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            os.close(fd)
+            return None
+        return fd
+
+    def _unlock(fd: int) -> None:
+        with contextlib.suppress(OSError):
+            os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+    def _release(path: Path, fd: int) -> None:
+        # Windows cannot remove a file that is open. Unlock and close first, then remove it
+        # unless a waiter already has it open (that waiter then owns the same file, so no
+        # second lock file can appear while it is held).
+        _unlock(fd)
         os.close(fd)
-        return None
-    return fd
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+
+else:
+
+    def _try_lock(path: Path) -> int | None:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            return None
+        return fd
+
+    def _unlock(fd: int) -> None:
+        """Closing the fd releases a ``flock``; nothing to do before it."""
+
+    def _release(path: Path, fd: int) -> None:
+        # Unlink while still holding the lock: a waiter that opened this inode notices the
+        # unlink (inode check in _acquire) and retries on a fresh file.
+        path.unlink(missing_ok=True)
+        os.close(fd)
 
 
 # --------------------------------------------------------------------------- machine identity
 
 
-def state_dir(env: Mapping[str, str] = os.environ) -> Path:
-    """Forge's per-user state directory: ``$XDG_STATE_HOME/forge``.
+def state_dir(env: Mapping[str, str] = os.environ, platform: str | None = None) -> Path:
+    """Forge's per-user state directory: ``<state home>/forge`` (ADR 0021).
 
-    Falls back to ``~/.local/state/forge`` when ``XDG_STATE_HOME`` is unset, empty or
-    relative (the XDG spec says relative values must be ignored).
+    ``$XDG_STATE_HOME/forge`` when that is set and absolute; otherwise
+    ``~/.local/state/forge`` on macOS and Linux and ``%LOCALAPPDATA%\\forge`` on Windows
+    (:func:`forge.core.system.state_home`).
     """
-    xdg = env.get("XDG_STATE_HOME", "")
-    if xdg and Path(xdg).is_absolute():
-        base = Path(xdg)
-    else:
-        home = env.get("HOME")
-        base = (Path(home) if home else Path.home()) / ".local" / "state"
-    return base / "forge"
+    return state_home(env, platform) / "forge"
 
 
-def machine_id_path(env: Mapping[str, str] = os.environ) -> Path:
+def machine_id_path(env: Mapping[str, str] = os.environ, platform: str | None = None) -> Path:
     """Where :func:`machine_id` keeps the id: ``<state dir>/machine-id``."""
-    return state_dir(env) / "machine-id"
+    return state_dir(env, platform) / "machine-id"
 
 
 def machine_id(path: Path | None = None) -> str:
@@ -359,7 +385,7 @@ def machine_id(path: Path | None = None) -> str:
     tmp = path.with_name(f".machine-id.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(uuid.uuid4().hex + "\n")
+        tmp.write_text(uuid.uuid4().hex + "\n", encoding=TEXT_ENCODING, newline="\n")
         try:
             os.link(tmp, path)
         except FileExistsError:
@@ -383,32 +409,10 @@ def machine_id(path: Path | None = None) -> str:
 
 def _read_machine_id(path: Path) -> str | None:
     try:
-        text = path.read_text().strip()
+        text = path.read_text(encoding=TEXT_ENCODING).strip()
     except FileNotFoundError:
         return None
     return text if _MACHINE_ID_RE.fullmatch(text) else None
-
-
-def pid_running(pid: int) -> bool:
-    """True when a process with ``pid`` exists on this machine.
-
-    ``os.kill(pid, 0)``: ``ProcessLookupError`` means gone, ``PermissionError`` means it runs
-    under another user. On Windows signal 0 would terminate the process, so the answer there
-    is always True (never take over automatically; ``forge next --task`` still works).
-    """
-    if pid <= 0:
-        return False
-    if os.name == "nt":  # pragma: no cover - Forge v0 runs on macOS, Linux and WSL
-        return True
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return True
-    return True
 
 
 def run_alive(

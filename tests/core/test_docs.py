@@ -137,7 +137,12 @@ def test_check_and_write(tmp_path: Path) -> None:
     diff = D.check_reference(target, text)
     assert "-Changed." in diff and "+Root help." in diff
 
+    # A Windows checkout with core.autocrlf=true has CRLF: not drift (ADR 0021).
     target.write_bytes(text.replace("\n", "\r\n").encode())
+    assert D.check_reference(target, text) == []
+    assert D.write_reference(target, text) is False  # left as checked out
+
+    target.write_bytes(text.rstrip("\n").encode())  # no final newline
     assert D.check_reference(target, text, label=Path("ref.md")) == [
         "ref.md differs in whitespace or line endings"
     ]

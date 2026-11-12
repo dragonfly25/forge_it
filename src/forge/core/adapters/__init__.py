@@ -31,6 +31,7 @@ from forge.core.managed import find_region, newline_of, upsert_region
 from forge.core.presets import Preset, load_presets
 from forge.core.profile import AgentProfile, Profile
 from forge.core.prompts import AgentDef, load_agents, read_text
+from forge.core.system import same_text
 
 RENDERERS: dict[str, Callable[[Project], list[GeneratedFile]]] = {
     "generic": generic.render,
@@ -149,7 +150,7 @@ def check(repo_root: Path, project: Project) -> list[FileDrift]:
         current = _read(repo_root / file.path)
         if current is None:
             drifts.append(FileDrift(file.path, "missing"))
-        elif current != expected_content(repo_root, file):
+        elif not same_text(current, expected_content(repo_root, file)):
             drifts.append(FileDrift(file.path, "different"))
     drifts += [FileDrift(p, "extra") for p in stale_skills(repo_root, (f.path for f in files))]
     drifts += [FileDrift(p, "extra") for p in stale_regions(repo_root, project)]
@@ -184,7 +185,7 @@ def write_files(repo_root: Path, files: Iterable[GeneratedFile], report: Generat
     for file in files:
         target = repo_root / file.path
         content = expected_content(repo_root, file)
-        if _read(target) == content:
+        if same_text(_read(target), content):
             report.unchanged.append(file.path)
         else:
             write_text(target, content)

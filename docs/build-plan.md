@@ -208,3 +208,23 @@ Progress notes:
 - the `plan` and `architect` prompts pass the prompt checks (12 prompts);
 - ADR 0020 records the Claude Code and Codex verification;
 - `forge docs --check` passes.
+
+## [ ] Phase 15 — Native Windows
+- [x] `core/system.py`: per-user directories (`%APPDATA%`, `%LOCALAPPDATA%`, XDG overrides), executable lookup through `PATHEXT`, process liveness without `os.kill`, editor default, UTF-8 standard streams, `replace_file` with a short retry, `same_text` (CRLF = LF).
+- [x] Claim lock on Windows (`msvcrt.locking`); `require_flock` and its exit-5 refusal removed; automatic takeover works on Windows.
+- [x] UTF-8 for every text file, git and gh subprocess and piped output; `tests/test_portability.py` guards it.
+- [x] CRLF checkouts are not drift for `adapters generate [--check]`, `docs --check` and `init`.
+- [x] `forge setup` turns on `core.longpaths` on Windows and checks it; `$EDITOR` split with Windows rules; Claude Code subagents get `Bash, PowerShell` on Windows.
+- [x] `install.ps1`; `install.sh` points Windows users to it.
+- [x] CI: `windows-latest` and `macos-latest` jobs, `mypy --platform win32`, installer smoke test from cmd and PowerShell.
+- [x] Docs: README, spec §5.3, §6.4, §17, §19, protocol, architecture, adapters, guides, project onboarding and FAQ, CHANGELOG.
+
+See ADR 0021.
+
+**Done when:**
+- the full suite, ruff, mypy (`--platform win32` too) and `forge docs --check` pass on Linux, macOS and Windows in CI;
+- two processes racing for one task lock: exactly one holds it, on every platform;
+- `pid_running` sees a live child and a finished one on every platform;
+- a clone with `core.autocrlf=true` shows no drift and `init` rewrites nothing;
+- `install.ps1` installs Forge from the checkout on a Windows runner and `forge init`, `adapters generate --check`, `config validate` and `docs --check` succeed from PowerShell and cmd;
+- the Linux job's results are unchanged apart from the new tests.

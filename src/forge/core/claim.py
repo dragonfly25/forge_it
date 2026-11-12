@@ -69,7 +69,6 @@ from forge.core.pending import (
     prune_orphans,
     read_pending,
     remove_pending,
-    require_flock,
     run_alive,
     task_lock,
     write_pending,
@@ -1287,8 +1286,6 @@ def claim_next(ctx: ClaimContext, options: NextOptions | None = None) -> NextOut
     """
     opts = options or NextOptions()
     check_version(ctx)
-    if not opts.dry_run:
-        require_flock()
     login = check_identity(ctx.github, ctx.profile_login)
     check_full_history(ctx.git, "claims")
 
@@ -1665,7 +1662,6 @@ def release_claim(
     Raises :class:`PreconditionError` (exit 5) when the branch does not end with my claim.
     ``local_ref`` is the local branch to compare with (default ``refs/heads/task/<n>``).
     """
-    require_flock()
     login = check_identity(ctx.github, ctx.profile_login)
     check_full_history(ctx.git, "claims")
     github = ctx.github

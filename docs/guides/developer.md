@@ -12,7 +12,7 @@ cd <repo>
 forge setup
 ```
 
-`forge setup` checks your tools, creates your profile and writes the subagent files. The profile maps the tiers (`strong`, `standard`, `light`) to concrete models for each agent you use. It holds labels only, never credentials. Run `forge setup --check` any time to see what is wrong. Change a model with `forge profile set <agent>.<tier>=<model>`.
+`forge setup` checks your tools, creates your profile and writes the subagent files. The profile maps the tiers (`strong`, `standard`, `light`) to concrete models for each agent you use. It holds labels only, never credentials. It lives in `~/.config/forge/profile.yml` (on Windows, `%APPDATA%\forge\profile.yml`). On Windows, `forge setup` also turns on git's `core.longpaths`. Run `forge setup --check` any time to see what is wrong. Change a model with `forge profile set <agent>.<tier>=<model>`.
 
 ## The loop
 

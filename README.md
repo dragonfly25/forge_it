@@ -12,17 +12,25 @@ Forge v0.1.0 is the first release. It was dogfooded end to end on a sandbox GitH
 
 - git ≥ 2.38.
 - GitHub CLI `gh` ≥ 2.48, authenticated with the `repo` scope (`gh auth login`).
-- macOS or Linux. On Windows, use WSL.
+- macOS, Linux (WSL included) or Windows 10/11 natively (PowerShell or cmd) with Git for Windows.
 - `uv` (the installer below sets it up if it is missing). `uv` provisions Python itself. Forge needs Python ≥ 3.11.
 
 Note: the `forge` command name collides with Foundry's `forge` (the Solidity toolchain). If you use both, put one of them earlier on `PATH`. See [ADR 0001](docs/decisions/0001-naming-and-repository.md).
 
 ## Install
 
-Bootstrap script. It checks git and gh, installs `uv` if needed, then installs the newest release tag (or `main` when there is none yet):
+Bootstrap script. It checks git and gh, installs `uv` if needed, then installs the newest release tag (or `main` when there is none yet).
+
+macOS and Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.sh | bash
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.ps1 | iex
 ```
 
 To pin a version, set `FORGE_VERSION`, or use `uv` or `pipx` directly (replace `v0.1.0` with the tag your project uses):
@@ -33,7 +41,22 @@ uv tool install --python 3.12 "git+https://github.com/dragonfly25/forge_it@v0.1.
 pipx install "git+https://github.com/dragonfly25/forge_it@v0.1.0"
 ```
 
+On Windows (PowerShell), pin with:
+
+```powershell
+$env:FORGE_VERSION = "v0.1.0"; irm https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.ps1 | iex
+```
+
 Check it with `forge --version`. Forge is not published to PyPI. Releases are git tags. A project pins the CLI version it needs in `.forge/config.yml` (`forge_version`); see [the protocol](docs/protocol.md#13-cross-cutting-rules) for what a mismatch does.
+
+### Windows notes
+
+- Checks, resolver commands and `setup.commands` run in `cmd.exe` on Windows and in `/bin/sh` elsewhere. Forge does not translate them. A team that mixes platforms writes commands that work in both (for example `uv run pytest -q` or `npm test`), or calls a script.
+- Your profile is `%APPDATA%\forge\profile.yml` on Windows. `$XDG_CONFIG_HOME` overrides the location on every platform.
+- `forge setup` turns on git's `core.longpaths`, so deep trees such as `node_modules` check out in task worktrees.
+- Claude Code subagents get the tools `Bash, PowerShell`, so they have a shell with or without Git Bash.
+
+Details: [ADR 0021](docs/decisions/0021-native-windows.md).
 
 ## Quickstart for the lead
 
