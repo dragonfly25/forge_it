@@ -38,6 +38,7 @@ from forge.core.report import (
 from forge.core.tiers import Tier
 from forge.core.validate import Fields
 from forge.core.workspace import CurrentTask, write_current
+from support.paths import replace_paths
 from support.scenarios import (
     AGENT,
     T0,
@@ -79,9 +80,7 @@ _SHA_RE = re.compile(r"\b[0-9a-f]{40}\b")
 
 def normalize(data: dict[str, Any], tmp: Path) -> str:
     """JSON text with shas → ``<sha:N>`` (by first appearance) and temp paths → ``<tmp>``."""
-    text = json.dumps(data, indent=2) + "\n"
-    for base in sorted({str(tmp.resolve()), str(tmp)}, key=len, reverse=True):
-        text = text.replace(base, "<tmp>")
+    text = json.dumps(replace_paths(data, [tmp], "<tmp>"), indent=2) + "\n"
     seen: dict[str, str] = {}
 
     def repl(match: re.Match[str]) -> str:

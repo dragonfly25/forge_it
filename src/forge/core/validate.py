@@ -15,7 +15,7 @@ from typing import Any, Literal, TypeVar, overload
 
 import yaml
 
-from forge.core.errors import ConfigError
+from forge.core.errors import ConfigError, display_path
 
 E = TypeVar("E", bound=Enum)
 
@@ -81,7 +81,7 @@ class Fields:
 
     def __init__(self, data: Mapping[str, Any], file: Path | str, prefix: str = "") -> None:
         self.data = data
-        self.file = str(file)
+        self.file = display_path(file)  # repo-relative paths keep `/` on Windows
         self.prefix = prefix
 
     # -- helpers ---------------------------------------------------------------------------

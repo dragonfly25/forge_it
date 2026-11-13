@@ -1,0 +1,3 @@
+# Keep LF everywhere, also in Windows checkouts (ADR 0021): templates, snapshots and
+# generated docs are compared byte for byte, and uv builds the wheel from a git checkout.
+* text=auto eol=lf

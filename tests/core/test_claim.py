@@ -8,7 +8,6 @@ post-fetch) and an injected ``sleep``; nothing sleeps for real.
 
 from __future__ import annotations
 
-import sys
 import threading
 from collections.abc import Callable, Sequence
 from datetime import timedelta
@@ -1603,25 +1602,6 @@ def test_an_old_record_counts_as_dead_even_if_its_pid_runs(world: World) -> None
     assert old.claimed.issue == n and old.claimed.own and old.claimed.claim == sha
     assert not any("is still running" in w for w in old.warnings)
     assert not pending_path(git, n).exists()
-
-
-def test_claims_and_releases_refuse_windows(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
-    n = world.task("M1-T01", ["api"])
-    m = world.task("M1-T02", ["web"])
-    held = run(world.ctx("alice"), task=str(m))
-    assert held.claimed is not None
-    tip = world.remote_tip(m)
-    monkeypatch.setattr(sys, "platform", "win32")
-    with pytest.raises(PreconditionError, match="claims need macOS, Linux or WSL") as info:
-        run(world.ctx("alice"))
-    assert info.value.code == ExitCode.PRECONDITION
-    assert world.remote_tip(n) is None
-    with pytest.raises(PreconditionError, match="claims need macOS, Linux or WSL"):
-        release_claim(world.ctx("alice"), m)
-    assert world.remote_tip(m) == tip  # nothing released
-    assert world.fake.get_issue(m).assignees == ("alice",)
-    dry = run(world.ctx("alice"), dry_run=True)  # read-only: no lock needed
-    assert [c.view.issue for c in dry.candidates] == [n]
 
 
 @pytest.mark.parametrize("write", ["add_assignees", "add_labels"])

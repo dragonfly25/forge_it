@@ -26,6 +26,7 @@ from forge.core.config import ForgeConfig
 from forge.core.presets import Preset
 from forge.core.profile import AgentProfile
 from forge.core.prompts import AgentDef, Prompt
+from forge.core.system import is_windows
 
 TOOL = "claude-code"
 """Profile ``tool`` value whose agents this adapter renders subagents for."""
@@ -41,6 +42,12 @@ TOOL_MAP: dict[str, tuple[str, ...]] = {
     "shell": ("Bash",),
 }
 """Abstract subagent tools → Claude Code tool names (B9)."""
+
+WINDOWS_SHELL_TOOLS = ("Bash", "PowerShell")
+"""``shell`` on native Windows (ADR 0021): Claude Code there runs commands with ``Bash`` when
+Git Bash is installed and with ``PowerShell`` otherwise. A subagent lists both, so it has a
+shell either way. Subagent files are rendered per machine, so macOS and Linux keep ``Bash``.
+"""
 
 EFFORT_VALUES = ("low", "medium", "high", "xhigh", "max")
 
@@ -103,9 +110,16 @@ def subagent_path(name: str) -> Path:
     return AGENTS_OUT_DIR / f"{SKILL_PREFIX}{name}.md"
 
 
-def claude_tools(tools: tuple[str, ...]) -> list[str]:
-    """Map abstract tools to Claude Code tool names, in order, without duplicates."""
-    return list(dict.fromkeys(name for tool in tools for name in TOOL_MAP[tool]))
+def claude_tools(tools: tuple[str, ...], platform: str | None = None) -> list[str]:
+    """Map abstract tools to Claude Code tool names, in order, without duplicates.
+
+    ``platform`` (default ``sys.platform``) picks the shell tools: see
+    :data:`WINDOWS_SHELL_TOOLS`.
+    """
+    mapping = dict(TOOL_MAP)
+    if is_windows(platform):
+        mapping["shell"] = WINDOWS_SHELL_TOOLS
+    return list(dict.fromkeys(name for tool in tools for name in mapping[tool]))
 
 
 def render_subagent(
@@ -176,6 +190,7 @@ __all__ = [
     "SKILLS_DIR",
     "TOOL",
     "TOOL_MAP",
+    "WINDOWS_SHELL_TOOLS",
     "claude_md_region",
     "claude_tools",
     "is_claude_model",

@@ -2,11 +2,47 @@
 
 from __future__ import annotations
 
+import functools
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from forge.core.git import Git
+from forge.core.system import is_windows
+
+
+def _exact_text_io() -> None:
+    """Make tests write and read text files byte for byte on every platform.
+
+    Tests write fixtures with ``Path.write_text`` and expect the exact bytes they wrote (LF
+    endings, UTF-8). On Windows the defaults would be the ANSI code page and CRLF endings.
+    Only *missing* arguments get defaults here; ``src/forge`` always passes ``encoding`` and
+    ``newline`` itself, which ``tests/test_portability.py`` enforces, so this cannot hide a
+    product bug.
+    """
+    write: Callable[..., int] = Path.write_text
+    read: Callable[..., str] = Path.read_text
+
+    @functools.wraps(write)
+    def write_text(self: Path, data: str, *args: Any, **kwargs: Any) -> int:
+        if not args:
+            kwargs.setdefault("encoding", "utf-8")
+            kwargs.setdefault("newline", "\n")
+        return write(self, data, *args, **kwargs)
+
+    @functools.wraps(read)
+    def read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        if not args:
+            kwargs.setdefault("encoding", "utf-8")
+        return read(self, *args, **kwargs)
+
+    Path.write_text = write_text  # type: ignore[method-assign]
+    Path.read_text = read_text  # type: ignore[method-assign]
+
+
+_exact_text_io()
 
 
 @pytest.fixture(autouse=True)
@@ -35,6 +71,10 @@ def isolated_git(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempP
     gitconfig = home / ".gitconfig"
     gitconfig.write_text("")
     monkeypatch.setenv("HOME", str(home))
+    if is_windows():  # Path.home() and the per-user directories (ADR 0021)
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.setenv("APPDATA", str(home / "AppData" / "Roaming"))
+        monkeypatch.setenv("LOCALAPPDATA", str(home / "AppData" / "Local"))
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     for var in (

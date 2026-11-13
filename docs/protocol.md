@@ -105,7 +105,7 @@ Forge assigns the issue to you, sets `status:in-progress`, writes the **lease co
 
 ### Interrupted claims
 
-If a run stops after the push, the claim is incomplete: the lease comment does not name it. `forge next --task <n>` completes it. A plain `forge next` takes over only when a pending-claim record proves that the earlier run is gone. A per-task lock and the `Forge-Run` trailer keep two runs under the same identity apart. Claims and releases need `flock`, so they need macOS, Linux or WSL.
+If a run stops after the push, the claim is incomplete: the lease comment does not name it. `forge next --task <n>` completes it. A plain `forge next` takes over only when a pending-claim record proves that the earlier run is gone. A per-task lock and the `Forge-Run` trailer keep two runs under the same identity apart. Claims and releases use an OS lock that dies with its process: `flock` on macOS and Linux, `LockFileEx` (`msvcrt.locking`) on Windows. They work on all three ([ADR 0021](decisions/0021-native-windows.md)).
 
 ## 4. Handoff, release and reclaim
 
@@ -370,7 +370,7 @@ Delegation decides whether the main agent writes a task's code itself or acts as
 ## 13. Cross-cutting rules
 
 - **Version pin.** `.forge/config.yml` sets `forge_version`, a PEP 440 specifier. Forge compares the CLI's base version, so `0.1.0.dev0` satisfies `>=0.1,<0.2` ([ADR 0003](decisions/0003-version-compatibility.md)). A mismatch is a warning in `setup`, `status`, `escalate`, `propose`, `plan validate`, `sync --abort` and `review` without `--submit`. It is exit 5 in `next`, `reclaim`, `sync` (except `--abort`), `ship`, `plan apply`, `release` and `review --submit`.
-- **Models.** Repository files speak in tiers and effort. The profile in `~/.config/forge/profile.yml` maps them to concrete models. A task's tier picks the model, `config.models.min_tier_for` can raise it, and manual overrides can only raise it. An agent serves a tier with the lowest mapped tier at or above it ([ADR 0005](decisions/0005-model-resolution-and-constraints.md)).
+- **Models.** Repository files speak in tiers and effort. The profile in `~/.config/forge/profile.yml` (`%APPDATA%\forge\profile.yml` on Windows) maps them to concrete models. A task's tier picks the model, `config.models.min_tier_for` can raise it, and manual overrides can only raise it. An agent serves a tier with the lowest mapped tier at or above it ([ADR 0005](decisions/0005-model-resolution-and-constraints.md)).
 - **Identity.** The claim login is the authenticated GitHub user. If the profile's `github` differs from the `gh` login, claims stop with exit 5.
 - **Credentials.** Forge never stores credentials. The profile holds labels only.
 - **Exit codes.** `0` ok, `1` error, `2` agent action needed, `3` nothing available, `4` escalation required, `5` precondition failed. The table per command is in [architecture.md](architecture.md#exit-codes).

@@ -28,6 +28,7 @@ from typing import Any, Literal
 from forge.core.config import DelegationMode, parse_delegation_mode
 from forge.core.errors import ConfigError, ForgeError, PreconditionError
 from forge.core.git import Git
+from forge.core.system import TEXT_ENCODING, replace_file, same_path
 from forge.core.tasks import TASK_ID_RE, TaskMetadata
 
 LOCAL_DIR = Path(".forge/local")
@@ -82,13 +83,13 @@ def ensure_local_dir(workspace: Path) -> Path:
     local = workspace / LOCAL_DIR
     local.mkdir(parents=True, exist_ok=True)
     gitignore = local / ".gitignore"
-    if not gitignore.exists() or gitignore.read_text() != LOCAL_GITIGNORE:
-        gitignore.write_text(LOCAL_GITIGNORE)
+    if not gitignore.exists() or gitignore.read_text(encoding=TEXT_ENCODING) != LOCAL_GITIGNORE:
+        gitignore.write_text(LOCAL_GITIGNORE, encoding=TEXT_ENCODING, newline="\n")
     return local
 
 
 def _same_path(a: Path, b: Path) -> bool:
-    return os.path.realpath(a) == os.path.realpath(b)
+    return same_path(a, b)
 
 
 # -- git helpers (local to this module; Git has no wrapper for them) ---------------------------
@@ -385,8 +386,12 @@ def write_current(workspace: Path, current: CurrentTask) -> Path:
     local = ensure_local_dir(workspace)
     target = local / CURRENT_FILE.name
     tmp = local / f".{CURRENT_FILE.name}.{os.getpid()}.tmp"
-    tmp.write_text(json.dumps(current.to_data(), indent=2, sort_keys=False) + "\n")
-    os.replace(tmp, target)
+    tmp.write_text(
+        json.dumps(current.to_data(), indent=2, sort_keys=False) + "\n",
+        encoding=TEXT_ENCODING,
+        newline="\n",
+    )
+    replace_file(tmp, target)
     return target
 
 
@@ -464,7 +469,7 @@ def read_current(workspace: Path) -> CurrentTask | None:
     """
     file = workspace / CURRENT_FILE
     try:
-        raw = file.read_text()
+        raw = file.read_text(encoding=TEXT_ENCODING)
     except FileNotFoundError:
         return None
     try:

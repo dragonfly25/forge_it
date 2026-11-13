@@ -3,6 +3,7 @@ machine-level subagent rendering against real temporary repositories."""
 
 from __future__ import annotations
 
+import sys
 import tomllib
 from dataclasses import replace
 from pathlib import Path
@@ -329,7 +330,8 @@ def local(cfg: ForgeConfig, profile: Profile = PROFILE) -> A.LocalRender:
     return A.render_local_from(defs, profile, cfg, load_presets())
 
 
-def test_local_render_claude_concrete_models() -> None:
+def test_local_render_claude_concrete_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")  # Windows adds PowerShell (ADR 0021)
     render = local(config())
     files = {f.path.as_posix(): f.content for f in render.files}
     meta, body = meta_and_body(files[".claude/agents/forge-explorer.md"])
@@ -346,6 +348,27 @@ def test_local_render_claude_concrete_models() -> None:
     assert meta["tools"] == "Read, Grep, Glob, Edit, Write, Bash"
     meta, _ = meta_and_body(files[".claude/agents/forge-reviewer.md"])
     assert (meta["model"], meta["effort"]) == ("opus", "high")
+
+
+@pytest.mark.parametrize(
+    ("platform", "shell"), [("linux", "Bash"), ("darwin", "Bash"), ("win32", "Bash, PowerShell")]
+)
+def test_local_render_claude_shell_tools_per_platform(
+    monkeypatch: pytest.MonkeyPatch, platform: str, shell: str
+) -> None:
+    """On Windows a subagent gets Bash (Git Bash) and PowerShell, so it always has a shell."""
+    monkeypatch.setattr(sys, "platform", platform)
+    files = {f.path.as_posix(): f.content for f in local(config()).files}
+    meta, _ = meta_and_body(files[".claude/agents/forge-implementer.md"])
+    assert meta["tools"] == f"Read, Grep, Glob, Edit, Write, {shell}"
+    meta, _ = meta_and_body(files[".claude/agents/forge-explorer.md"])
+    assert meta["tools"] == "Read, Grep, Glob"  # no shell: unchanged everywhere
+    assert claude.claude_tools(("read", "shell", "shell"), platform) == [
+        "Read",
+        "Grep",
+        "Glob",
+        *shell.split(", "),
+    ]
 
 
 def test_local_render_codex_toml() -> None:
@@ -365,7 +388,8 @@ def test_local_render_codex_toml() -> None:
     assert (reviewer["model"], reviewer["model_reasoning_effort"]) == ("gpt-6-astra", "xhigh")
 
 
-def test_local_render_implementer_for_claude_and_codex() -> None:
+def test_local_render_implementer_for_claude_and_codex(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")  # Windows adds PowerShell (ADR 0021)
     files = {f.path.as_posix(): f.content for f in local(config()).files}
     meta, body = meta_and_body(files[".claude/agents/forge-implementer.md"])
     assert meta == {

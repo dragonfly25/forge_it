@@ -41,7 +41,7 @@ github:
   repo: acme/shop
 lease_hours: 24
 checks:
-  ok: "true"
+  ok: "exit 0"
 """
 
 ZONES_YML = """\

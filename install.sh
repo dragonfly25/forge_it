@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Forge bootstrap installer (spec §17, ADR 0015).
+# Forge bootstrap installer for macOS and Linux (spec §17, ADR 0015).
+# On native Windows use install.ps1 (ADR 0021).
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.sh | bash
@@ -35,13 +36,14 @@ die() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# 1. Operating system: macOS or Linux only (Windows via WSL).
+# 1. Operating system: macOS or Linux (WSL counts as Linux). Native Windows uses install.ps1.
 check_os() {
   local os
   os="$(uname -s)"
   case "${os}" in
     Darwin | Linux) info "Detected ${os}." ;;
-    *) die "Unsupported OS '${os}'. Forge supports macOS and Linux. On Windows, install WSL and run this script inside it: https://learn.microsoft.com/windows/wsl/install" ;;
+    MINGW* | MSYS* | CYGWIN*) die "This is Windows (${os}). Install Forge from PowerShell instead: irm https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.ps1 | iex" ;;
+    *) die "Unsupported OS '${os}'. Forge supports macOS, Linux and Windows (install.ps1)." ;;
   esac
 }
 

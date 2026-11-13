@@ -85,6 +85,7 @@ forge_it/
 ├─ CLAUDE.md                       # rules for building forge itself
 ├─ .claude/agents/                 # subagents used to build forge itself (ADR 0002)
 ├─ install.sh                      # bootstrap installer (macOS/Linux)
+├─ install.ps1                     # bootstrap installer (Windows, PowerShell; ADR 0021)
 ├─ docs/
 │  ├─ spec.md                      # this file
 │  ├─ build-plan.md
@@ -139,8 +140,8 @@ docs/forge/                        # onboarding.md, commands.md, roles.md, faq.m
 
 | Item | Location | Created by |
 |---|---|---|
-| forge CLI | `uv tool` / `pipx` environment | `install.sh` |
-| Personal profile | `$XDG_CONFIG_HOME/forge/profile.yml` (default `~/.config/forge/profile.yml`) | `forge setup` |
+| forge CLI | `uv tool` / `pipx` environment | `install.sh`, `install.ps1` on Windows |
+| Personal profile | `$XDG_CONFIG_HOME/forge/profile.yml` (default `~/.config/forge/profile.yml`; on Windows `%APPDATA%\forge\profile.yml`; `$XDG_CONFIG_HOME` overrides on every platform; ADR 0021) | `forge setup` |
 | Tool logins | each tool's own store (`gh auth login`, `claude`, `codex login`) | the user |
 | User-level adapter files | e.g. Codex user prompts/skills, if the tool requires user-level files | `forge setup` |
 | Rendered subagents | e.g. `<repo>/.claude/agents/forge-*.md` (gitignored), with concrete models from the profile | `forge setup`, `forge adapters generate --local` |
@@ -242,6 +243,8 @@ unzoned: warn                      # warn | error when a changed file matches no
 Two tasks **overlap** if they share a zone name, or a pair of their zones is listed under `conflicts`, or (computed) their zones' path globs intersect.
 
 ### 6.4 `~/.config/forge/profile.yml`
+
+On Windows the file is `%APPDATA%\forge\profile.yml`. `$XDG_CONFIG_HOME` overrides the location on every platform (ADR 0021).
 
 ```yaml
 github: vincenzo-s
@@ -747,13 +750,21 @@ JSON output: every command returns `{"ok": bool, "code": int, "data": {...}, "me
 
 ## 17. Installation
 
-Prerequisites (documented in README): git ≥ 2.38, GitHub CLI `gh` authenticated with the repo scope, macOS or Linux (Windows via WSL in v0).
+Prerequisites (documented in README): git ≥ 2.38, GitHub CLI `gh` authenticated with the repo scope, macOS, Linux (WSL included) or Windows 10/11 natively (PowerShell or cmd) with Git for Windows (ADR 0021).
 
-`install.sh` (bootstrap):
+Commands that Forge runs from the config (`checks`, resolver commands, `setup.commands`) use the system shell: `/bin/sh` on macOS and Linux, `cmd.exe` on Windows. Forge does not translate them. A team that mixes platforms writes commands that work in both shells, or calls a script (ADR 0021).
+
+`install.sh` (bootstrap, macOS and Linux; it points Windows users to `install.ps1`):
 1. Checks git and gh; on macOS with Homebrew offers `brew install gh`; otherwise prints instructions.
 2. Installs `uv` with the official installer if missing.
 3. `uv tool install --python 3.12 "git+https://github.com/dragonfly25/forge_it@<version>"` (uv provisions Python itself).
 4. Prints next steps: `gh auth login`, `cd <project> && forge setup`.
+
+`install.ps1` (bootstrap on Windows, in Windows PowerShell 5.1 or PowerShell 7; ADR 0021):
+1. Checks git ≥ 2.38 and gh; when winget is present, offers `winget install --id GitHub.cli`.
+2. Installs `uv` with its official PowerShell installer if missing.
+3. Picks the newest release tag (or `FORGE_VERSION`) and runs `uv tool install`.
+4. Prints next steps: `gh auth login`, then `forge setup` in the project.
 
 Alternative: `pipx install "git+https://github.com/dragonfly25/forge_it@<version>"`.
 
@@ -775,7 +786,8 @@ Language: English everywhere.
 
 ## 19. Roadmap after v0
 
-- **v1**: `forge upgrade`; Windows support; affected-only checks by zone; richer resolvers (migration renaming); `/spec` prompt (idea → ready spec); GitHub native issue dependencies/sub-issues mirroring if available; token/usage notes per task.
+- **v1**: `forge upgrade`; affected-only checks by zone; richer resolvers (migration renaming); `/spec` prompt (idea → ready spec); GitHub native issue dependencies/sub-issues mirroring if available; token/usage notes per task.
+- Windows support is no longer on this list: native Windows is supported (ADR 0021).
 - **v2**: optional orchestrator that runs headless agents on ready tasks (claim → dev → ship) within a budget, with a human approval gate on plans and merges.
 
 ---

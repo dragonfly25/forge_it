@@ -80,7 +80,7 @@ For each tool present in your profile, Forge renders with one agent of that tool
 - An agent that cannot serve the tier is rendered without a model, with a warning.
 - A model that is not a Claude alias or a `claude-...` id (a local model, say) renders as `model: inherit` for Claude, with a warning.
 - The effort is the profile's mapping of the abstract level. Values the tool does not accept are dropped, with a warning.
-- Tool mapping for Claude: `read` becomes `Read, Grep, Glob`. `edit` becomes `Edit, Write`. `shell` becomes `Bash`. Codex has no per-agent tool list, so `tools` is not rendered.
+- Tool mapping for Claude: `read` becomes `Read, Grep, Glob`. `edit` becomes `Edit, Write`. `shell` becomes `Bash` (`Bash, PowerShell` on Windows, [ADR 0021](decisions/0021-native-windows.md)). Codex has no per-agent tool list, so `tools` is not rendered.
 
 Subagents are rendered by `forge setup`, `forge profile set`, `forge profile edit` and `forge adapters generate --local`. They are also written into every task worktree: `forge next` renders them when it creates or reuses a worktree, and the profile commands re-render into all worktrees. `forge adapters generate --local` renders only the current checkout. Rendering refuses with exit 5 to write a file that git would not ignore. Add the pattern to `.gitignore` (the template already has it).
 

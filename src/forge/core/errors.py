@@ -36,11 +36,19 @@ class ForgeError(Exception):
         return self.message if self.hint is None else f"{self.message}\nFix: {self.hint}"
 
 
+def display_path(path: Path | str) -> str:
+    """A path as Forge shows it: repository-relative paths with ``/`` on every platform
+    (so messages and JSON are the same on Windows), absolute paths in the native form."""
+    if isinstance(path, str):
+        return path
+    return str(path) if path.is_absolute() else path.as_posix()
+
+
 class ConfigError(ForgeError):
     """Invalid or missing configuration file. Always names the file, the key and the fix."""
 
     def __init__(self, file: Path | str, key: str | None, problem: str, fix: str):
-        self.file = str(file)
+        self.file = display_path(file)
         self.key = key
         self.problem = problem
         where = self.file if key is None else f"{self.file}: {key}"

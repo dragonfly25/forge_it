@@ -21,13 +21,23 @@ The agent coordinates through the `forge` CLI. The CLI never calls an AI model. 
 You need:
 - git 2.38 or newer;
 - the GitHub CLI `gh`, logged in with repository access (`gh auth login`);
-- macOS or Linux (Windows through WSL).
+- macOS, Linux or Windows (native, or WSL). On native Windows you also need Git for Windows.
 
-The simplest way is the install script. It checks git and `gh`, installs `uv` if it is missing, then installs Forge. Set `FORGE_VERSION` to the version this project uses. Without it, the script installs the newest release tag:
+The simplest way is the install script. It checks git and `gh`, installs `uv` if it is missing, then installs Forge. Set `FORGE_VERSION` to the version this project uses. Without it, the script installs the newest release tag.
+
+On macOS and Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.sh | FORGE_VERSION={{forge_install_ref}} bash
 ```
+
+On Windows, in PowerShell:
+
+```powershell
+$env:FORGE_VERSION = "{{forge_install_ref}}"; irm https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.ps1 | iex
+```
+
+On Windows, the project's checks run in `cmd.exe`, so they must work there too. If a check needs `bash`, ask the lead to move it into a script that runs on every platform.
 
 If you already have `uv`, install the CLI directly, pinned to the same version:
 

@@ -417,7 +417,7 @@ def test_setup_rerun_existing_profile(
         "strong": "fable",
         "standard": "sonnet",
     }
-    assert profile.default_agent == "my-claude" and str(profile.worktrees_dir) == "/tmp/wt"
+    assert profile.default_agent == "my-claude" and profile.worktrees_dir == Path("/tmp/wt")
 
 
 def test_setup_no_tools_exits_5(

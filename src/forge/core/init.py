@@ -35,6 +35,7 @@ from forge.core.docs import DEFAULT_OUTPUT, CliDoc, registered_cli, render_refer
 from forge.core.errors import PreconditionError
 from forge.core.git import Git
 from forge.core.prompts import AGENTS_DIR, PROMPTS_DIR, RULES_PATH, parse_prompts, read_text
+from forge.core.system import same_text
 
 PLACEHOLDERS = (
     "project_name",
@@ -305,7 +306,7 @@ def init_project(
             target.is_file()
             and rel not in MERGED_FILES
             and rel not in region_paths
-            and read_text(target) != text
+            and not same_text(read_text(target), text)
         )
         if not_a_file or (differs and not force):
             conflicts.append(rel)
@@ -325,7 +326,7 @@ def init_project(
         if not target.is_file():
             write_text(target, text)
             report.created.append(rel)
-        elif read_text(target) == text:
+        elif same_text(read_text(target), text):
             report.unchanged.append(rel)
         else:
             write_text(target, text)

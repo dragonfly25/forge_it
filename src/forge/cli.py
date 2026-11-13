@@ -35,6 +35,7 @@ from forge.commands._output import GlobalOptions, run_command
 from forge.commands.plan import plan_app
 from forge.commands.task import task_app
 from forge.core.output import Result
+from forge.core.system import utf8_stdio
 
 
 def _usage_error_class(bad_parameter: type[Exception]) -> type[Exception]:
@@ -172,7 +173,13 @@ class ForgeGroup(TyperGroup):
     - Usage errors exit 1, because exit 2 means "agent action" (§16).
     - Global options are accepted before and after the subcommand
       (:func:`hoist_global_options`).
+    - On Windows stdout and stderr are switched to UTF-8 before anything is printed
+      (ADR 0021), so piped output (agents, ``--json``) never depends on the code page.
     """
+
+    def main(self, *args: Any, **kwargs: Any) -> Any:
+        utf8_stdio()
+        return super().main(*args, **kwargs)
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
         """Hoist trailing global options in front of the subcommand, then parse."""

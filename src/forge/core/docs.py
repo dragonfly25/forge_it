@@ -24,6 +24,7 @@ from typing import Literal
 
 from forge.core.errors import ForgeError, PreconditionError
 from forge.core.prompts import PROMPTS_DIR, Prompt, parse_prompts, read_text
+from forge.core.system import same_text
 
 DEFAULT_OUTPUT = Path("docs/forge/commands.md")
 """Default ``--output`` of `forge docs`, relative to the repository root."""
@@ -270,7 +271,7 @@ def diff_summary(path: Path, current: str | None, expected: str) -> list[str]:
 
     Empty when they are equal; otherwise at most :data:`DIFF_LINES` lines.
     """
-    if current == expected:
+    if same_text(current, expected):  # CRLF from a Windows checkout is not drift
         return []
     if current is None:
         return [f"{path.as_posix()} is missing"]
@@ -301,7 +302,7 @@ def check_reference(path: Path, expected: str, *, label: Path | None = None) -> 
 
 def write_reference(path: Path, text: str) -> bool:
     """Write ``text`` to ``path`` (creating parents). Returns whether the file changed."""
-    if path.is_file() and read_text(path) == text:
+    if path.is_file() and same_text(read_text(path), text):
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(text.encode("utf-8"))

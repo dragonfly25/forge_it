@@ -14,15 +14,27 @@ concurrency:
 
 jobs:
   checks:
-    runs-on: ubuntu-latest
+    name: checks (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        # Linux on both supported Pythons; macOS and native Windows on 3.12 (ADR 0021).
+        os: [ubuntu-latest]
         python-version: ["3.11", "3.12"]
+        include:
+          - os: macos-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.12"
+    defaults:
+      run:
+        shell: bash
     env:
       # Overrides the local .python-version pin for every uv command (sync and run),
       # so `uv run` does not recreate the venv with 3.12 on the 3.11 job.
       UV_PYTHON: ${{ matrix.python-version }}
+      PYTHONUTF8: "0" # test Forge's own UTF-8 handling, not Python's UTF-8 mode
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.3
@@ -34,6 +46,64 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy src/forge/core
+      - name: Type-check the Windows branches
+        if: runner.os == 'Linux'
+        run: uv run mypy --platform win32 src/forge/core
       - name: Command reference is up to date
         run: uv run forge docs --check --prompts src/forge/templates/project/.forge/prompts --output docs/commands.md
       - run: uv run pytest -q
+
+  install-windows:
+    # The PowerShell installer end to end, from this checkout (ADR 0021).
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v10.3.3
+      - name: Run install.ps1 against this commit
+        run: |
+          $env:FORGE_REPO_URL = "file:///" + ((Get-Location).Path -replace '\\', '/')
+          $env:FORGE_VERSION = (git rev-parse HEAD).Trim()
+          ./install.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Installer picks the newest release tag
+        shell: powershell # Windows PowerShell 5.1
+        run: |
+          $lines = @(
+            "aaa`trefs/tags/v0.9.0", "bbb`trefs/tags/v0.10.0", "ccc`trefs/tags/v0.10.0-rc1",
+            "ddd`trefs/tags/latest", "eee`trefs/tags/v1.2.3"
+          )
+          $script = Get-Content -Raw ./install.ps1
+          $function = [regex]::Match($script, '(?s)function Get-NewestTag.*?\n    }\r?\n').Value
+          Invoke-Expression $function
+          $found = Get-NewestTag $lines
+          if ($found -ne 'v1.2.3') { throw "expected v1.2.3, got '$found'" }
+          if ($null -ne (Get-NewestTag @("aaa`trefs/tags/latest"))) { throw 'expected no tag' }
+      - name: Smoke test from cmd and PowerShell
+        run: |
+          $bin = (uv tool dir --bin).Trim()
+          $env:Path = "$bin;$env:Path"
+          forge --version
+          cmd /c "forge --json --version"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $repo = Join-Path $env:RUNNER_TEMP 'smoke'
+          git init --quiet --initial-branch=main $repo
+          git -C $repo remote add origin https://github.com/acme/shop.git
+          forge --json --repo $repo init --adapters claude,codex | Out-File -Encoding utf8 init.json
+          if ($LASTEXITCODE) { Get-Content init.json; exit $LASTEXITCODE }
+          $envelope = Get-Content -Raw -Encoding utf8 init.json | ConvertFrom-Json
+          if (-not $envelope.ok) { throw "forge init failed: $(Get-Content -Raw init.json)" }
+          forge --json --repo $repo adapters generate --check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # gh is not logged in on the runner, so init left the lead's login as a placeholder:
+          # fill it in as the lead would, then the configuration must validate cleanly.
+          $team = Join-Path $repo '.forge/team.yml'
+          (Get-Content -Raw -Encoding utf8 $team).Replace('<github>', 'octocat') | Set-Content -NoNewline -Encoding utf8 $team
+          forge --json --repo $repo config validate
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          forge --json --repo $repo docs --check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

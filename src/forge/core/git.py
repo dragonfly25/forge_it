@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Literal
 
 from forge.core.errors import ForgeError
+from forge.core.system import TEXT_ENCODING, run_text
 
 GIT_ENV: Mapping[str, str] = {
     "LC_ALL": "C",
@@ -276,13 +277,12 @@ class Git:
         With ``check=True`` a non-zero exit raises :class:`GitError`. ``env`` adds variables on
         top of the forced git environment.
         """
-        proc = subprocess.run(
+        proc = run_text(
             ["git", *args],
             cwd=self.cwd,
             env=self.env(env),
-            input=input,
+            input=input,  # byte for byte: Windows text mode would add CR to messages
             capture_output=True,
-            text=True,
             check=False,
         )
         if check and proc.returncode != 0:
@@ -300,6 +300,7 @@ class Git:
             env=cls.env(),
             capture_output=True,
             text=True,
+            encoding=TEXT_ENCODING,
             check=False,
         )
         if proc.returncode != 0:
