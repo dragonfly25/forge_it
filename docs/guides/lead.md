@@ -19,7 +19,7 @@ Every command below runs in your agent as `/forge-<name>` in Claude Code or `$fo
 
 ## 1. Set up the project
 
-Run these once, in a clone of the product repository.
+Steps 1–3 set up the project. One lead does them, once, in a clone of the product repository. Step 4 is for every lead's machine.
 
 1. Install Forge and log in with `gh auth login`. See the README.
 2. `forge init` scaffolds the project files. It never overwrites a file without `--force` and never commits.
@@ -27,6 +27,17 @@ Run these once, in a clone of the product repository.
 4. `forge setup` prepares your machine and your profile.
 
 Run `/forge-configure --update` after a refactor that moves directories.
+
+### Joining as a lead
+
+A project can have more than one lead. A lead who joins a project that already uses Forge skips `forge init` and `/forge-configure`:
+
+1. Install Forge and log in with `gh auth login`.
+2. Clone the repository and run `forge setup` (step 4).
+3. Check that `.forge/team.yml` lists you with `roles: [dev, lead]`. If it does not, add yourself in a PR.
+4. Continue from [Specs](#2-specs), or from the step your milestone has reached. The milestones you lead have your login as `lead` in `plans/roadmap.yml`.
+
+Forge does not lock planning to one lead. Every lead can configure, plan and release. `forge release` warns when you are neither the milestone's `lead` nor a member with the role `lead`. Escalations mention every lead.
 
 Good zones make the later steps work. Cut zones along the lines you want parallel work to follow. Mark shared interfaces (API schemas, database migrations, shared types) as `contract: true`. Architecture interfaces must live in contract zones.
 

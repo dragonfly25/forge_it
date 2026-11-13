@@ -62,6 +62,8 @@ Details: [ADR 0021](docs/decisions/0021-native-windows.md).
 
 You adopt Forge in a product repository once. Everything below runs in a clone of that repository. In Claude Code the commands are `/forge-<name>`. In Codex they are `$forge-<name>`.
 
+Steps 1–3 set up the project. One lead does them, once. A lead who joins later, such as a second lead or the lead of a later milestone, installs Forge and logs in as in step 1, clones the repository and starts from step 4. A lead is a member with `lead` in their `roles` in `.forge/team.yml`. Each milestone names its lead in `plans/roadmap.yml`.
+
 1. **Install** Forge (above) and log in with `gh auth login`.
 2. **Scaffold** the project files: `forge init`. It never overwrites a file without `--force` and never commits.
 3. **Configure**: run `/forge-configure`. The agent reads your codebase, proposes `.forge/config.yml`, `team.yml` and `zones.yml`, writes them after you agree, validates them with `forge config validate` and opens a PR. Merge it. If the default branch is protected, push `.forge/`, `AGENTS.md`, `CLAUDE.md`, the adapter files, the specs, plans and docs folders and the workflows through a PR too. Forge never pushes to the default branch.
