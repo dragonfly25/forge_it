@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 runner = CliRunner()
 
 CONFIG = """\
-forge_version: ">=0.1,<0.2"
+forge_version: ">=0.2,<0.3"
 project:
   name: shop
   default_branch: main
@@ -234,7 +234,7 @@ def test_tier_refusal_exit_5_unless_force(repo: Path, fake: FakeGitHub) -> None:
 
 
 def test_version_mismatch_exit_5(repo: Path, fake: FakeGitHub) -> None:
-    (repo / ".forge" / "config.yml").write_text(CONFIG.replace(">=0.1,<0.2", ">=9"))
+    (repo / ".forge" / "config.yml").write_text(CONFIG.replace(">=0.2,<0.3", ">=9"))
     code, env = envelope(repo, "M1")
     assert code == 5
     assert "forge_version" in env["messages"][0]["text"]

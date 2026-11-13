@@ -18,8 +18,8 @@ VALUES = InitValues(
     project_name="shop",
     repo="acme/shop",
     default_branch="main",
-    forge_version=">=0.1,<0.2",
-    forge_install_ref="v0.1.0",
+    forge_version=">=0.2,<0.3",
+    forge_install_ref="v0.2.0",
     github_login="alice",
 )
 

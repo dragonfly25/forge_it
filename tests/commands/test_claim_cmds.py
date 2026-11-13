@@ -37,7 +37,7 @@ T0 = datetime(2026, 11, 2, 9, 0, tzinfo=UTC)
 ENVELOPE_KEYS = {"ok", "code", "data", "messages"}
 
 CONFIG = """\
-forge_version: ">=0.1,<0.2"
+forge_version: ">=0.2,<0.3"
 project:
   name: shop
   default_branch: main
@@ -433,7 +433,7 @@ def test_next_login_mismatch_is_code_5(env: Env) -> None:
 def test_next_version_mismatch_is_code_5(env: Env) -> None:
     n = env.task("M1-T01")
     repo = env.clone("alice")
-    (repo / ".forge/config.yml").write_text(CONFIG.replace(">=0.1,<0.2", ">=9"))
+    (repo / ".forge/config.yml").write_text(CONFIG.replace(">=0.2,<0.3", ">=9"))
     code, out = env.invoke(repo, "next")
     assert code == 5
     assert "forge_version" in out["messages"][0]["text"]

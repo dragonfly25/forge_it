@@ -52,7 +52,7 @@ def ship_config(
     resolvers: Sequence[Mapping[str, str]] = DEFAULT_RESOLVERS,
 ) -> ForgeConfig:
     data: dict[str, Any] = {
-        "forge_version": ">=0.1,<0.2",
+        "forge_version": ">=0.2,<0.3",
         "project": {"name": "shop", "default_branch": "main"},
         "github": {"repo": "acme/shop"},
         "lease_hours": 24,

@@ -4,7 +4,7 @@
 #   irm https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.ps1 | iex
 #
 # Pin a version:
-#   $env:FORGE_VERSION = "v0.1.0"; irm https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.ps1 | iex
+#   $env:FORGE_VERSION = "v0.2.0"; irm https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.ps1 | iex
 #
 # From cmd:
 #   powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.ps1 | iex"
@@ -156,7 +156,7 @@
         # A failed listing (network, authentication, wrong URL) is an error. Falling
         # back to `main` is only for a repository that has no release tag yet.
         if ($code -ne 0) {
-            Die "Could not list the release tags of $ForgeRepoUrl. Check your network and your access to the repository, or set FORGE_VERSION (for example: `$env:FORGE_VERSION = 'v0.1.0', or 'main') and run this script again."
+            Die "Could not list the release tags of $ForgeRepoUrl. Check your network and your access to the repository, or set FORGE_VERSION (for example: `$env:FORGE_VERSION = 'v0.2.0', or 'main') and run this script again."
         }
         $tag = Get-NewestTag @($refs)
         if ($tag) {

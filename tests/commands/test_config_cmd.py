@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 runner = CliRunner()
 
 CONFIG = """\
-forge_version: ">=0.1,<0.2"
+forge_version: ">=0.2,<0.3"
 project:
   name: shop
 github:
@@ -110,7 +110,7 @@ def test_warnings_only_exit_0(repo: Path) -> None:
 
 
 def test_version_mismatch_does_not_block(repo: Path) -> None:
-    (repo / ".forge" / "config.yml").write_text(CONFIG.replace(">=0.1,<0.2", ">=9"))
+    (repo / ".forge" / "config.yml").write_text(CONFIG.replace(">=0.2,<0.3", ">=9"))
     code, env = envelope(repo)
     assert code == 0
     assert env["data"]["version"]["ok"] is False

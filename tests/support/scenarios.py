@@ -74,6 +74,10 @@ AGENT = AgentProfile(
 LIGHT_AGENT = AgentProfile(id="local", tool="ollama", providers=("local",), tiers={Tier.LIGHT: "x"})
 
 
+# The scenarios pin a fixed CLI version, so a version bump of Forge does not change them.
+SCENARIO_CLI_VERSION = "0.1.0"
+
+
 def make_config(*, max_attempts: int = 5, lease_hours: int = 24, version: str = ">=0.1,<0.2"):
     data = {
         "forge_version": version,
@@ -217,6 +221,7 @@ class World:
             pid=pid,
             host=host,
             pid_running=lambda p: p in self.alive,
+            cli_version=SCENARIO_CLI_VERSION,
             **extra,
         )
 
@@ -470,7 +475,7 @@ class Seeder:
         agent: AgentProfile | None = AGENT,
         zones: ZonesConfig | None = ZONES,
         config: ForgeConfig | None = None,
-        cli_version: str = "0.1.0",
+        cli_version: str = SCENARIO_CLI_VERSION,
         cwd: Path | None = None,
         now: datetime = T0,
         github: Any = None,

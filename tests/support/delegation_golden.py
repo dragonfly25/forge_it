@@ -28,7 +28,7 @@ from support.paths import replace_paths
 T0 = datetime(2026, 11, 2, 9, 0, tzinfo=UTC)
 
 CONFIG = """\
-forge_version: ">=0.1,<0.2"
+forge_version: ">=0.2,<0.3"
 project:
   name: shop
   default_branch: main

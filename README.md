@@ -6,7 +6,7 @@ GitHub is the only coordination bus. Tasks are Issues, claims are branches, revi
 
 ## Status
 
-Forge v0.1.0 is the first release. It was dogfooded end to end on a sandbox GitHub repository; see [docs/dogfooding-v0.1.0.md](docs/dogfooding-v0.1.0.md).
+The current release is v0.2.0: milestone architecture, multi-agent planning, delegation to an implementer subagent and native Windows (see the [CHANGELOG](CHANGELOG.md)). v0.1.0, the first release, was dogfooded end to end on a sandbox GitHub repository; see [docs/dogfooding-v0.1.0.md](docs/dogfooding-v0.1.0.md).
 
 ## Prerequisites
 
@@ -33,18 +33,18 @@ Windows (PowerShell):
 irm https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.ps1 | iex
 ```
 
-To pin a version, set `FORGE_VERSION`, or use `uv` or `pipx` directly (replace `v0.1.0` with the tag your project uses):
+To pin a version, set `FORGE_VERSION`, or use `uv` or `pipx` directly (replace `v0.2.0` with the tag your project uses):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.sh | FORGE_VERSION=v0.1.0 bash
-uv tool install --python 3.12 "git+https://github.com/dragonfly25/forge_it@v0.1.0"
-pipx install "git+https://github.com/dragonfly25/forge_it@v0.1.0"
+curl -fsSL https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.sh | FORGE_VERSION=v0.2.0 bash
+uv tool install --python 3.12 "git+https://github.com/dragonfly25/forge_it@v0.2.0"
+pipx install "git+https://github.com/dragonfly25/forge_it@v0.2.0"
 ```
 
 On Windows (PowerShell), pin with:
 
 ```powershell
-$env:FORGE_VERSION = "v0.1.0"; irm https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.ps1 | iex
+$env:FORGE_VERSION = "v0.2.0"; irm https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.ps1 | iex
 ```
 
 Check it with `forge --version`. Forge is not published to PyPI. Releases are git tags. A project pins the CLI version it needs in `.forge/config.yml` (`forge_version`); see [the protocol](docs/protocol.md#13-cross-cutting-rules) for what a mismatch does.
