@@ -32,7 +32,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.3.3
 
       # Optional secret FORGE_INSTALL_TOKEN: a read-only token for a private Forge repository.
       - name: Install Forge (pinned)

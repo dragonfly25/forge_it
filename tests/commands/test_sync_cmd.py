@@ -128,7 +128,7 @@ def env(git_world: GitWorld, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
     sw = SyncWorld(git_world)
     sw.upstream(
         {
-            ".forge/config.yml": CONFIG.format(version=">=0.1,<0.2"),
+            ".forge/config.yml": CONFIG.format(version=">=0.2,<0.3"),
             ".forge/zones.yml": ZONES_YML,
             ".forge/team.yml": TEAM_YML,
         },
@@ -261,7 +261,7 @@ def test_abort_works_with_conflict_markers_in_the_config(env: Env) -> None:
     before = head(env.git())
     env.sw.upstream(
         {
-            ".forge/config.yml": CONFIG.format(version=">=0.1,<0.2") + "# bob\n",
+            ".forge/config.yml": CONFIG.format(version=">=0.2,<0.3") + "# bob\n",
             ".forge/zones.yml": ZONES_YML + "# bob\n",
         },
         author="bob",

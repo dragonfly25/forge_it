@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from typer.testing import CliRunner
 
+from forge import __version__
 from forge.cli import app
 from forge.commands import _claims, _context
 from forge.commands.status import _delegation, ago
@@ -36,7 +37,7 @@ runner = CliRunner()
 ENVELOPE_KEYS = {"ok", "code", "data", "messages"}
 
 CONFIG = """\
-forge_version: ">=0.1,<0.2"
+forge_version: ">=0.2,<0.3"
 project:
   name: shop
   default_branch: main
@@ -299,7 +300,7 @@ def test_human_output_shows_every_section(full: Path, monkeypatch: pytest.Monkey
     assert "Dropped: M1-T02" in out and "Proposed: M1-T12" in out
     assert "30m ago" in out and "30h ago" in out
     assert "! unknown labels: status:wip (#9)" in out
-    assert "✓ forge 0.1.0" in out and "satisfies <0.2,>=0.1" in out
+    assert f"✓ forge {__version__}" in out and "satisfies <0.3,>=0.2" in out
     assert "\x1b[" not in out  # no colour when stdout is not a terminal
     paths = re.compile(r"\s*in (/|[A-Za-z]:\\)")  # worktree paths: POSIX or Windows
     assert max(len(line) for line in out.splitlines() if not paths.match(line)) <= 80

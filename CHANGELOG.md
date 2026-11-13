@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-13
+
 ### Added
 
 - **Native Windows support** (ADR 0021). Forge runs from PowerShell and cmd, without WSL, on Windows 10/11 with Git for Windows:
@@ -51,6 +53,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - **Fallback**: tools without native subagents fall back to `off`.
   - **Where it shows**: the task context, the PR body and `forge status` all show the decision.
 
+### Fixed
+
+- **Project workflows** (ADR 0023): `forge init` pinned `astral-sh/setup-uv@v10`, a tag that does not exist, so `forge-ci`, `forge-radar` and `forge-plan-apply` failed before their first step. The templates now pin `astral-sh/setup-uv@v10.3.3`, the version Forge's own CI uses. Existing projects: change the pin in the three workflows by hand, and pin Forge to `v0.2.0` there and in `forge_version` (`">=0.2,<0.3"`).
+
 ### Changed
 
 - **Dependencies** (ADR 0022): typer is capped below 0.29. typer 0.29 dropped Click, and fresh installs broke `forge init` and `forge docs`.
@@ -58,7 +64,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Multi-agent planning** (ADR 0020): `forge plan assemble` rewrites `plans/<M>.yml` in a fixed format and drops its comments. Existing projects get `planner.md` and `arch-writer.md` by running `forge init` again, then `forge adapters generate --local`. Without them the prompts fall back to sequential work. Old CLIs do not know `split`, `assemble`, `arch split` or `--skeleton`, so the new prompts need the new CLI version in `forge_version`.
 - **The plan follows the architecture** (ADR 0019). The documented sequence is now `/forge-plan roadmap` → `/forge-architect M1` → merge the `arch: M1` PR → `/forge-plan M1`. `/forge-plan <M>` assigns `component`, `implements` and `uses` from the architecture and never adds a component or an interface. `/forge-dev`, `/forge-review` and the `explorer` and `reviewer` subagents read the architecture, and the reviewer checks that a change stays inside the task's component.
 - **Existing projects**: a `config.yml` without a `planning` block defaults to `architecture: optional`, so existing plans and the `forge-plan-apply` workflow keep working with no edit. New projects get `required` from `forge init`.
-- **Upgrade note**: v0.1.0 rejects the `planning` key and the new plan fields as unknown. The release that ships this change needs a minor version bump (0.2.0), and projects that use the new fields must pin `forge_version` to it.
+- **Upgrade note**: v0.1.0 rejects the `planning` key and the new plan fields as unknown. This release is therefore 0.2.0, and projects that use the new fields must pin `forge_version` to `">=0.2,<0.3"`.
 - `forge init` next steps now point the lead to `/forge-configure` and `forge config validate` instead of editing the three project files by hand (ADR 0018). Existing projects get the new prompt by running `forge init` again or by copying `configure.md` and running `forge adapters generate`.
 
 ## [0.1.0] - 2026-11-03

@@ -6,7 +6,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.sh | bash
 #
 # Pin a version when piping into bash:
-#   curl -fsSL https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.sh | FORGE_VERSION=v0.1.0 bash
+#   curl -fsSL https://raw.githubusercontent.com/dragonfly25/forge_it/main/install.sh | FORGE_VERSION=v0.2.0 bash
 #
 # Environment:
 #   FORGE_VERSION   git ref to install (tag or branch). Default: the newest
@@ -125,7 +125,7 @@ ensure_uv() {
 }
 
 # Print the newest release tag found in the `git ls-remote` output given as
-# $1 (for example v0.1.0), or nothing when there is none.
+# $1 (for example v0.2.0), or nothing when there is none.
 #
 # Only stable tags of the form v<number>.<number>.<number> count. The newest is
 # found with awk, comparing the three numbers one by one, because `sort -V` is
@@ -165,7 +165,7 @@ resolve_version() {
   # A failed listing (network, authentication, wrong URL) is an error. Falling
   # back to `main` is only for a repository that has no release tag yet.
   if ! refs="$(GIT_TERMINAL_PROMPT=0 git ls-remote --tags --refs "${FORGE_REPO_URL}")"; then
-    die "Could not list the release tags of ${FORGE_REPO_URL}. Check your network and your access to the repository, or set FORGE_VERSION (for example FORGE_VERSION=v0.1.0, or FORGE_VERSION=main) and run this script again."
+    die "Could not list the release tags of ${FORGE_REPO_URL}. Check your network and your access to the repository, or set FORGE_VERSION (for example FORGE_VERSION=v0.2.0, or FORGE_VERSION=main) and run this script again."
   fi
   tag="$(newest_tag "${refs}")"
   if [ -n "${tag}" ]; then

@@ -152,7 +152,7 @@ Init then runs the project-level adapters, which add `AGENTS.md`, `CLAUDE.md`, `
   - install Forge pinned to `{{forge_install_ref}}` with `uv tool install`;
   - check out with `fetch-depth: 0`, because Forge refuses shallow clones;
   - use `GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}` with `permissions: {issues: write, pull-requests: write, contents: read}`.
-- **Action versions**: `actions/checkout@v7` and `astral-sh/setup-uv@v10` (major tags; the latest releases on 2026-11-03 were v7.0.1 and v10.3.3).
+- **Action versions**: `actions/checkout@v7` and `astral-sh/setup-uv@v10` (major tags; the latest releases on 2026-11-03 were v7.0.1 and v10.3.3). Superseded for setup-uv by [ADR 0023](0023-pin-workflow-actions.md): setup-uv publishes no `v10` tag.
 - **`forge-ci.yml`** (pull requests): runs `forge adapters generate --check`, plus a clearly marked step where the project runs its own checks (the commands from `config.checks`, which the lead copies in).
 - **`forge-plan-apply.yml`** (push to the default branch touching `plans/*.yml`): runs `forge plan validate` then `forge plan apply` for each changed milestone plan.
 - **`forge-radar.yml`**: push to the default branch and an hourly schedule, running `forge refresh --radar`.

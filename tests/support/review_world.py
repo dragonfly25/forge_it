@@ -47,7 +47,7 @@ ZONES = ZonesConfig(
 def review_config(min_tier_for: Mapping[str, str] | None = None) -> ForgeConfig:
     """A project config with an optional ``models.min_tier_for``."""
     data: dict[str, Any] = {
-        "forge_version": ">=0.1,<0.2",
+        "forge_version": ">=0.2,<0.3",
         "project": {"name": "shop", "default_branch": "main"},
         "github": {"repo": "acme/shop"},
     }

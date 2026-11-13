@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 runner = CliRunner()
 
 CONFIG = """\
-forge_version: ">=0.1,<0.2"
+forge_version: ">=0.2,<0.3"
 project:
   name: shop
   default_branch: main
@@ -270,7 +270,7 @@ def test_no_config_exit_5(repo: Path) -> None:
 
 
 def test_version_mismatch_is_a_warning(repo: Path) -> None:
-    text = CONFIG.replace('">=0.1,<0.2"', '">=99"')
+    text = CONFIG.replace('">=0.2,<0.3"', '">=99"')
     (repo / ".forge" / "config.yml").write_text(text)
     code, env = envelope(repo, "M1")
     assert code == 0
