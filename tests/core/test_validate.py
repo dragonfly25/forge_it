@@ -271,3 +271,12 @@ def test_reject_unknown_without_suggestion_lists_allowed() -> None:
 
 def test_reject_unknown_passes_when_all_known() -> None:
     fields({"github": "a"}).reject_unknown(["github", "roles"])
+
+
+def test_fields_name_relative_files_with_slashes_on_every_platform(tmp_path: Path) -> None:
+    """Messages and JSON show `.forge/x.yml` on Windows too; absolute paths stay native."""
+    relative = Fields({}, Path(".forge") / "config.yml")
+    assert relative.file == ".forge/config.yml"
+    assert relative.fail("k", "bad", "fix it").file == ".forge/config.yml"
+    absolute = Fields({}, tmp_path / "config.yml")
+    assert absolute.file == str(tmp_path / "config.yml")

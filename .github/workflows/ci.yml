@@ -99,6 +99,10 @@ jobs:
           if (-not $envelope.ok) { throw "forge init failed: $(Get-Content -Raw init.json)" }
           forge --json --repo $repo adapters generate --check
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # gh is not logged in on the runner, so init left the lead's login as a placeholder:
+          # fill it in as the lead would, then the configuration must validate cleanly.
+          $team = Join-Path $repo '.forge/team.yml'
+          (Get-Content -Raw -Encoding utf8 $team).Replace('<github>', 'octocat') | Set-Content -NoNewline -Encoding utf8 $team
           forge --json --repo $repo config validate
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           forge --json --repo $repo docs --check
