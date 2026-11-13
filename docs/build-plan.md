@@ -209,7 +209,7 @@ Progress notes:
 - ADR 0020 records the Claude Code and Codex verification;
 - `forge docs --check` passes.
 
-## [ ] Phase 15 — Native Windows
+## [x] Phase 15 — Native Windows
 - [x] `core/system.py`: per-user directories (`%APPDATA%`, `%LOCALAPPDATA%`, XDG overrides), executable lookup through `PATHEXT`, process liveness without `os.kill`, editor default, UTF-8 standard streams, `replace_file` with a short retry, `same_text` (CRLF = LF).
 - [x] Claim lock on Windows (`msvcrt.locking`); `require_flock` and its exit-5 refusal removed; automatic takeover works on Windows.
 - [x] UTF-8 for every text file, git and gh subprocess and piped output; `tests/test_portability.py` guards it.
