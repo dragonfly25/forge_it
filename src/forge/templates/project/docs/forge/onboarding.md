@@ -126,9 +126,20 @@ A teammate runs `/forge-review <pr-number>`. Their agent checks the pull request
 
 Then run `/forge-next` again.
 
-## For the lead: adopt Forge in a new project
+## For a lead who joins a project that already uses Forge
 
-The lead runs `forge init` once, then:
+A project can have more than one lead, for example a second lead or the lead of a later milestone. If the project already has `.forge/config.yml`, it is already set up: do not run `forge init` or `/forge-configure` to set it up again. `/forge-configure --update` stays available for later changes.
+
+1. Install Forge (section 1) and log in with `gh auth login`.
+2. Clone the repository and run `forge setup` (section 2).
+3. Check that `.forge/team.yml` lists your GitHub login with `roles: [dev, lead]`. If it does not, add yourself in a pull request.
+4. Run `/forge-status` to see where the project stands, then continue from the step the work has reached in the planning order below (step 4 of the next section): specs and roadmap, then architecture, then the plan of each milestone. The milestones you lead have your login as `lead` in `plans/roadmap.yml`.
+
+Forge does not lock planning to one lead. Every lead can configure, plan and release. Agree with the other leads who leads which milestone.
+
+## For the first lead: adopt Forge in a new project
+
+One lead does this once, when the project starts using Forge. The lead runs `forge init`, then:
 1. Runs `/forge-configure` (Codex: `$forge-configure`). The agent reads the codebase and proposes the three project files. After the lead agrees, it writes them, runs `forge config validate`, goes through the warnings with the lead and opens a PR.
    - `.forge/config.yml`: repository, checks, setup commands, model constraints.
    - `.forge/team.yml`: one entry per person.

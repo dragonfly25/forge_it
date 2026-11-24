@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **Project docs**: `docs/forge/onboarding.md` gains a section for a lead who joins a project that already uses Forge: install, `forge setup`, check `team.yml`, and skip `forge init` and `/forge-configure`. The first-lead section is renamed to say it runs once. `roles.md` points to it. Existing projects get it by copying the section, or with `forge init --force` on these two files only.
+
 ## [0.2.0] - 2026-11-13
 
 ### Added
